@@ -58,18 +58,29 @@ ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator IN SCHEMA app
 - **Provisioning check and CI test (must return zero rows):**
 
 ```sql
-SELECT grantee, table_schema, table_name, privilege_type
-FROM information_schema.role_table_grants
-WHERE table_schema IN ('app', 'river')
-  AND grantee IN ('anon', 'authenticated', 'service_role', 'PUBLIC');
+-- information_schema.role_table_grants only shows roles the current user belongs to,
+-- so it can return zero rows while grants exist. Use has_table_privilege, which checks
+-- the real privilege for any role regardless of who runs the query.
+SELECT r.rolname, n.nspname, c.relname, p.priv
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+CROSS JOIN (VALUES ('anon'), ('authenticated'), ('service_role')) AS r(rolname)
+CROSS JOIN (VALUES ('SELECT'), ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) AS p(priv)
+WHERE n.nspname IN ('app', 'river')
+  AND c.relkind IN ('r', 'p', 'v', 'm')
+  AND has_table_privilege(r.rolname, c.oid, p.priv);
 ```
+
+The CI test must also assert that the three roles exist (otherwise `has_table_privilege` errors) and
+that `has_schema_privilege(role, 'app', 'USAGE')` is false for each. Also check `PUBLIC` grants
+with `aclexplode(c.relacl)` where `grantee = 0`.
 
 - Run Supabase's security and performance advisors after every migration that creates a table, and treat an RLS or exposure finding as a failing check.
 
 ### 3. Connection mode
 
 - `core-api` and the River workers use the **shared pooler in session mode (port 5432, IPv4)**. Reasons: River uses `LISTEN/NOTIFY` and advisory locks for leader election, `pgx` uses prepared statements by default, and `InTenantTx` is simplest to reason about on a session-stable connection.
-- If the host that runs `core-api` has IPv6 (decided in ADR-007), prefer the **direct connection**, which has no pooler in the path. GitHub Actions and Vercel are IPv4-only per the Supabase docs, so CI against a hosted database goes through the pooler.
+- If the host that runs `core-api` has IPv6 (decided in ADR-007), prefer the **direct connection**, which has no pooler in the path. GitHub-hosted runners and Vercel have historically been IPv4-only (unverified here; re-check at provisioning), so assume CI and Vercel reach a hosted database through the pooler. ADR-007 depends on this.
 - Migrations run as `qp_migrator` over the direct connection when reachable, otherwise session mode. Never through transaction mode.
 - `InTenantTx` uses `SELECT set_config('app.current_organization_id', $1, true)` inside the transaction. The `true` makes it transaction-local, so it also stays correct if the connection mode ever changes to transaction pooling. The isolation suite includes pooled reuse A then B to prove it.
 - Pool sizing: `pgxpool` max connections for `core-api` plus workers must stay below the project's connection limit for its compute size minus Supabase's own reserved connections. Record the numbers in the config and re-check when the compute size changes.
@@ -91,7 +102,7 @@ WHERE table_schema IN ('app', 'river')
 
 - **Local and CI:** `pgvector/pgvector:pg16` via `docker-compose.yml`. An init script creates the same roles and schemas as production, so the isolation suite runs against the real role model. The Supabase local stack is not required.
 - **Hosted:** one shared staging project for the team first (`quotepilot-staging`); a production project is created before the pilot tenants go live. Creating either is a cost and account decision for Pedro, and nothing is created without his explicit go-ahead.
-- Region: choose the region closest to `core-api` and the pilot users (São Paulo if offered; verify in the dashboard at creation time). Tenant data (rates, customers, margins) stays in the chosen region. The Supabase project already visible in Pedro's connected account belongs to another project (us-east-1) and is not reused.
+- Region: choose the region closest to `core-api` and the pilot users (São Paulo if offered; verify in the dashboard at creation time). Tenant data (rates, customers, margins) stays in the chosen region.
 - Free-tier projects have historically been paused after a period of inactivity (not re-verified here; check the current policy), and backups depend on the plan. The staging project used for demos must be on a plan that does not pause, and the final on 12/12 must not depend on a free project.
 
 ### 7. Account, secrets, backups
