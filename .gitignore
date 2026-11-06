@@ -1,0 +1,12 @@
+.omc/
+.superpowers/
+docs/superpowers/
+.env
+.env.*
+!.env.example
+.DS_Store
+.claude/skills/golang-*/
+# Public repo: product spec and Notion review comments stay local (repo is PUBLIC)
+docs/specs/private/
+docs/notion-comments-sections-4-5.md
+.claude/settings.local.json
