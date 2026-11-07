@@ -1,4 +1,4 @@
-# ADR / RFC plan and status (as of 2026-11-06)
+# ADR / RFC plan and status (as of 2026-11-07)
 
 ADR = a decision we make and record. RFC = a proposal that needs input from others before it becomes a decision.
 
@@ -8,11 +8,11 @@ ADR = a decision we make and record. RFC = a proposal that needs input from othe
 |---|---|---|---|
 | ADR-001 | Modular monorepo: Go core + stateless Python ai-engine, contracts-first | **Drafted** (Proposed) | Needs team buy-in (Marcelo prefers Python). PT justification message ready. Reversible via contract. |
 | ADR-002 | Go core stack: pgx v5, sqlc, `InTenantTx`, migrations tool, HTTP router, oapi-codegen, testcontainers, decimal lib, spike gate | **To write** | Spike criteria are in `CLAUDE.md`. Can be written now. |
-| ADR-003 | Postgres on Supabase: roles, pooler mode, extensions, storage, local dev | **Drafted** (Proposed) | Supabase used as plain Postgres + S3 only: own roles (no BYPASSRLS), own schema, Data API off, session-mode pooler or direct. Open: region and plan, account owner, connection limits. Provisioning checklist is in the ADR. |
+| ADR-003 | Postgres on Supabase: roles, pooler mode, extensions, storage, local dev | **Drafted** (Proposed) | Supabase used as plain Postgres + S3 only: own roles (no BYPASSRLS), own schema, Data API off, session-mode pooler or direct. Open: region and plan, account owner, connection limits. Provisioning checklist is in the ADR. Local role model implemented in `infra/postgres/` (PR #2); departures from the first sketch are in the ADR's Revision notes. ADR-003 owns the role model and the acceptance checks; ADR-007 owns the hosted provisioning runbook (roles, schemas, default privileges, search_path, extensions). |
 | ADR-004 | Quote pipeline as staged River jobs; worker is the only caller of the pricing engine (MVP) | **Drafted** (Proposed) | Retry counts and per-stage timeouts to tune in the spike. |
 | ADR-005 | Auth (magic link + JWT), tenant resolution path, 1-click approval token | **To write** | Includes the privileged path for pre-tenant lookups (alias to org, memberships). |
 | ADR-006 | Testing strategy: schema lint, isolation tests, money tests, contract tests | **To write** (new) | Isolation proof is a core demo asset. |
-| ADR-007 | CI/CD and environments: registry, dev/staging, deploy mechanism, secrets, IPv4/IPv6 path per environment | **To write** (new) | Written during Mission 2. Deploy jobs wait for it. |
+| ADR-007 | CI/CD and environments: registry, dev/staging, deploy mechanism, secrets, IPv4/IPv6 path per environment, hosted DB provisioning (roles, schemas, default privileges, search_path, extensions) | **To write** (new) | Written during Mission 2. Deploy jobs wait for it. Hosted DB provisioning depends on ADR-003 section 6. |
 
 ## RFCs
 
