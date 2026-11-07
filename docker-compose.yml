@@ -1,0 +1,30 @@
+# Local development stack. All values come from .env (see .env.example);
+# no secrets in this file. Only the db service exists for now.
+services:
+  db:
+    # Pinned tag; bump deliberately. ADR-003 section 4 requires pgvector >= 0.8.
+    image: pgvector/pgvector:0.8.2-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      QP_MIGRATOR_PASSWORD: ${QP_MIGRATOR_PASSWORD:?set QP_MIGRATOR_PASSWORD in .env}
+      QP_APP_PASSWORD: ${QP_APP_PASSWORD:?set QP_APP_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Also requires the qp_app role, so a failed first init (init scripts run
+      # once) shows up as unhealthy instead of a ready-looking empty database.
+      # No password: relies on the image's pg_hba trust rule for 127.0.0.1.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB && psql -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB -tAc \"select 1 from pg_roles where rolname = 'qp_app'\" | grep -q 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
