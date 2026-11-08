@@ -40,9 +40,15 @@ lint:
 contracts-drift:
 	@echo "stub: would regenerate Go, Pydantic and TypeScript from packages/contracts and sqlc, and fail on any diff"
 
-# db-up is not part of ci yet; add it before test-integration once that target stops being a stub.
+# Local parity with the CI workflow (.github/workflows/ci.yml): lint, unit
+# tests, bring Postgres up, prove the role model, then the integration suite
+# and the contracts drift check. `db-up` needs `.env` — `cp .env.example .env`
+# and fill it in first.
 ci:
 	$(MAKE) lint
 	$(MAKE) test
+	$(MAKE) db-up
+	$(MAKE) db-check
+	$(MAKE) db-check-negative
 	$(MAKE) test-integration
 	$(MAKE) contracts-drift
