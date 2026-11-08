@@ -4,7 +4,7 @@ Source of truth for shapes shared between `core-api`, `ai-engine` and `web`.
 
 ## What belongs here
 
-- OpenAPI 3.1 specs and JSON Schema files.
+- OpenAPI 3.0.3 specs and JSON Schema files (3.0.3, not 3.1 — see ADR-002).
 - Codegen configuration for Go, Pydantic and TypeScript.
 
 ## What must never go here
