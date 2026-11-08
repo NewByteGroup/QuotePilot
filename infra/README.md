@@ -17,7 +17,8 @@ Local infrastructure: Docker Compose support files and database init scripts.
 
 - `make db-up` (from the repo root): start Postgres 16 with pgvector. Needs `.env`.
 - `make db-reset`: destroy the local volume and re-run the init scripts.
-- Checks: `docker compose exec -T db sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/checks/roles.sql` (expected results are in the file's comments).
+- Checks: `make db-check`, i.e. `docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/checks/roles.sql`. Each assertion raises an error naming the offenders.
+- `make db-check-negative`: applies deliberate mutations and expects `roles.sql` to fail on each. The negative tests wrap every mutation in a transaction that is never committed.
 
 ## Gotcha: init runs once
 
@@ -36,3 +37,17 @@ The init script is not a hosted provisioning runbook. On Supabase the `postgres`
 superuser and must be a member of `qp_migrator` to set default privileges for it. The
 `extensions` schema already exists there (do not `CREATE` it). The full hosted provisioning
 steps are deferred to ADR-007.
+
+### What will false-fail on hosted (`make db-check` equivalent)
+
+Expected failures when `roles.sql` is pointed at hosted Supabase, to be resolved in ADR-007
+(not yet written). Items marked "unverified" have not been tried against a real project.
+
+- `[B3]`: the platform `postgres` role is a member of `qp_migrator` (see above); needs an allowlist.
+- `[G]`: fails unless `REVOKE TEMPORARY ON DATABASE ... FROM PUBLIC` was applied. Who owns the
+  database on Supabase, and so who may run that revoke, is unverified.
+- `[M]`: flags partitions that lack their own ENABLE + FORCE RLS. This is intended.
+- `[X]` (allowlist of grantees in `app`/`river`) needs a named exception list for platform roles
+  there; unverified which roles Supabase grants by default.
+- Not a failure, but worth knowing: global default-ACL rows of platform roles are not checked
+  (`[K1b]` checks only `qp_migrator`; `[K5]` only per-schema rows in `app` and `river`).
