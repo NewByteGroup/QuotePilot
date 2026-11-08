@@ -1,0 +1,746 @@
+# CI pipeline for the QuotePilot monorepo.
+#
+# Job names are the contract with branch protection (AGENTS.md, CI/CD): renaming
+# one breaks the required checks on `develop` and `main`.
+#
+# Stub-gating pattern: every app-specific step first detects the app's manifest —
+# apps/core-api/go.mod, apps/ai-engine/pyproject.toml|requirements*.txt,
+# apps/web/package.json, a spec/codegen config under packages/contracts, and
+# apps/*/Dockerfile. When the manifest is absent the step echoes a
+# "stub: ... activates when <manifest> lands" notice and exits 0. The check is a
+# real PASS, never a job-level `if:` skip, so branch protection can require every
+# job from day one while the apps are still skeletons.
+#
+# infra/postgres is REAL from day one: integration-test and migrations run the
+# pgvector service container, apply infra/postgres/init/01-roles-and-schemas.sh
+# as an explicit step (service containers start BEFORE checkout, so a workspace
+# volume mount into /docker-entrypoint-initdb.d cannot work), then run
+# infra/postgres/checks/{roles.sql,negative-tests.sh} against it.
+
+name: ci
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Always runs for real: it lints this very file.
+      - name: Install actionlint
+        run: |
+          curl -sSfL -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Lint workflow files
+        run: actionlint -color .github/workflows/*.yml
+
+      - name: Set up Go
+        if: ${{ hashFiles('apps/core-api/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/core-api/go.mod
+          cache: true
+          cache-dependency-path: apps/core-api/go.sum
+
+      - name: Go lint (gofmt + golangci-lint)
+        run: |
+          if [ ! -f apps/core-api/go.mod ]; then
+            echo "stub: no Go toolchain yet — check activates when apps/core-api/go.mod lands"
+            exit 0
+          fi
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt: files need formatting:"
+            echo "$unformatted"
+            exit 1
+          fi
+          # golangci-lint v2.15.0 — pinned release tarball, like every other
+          # tool in this workflow. The linter set (govet, staticcheck, errcheck,
+          # gosec, depguard...) is ADR-002 and lives in
+          # apps/core-api/.golangci.yml once it lands.
+          curl -sSfL -o /tmp/golangci-lint.tar.gz \
+            https://github.com/golangci/golangci-lint/releases/download/v2.15.0/golangci-lint-2.15.0-linux-amd64.tar.gz
+          tar -xzf /tmp/golangci-lint.tar.gz -C /tmp --wildcards '*/golangci-lint'
+          install -m 0755 /tmp/golangci-lint-2.15.0-linux-amd64/golangci-lint "$(go env GOPATH)/bin/golangci-lint"
+          cd apps/core-api && "$(go env GOPATH)/bin/golangci-lint" run
+
+      - name: Set up Python
+        if: ${{ hashFiles('apps/ai-engine/pyproject.toml', 'apps/ai-engine/requirements.txt', 'apps/ai-engine/requirements-dev.txt') != '' }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            apps/ai-engine/pyproject.toml
+            apps/ai-engine/requirements.txt
+            apps/ai-engine/requirements-dev.txt
+
+      - name: Python lint (ruff + type check)
+        run: |
+          if [ ! -f apps/ai-engine/pyproject.toml ] && ! compgen -G 'apps/ai-engine/requirements*.txt' > /dev/null; then
+            echo "stub: no Python toolchain yet — check activates when apps/ai-engine/pyproject.toml or requirements*.txt lands"
+            exit 0
+          fi
+          # ruff 0.17.4 — pinned release (astral-sh/ruff, unprefixed tag series).
+          python -m pip install --quiet 'ruff==0.17.4'
+          cd apps/ai-engine
+          ruff format --check .
+          ruff check .
+          # Type check (AGENTS.md lint contract): run whichever checker the
+          # project configures; mypy and pyright both install from pip.
+          if grep -q '^\[tool\.mypy\]' pyproject.toml 2>/dev/null \
+            || compgen -G 'mypy.ini' > /dev/null || compgen -G '.mypy.ini' > /dev/null; then
+            python -m pip install --quiet 'mypy==1.19.1'
+            mypy .
+          elif grep -q '^\[tool\.pyright\]' pyproject.toml 2>/dev/null || [ -f pyrightconfig.json ]; then
+            python -m pip install --quiet 'pyright==1.1.414'  # pip wrapper bundles node
+            pyright
+          else
+            echo "notice: no mypy or pyright config found — type check activates when one lands (AGENTS.md lint contract)"
+          fi
+
+      # Node serves both the web lint and the OpenAPI lint (npx @redocly/cli).
+      - name: Set up Node
+        if: ${{ hashFiles('apps/web/package.json', 'packages/contracts/**/*.yaml', 'packages/contracts/**/*.yml', 'packages/contracts/**/*.json') != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Web lint (eslint + prettier + tsc)
+        run: |
+          if [ ! -f apps/web/package.json ]; then
+            echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
+            exit 0
+          fi
+          cd apps/web
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npx eslint .
+          npx prettier --check .
+          npx tsc --noEmit
+
+      - name: OpenAPI lint (packages/contracts)
+        run: |
+          if ! find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print -quit | grep -q .; then
+            echo "stub: no OpenAPI spec yet — check activates when a spec lands under packages/contracts"
+            exit 0
+          fi
+          # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3.
+          find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print0 \
+            | xargs -0 -n1 npx --yes @redocly/cli@2.76.0 lint
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        if: ${{ hashFiles('apps/core-api/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/core-api/go.mod
+          cache: true
+          cache-dependency-path: apps/core-api/go.sum
+
+      - name: Go unit tests
+        run: |
+          if [ ! -f apps/core-api/go.mod ]; then
+            echo "stub: no Go toolchain yet — check activates when apps/core-api/go.mod lands"
+            exit 0
+          fi
+          # -short: skips the database suites (AGENTS.md); those run in integration-test.
+          cd apps/core-api && go test -race -short -coverprofile=coverage.out ./...
+
+      - name: Set up Python
+        if: ${{ hashFiles('apps/ai-engine/pyproject.toml', 'apps/ai-engine/requirements.txt', 'apps/ai-engine/requirements-dev.txt') != '' }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            apps/ai-engine/pyproject.toml
+            apps/ai-engine/requirements.txt
+            apps/ai-engine/requirements-dev.txt
+
+      - name: Python unit tests
+        run: |
+          if [ ! -f apps/ai-engine/pyproject.toml ] && ! compgen -G 'apps/ai-engine/requirements*.txt' > /dev/null; then
+            echo "stub: no Python toolchain yet — check activates when apps/ai-engine/pyproject.toml or requirements*.txt lands"
+            exit 0
+          fi
+          # pytest 8.4.2 / pytest-cov 7.1.0 — pinned. Project deps come from the
+          # manifest itself; the editable install is best-effort so tests can
+          # still run against the checkout if packaging is not ready yet.
+          python -m pip install --quiet 'pytest==8.4.2' 'pytest-cov==7.1.0'
+          cd apps/ai-engine
+          for req in requirements*.txt; do
+            [ -f "$req" ] && python -m pip install --quiet -r "$req"
+          done
+          if [ -f pyproject.toml ]; then
+            python -m pip install --quiet -e . || echo "notice: editable install failed; running pytest against the checkout"
+          fi
+          # No coverage gate (ADR-008 section 9); the report feeds the artifact below.
+          python -m pytest --cov=. --cov-report=xml:coverage.xml
+
+      - name: Set up Node
+        if: ${{ hashFiles('apps/web/package.json') != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Web unit tests
+        run: |
+          if [ ! -f apps/web/package.json ]; then
+            echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
+            exit 0
+          fi
+          cd apps/web
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          # vitest is wired through the package.json "test" script (ADR-008 layer 10).
+          npm test
+
+      # No coverage gate (ADR-008 section 9): artifacts are published for review.
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: |
+            apps/core-api/coverage.out
+            apps/ai-engine/coverage.xml
+            apps/ai-engine/htmlcov/
+            apps/web/coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  integration-test:
+    name: integration-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Same Postgres image, env vars and init-script mount as docker-compose.yml
+    # (ADR-003 section 6), so CI exercises the real role model. The passwords
+    # below are throwaway credentials for an ephemeral service container that
+    # dies with the job — NOT secrets; no real data ever reaches this database.
+    services:
+      db:
+        image: pgvector/pgvector:0.8.2-pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
+          POSTGRES_DB: quotepilot
+          QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
+          QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+        ports:
+          - 5432:5432
+        # No /docker-entrypoint-initdb.d mount: service containers start before
+        # checkout, so the init script runs as a job step below instead (the
+        # qp_app probe from docker-compose.yml moves with it — a failed init
+        # fails the step, not the healthcheck).
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d quotepilot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 10s
+    env:
+      # Same throwaway credentials as the service env above (steps cannot read
+      # service env, so the literals are duplicated on purpose).
+      PG_SUPER_DSN: postgresql://postgres:ci-pg-5c0ff3a1b7d24e98@localhost:5432/quotepilot
+      QP_APP_DSN: postgresql://qp_app:ci-app-8e3a6b0f15d94c27@localhost:5432/quotepilot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure psql client
+        run: |
+          if ! command -v psql > /dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          fi
+          psql --version
+
+      # GitHub already gates step execution on service health; this loop
+      # additionally proves the runner-side TCP path to the published port.
+      - name: Wait for Postgres
+        run: |
+          for _ in $(seq 1 30); do
+            if psql "$PG_SUPER_DSN" -tAc 'select 1' > /dev/null 2>&1; then
+              echo "postgres is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready"
+          exit 1
+
+      # The compose healthcheck also probes for qp_app; here a failed init is
+      # caught by this step failing instead. The script connects over TCP via
+      # PGHOST/PGPASSWORD and reads the role passwords with \getenv — same
+      # throwaway literals as the service env above.
+      - name: First-init script (roles, schemas, extensions)
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: quotepilot
+          QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
+          QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          PGHOST: localhost
+          PGPASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
+        run: bash infra/postgres/init/01-roles-and-schemas.sh
+
+      # roles.sql runs as the bootstrap superuser, exactly like `make db-check`.
+      - name: Role, schema, grant and extension assertions (roles.sql)
+        run: psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
+
+      # Proves every roles.sql assertion actually fails on a mutation; all
+      # mutations run inside rolled-back transactions. QP_CHECK_DSN switches the
+      # script from `docker compose exec` (local) to a TCP DSN (CI).
+      - name: Negative tests (roles.sql assertions provably fail)
+        env:
+          QP_CHECK_DSN: ${{ env.PG_SUPER_DSN }}
+        run: bash infra/postgres/checks/negative-tests.sh
+
+      - name: Set up Go
+        if: ${{ hashFiles('apps/core-api/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/core-api/go.mod
+          cache: true
+          cache-dependency-path: apps/core-api/go.sum
+
+      # Full Go suite without -short: the RLS isolation suite and River job
+      # tests run against the service DB as qp_app (ADR-008 layers 4 and 9).
+      - name: Go integration suite (isolation, River)
+        env:
+          POSTGRES_DSN: ${{ env.QP_APP_DSN }}
+        run: |
+          if [ ! -f apps/core-api/go.mod ]; then
+            echo "stub: no Go toolchain yet — check activates when apps/core-api/go.mod lands"
+            exit 0
+          fi
+          cd apps/core-api && go test -count=1 ./...
+
+  contracts-drift:
+    name: contracts-drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Toolchains BEFORE generation: the contract codegen regenerates Go
+      # (oapi-codegen), Pydantic and TypeScript (ADR-002), so all three runtimes
+      # must exist the day a spec lands. Each setup is gated on the manifest it
+      # needs; the generate step stays self-gating on the contracts inputs.
+      - name: Set up Go
+        if: ${{ hashFiles('apps/core-api/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/core-api/go.mod
+          cache: true
+          cache-dependency-path: apps/core-api/go.sum
+
+      - name: Set up Python
+        if: ${{ hashFiles('packages/contracts/**/*.yaml', 'packages/contracts/**/*.yml', 'packages/contracts/**/*.json') != '' }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node
+        if: ${{ hashFiles('packages/contracts/**/*.yaml', 'packages/contracts/**/*.yml', 'packages/contracts/**/*.json') != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      # Detection: a spec or codegen config under packages/contracts. When the
+      # contract lands it brings a Makefile that regenerates the outputs.
+      - name: Regenerate contract code and check for drift
+        run: |
+          if ! find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name 'Makefile' \) -print -quit | grep -q .; then
+            echo "stub: no contracts codegen config yet — check activates when a spec/codegen config lands under packages/contracts"
+            exit 0
+          fi
+          make -C packages/contracts generate
+          git diff --exit-code
+          untracked="$(git ls-files --others --exclude-standard)"
+          if [ -n "$untracked" ]; then
+            echo "contracts-drift: regeneration produced untracked files:"
+            echo "$untracked"
+            exit 1
+          fi
+
+      - name: Regenerate sqlc and check for drift
+        run: |
+          if [ ! -f apps/core-api/sqlc.yaml ]; then
+            echo "stub: no sqlc config yet — check activates when apps/core-api/sqlc.yaml lands"
+            exit 0
+          fi
+          # sqlc v1.31.1 — pinned (ADR-002: sql_package pgx/v5, committed output).
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1
+          "$(go env GOPATH)/bin/sqlc" generate -f apps/core-api/sqlc.yaml
+          git diff --exit-code -- apps/core-api
+          untracked="$(git ls-files --others --exclude-standard -- apps/core-api)"
+          if [ -n "$untracked" ]; then
+            echo "contracts-drift: sqlc regeneration produced untracked files:"
+            echo "$untracked"
+            exit 1
+          fi
+
+  migrations:
+    name: migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Same service container as integration-test (see there for why the
+    # passwords are throwaway literals and not secrets).
+    services:
+      db:
+        image: pgvector/pgvector:0.8.2-pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
+          POSTGRES_DB: quotepilot
+          QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
+          QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+        ports:
+          - 5432:5432
+        # Same as integration-test: no init-volume mount (service containers
+        # predate checkout); the init script runs as a step below.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres -d quotepilot"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+          --health-start-period 10s
+    env:
+      PG_SUPER_DSN: postgresql://postgres:ci-pg-5c0ff3a1b7d24e98@localhost:5432/quotepilot
+      # Migrations run as qp_migrator, never as the bootstrap superuser
+      # (.env.example, ADR-003). Same throwaway password as the service env.
+      MIGRATOR_DSN: postgresql://qp_migrator:ci-migrator-2f7b9d14c8a04e61@localhost:5432/quotepilot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Ensure psql client
+        run: |
+          if ! command -v psql > /dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          fi
+          psql --version
+
+      - name: Wait for Postgres
+        run: |
+          for _ in $(seq 1 30); do
+            if psql "$PG_SUPER_DSN" -tAc 'select 1' > /dev/null 2>&1; then
+              echo "postgres is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready"
+          exit 1
+
+      # Creates qp_migrator/qp_app and the app/river/extensions schemas —
+      # required before MIGRATOR_DSN can connect. Same step as integration-test.
+      - name: First-init script (roles, schemas, extensions)
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: quotepilot
+          QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
+          QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          PGHOST: localhost
+          PGPASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
+        run: bash infra/postgres/init/01-roles-and-schemas.sh
+
+      # goose-style sequential integer versions (ADR-002): every file is
+      # NNNN_name.sql, no duplicate or gapped prefixes.
+      - name: Check migration history is linear
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — check activates when apps/core-api/db/migrations/*.sql lands"
+            exit 0
+          fi
+          mapfile -t nums < <(printf '%s\n' "${files[@]##*/}" | grep -oE '^[0-9]+' | sort -n)
+          if [ "${#files[@]}" -ne "${#nums[@]}" ]; then
+            echo "migrations: every file must start with a numeric version (NNNN_name.sql):"
+            printf '  %s\n' "${files[@]##*/}"
+            exit 1
+          fi
+          dupes="$(printf '%s\n' "${nums[@]}" | uniq -d)"
+          if [ -n "$dupes" ]; then
+            echo "migrations: duplicate versions: $dupes"
+            exit 1
+          fi
+          expected=$((10#${nums[0]}))
+          for n in "${nums[@]}"; do
+            n=$((10#$n))
+            if [ "$n" -ne "$expected" ]; then
+              echo "migrations: gap in sequence — expected version $expected, found $n"
+              exit 1
+            fi
+            expected=$((expected + 1))
+          done
+          echo "migration sequence OK: ${nums[0]}..$((expected - 1))"
+
+      - name: Apply migrations from scratch as qp_migrator
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — nothing to apply"
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}" | sort -V | while IFS= read -r f; do
+            echo "== applying $f"
+            psql -X -v ON_ERROR_STOP=1 "$MIGRATOR_DSN" -f "$f"
+          done
+
+      # Cheap text guard; the real RLS-presence proof is roles.sql [M] (re-run
+      # below) and the ADR-008 schema lint once the Go suite lands.
+      - name: Guard against dropped policies and weakened RLS
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — nothing to guard"
+            exit 0
+          fi
+          if grep -niE 'DROP[[:space:]]+POLICY|DISABLE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|NO[[:space:]]+FORCE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY' "${files[@]}"; then
+            echo "migrations: a migration drops a tenant policy or weakens RLS — forbidden (AGENTS.md rule 4, ADR-003)"
+            exit 1
+          fi
+          echo "no RLS-weakening statements found"
+
+      # With real tables in place, roles.sql [M] proves every organization_id
+      # table has ENABLE + FORCE RLS — the part grep cannot prove.
+      - name: Re-run role model assertions on the migrated schema
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — nothing to re-check"
+            exit 0
+          fi
+          psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
+
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # fetch-depth 0: gitleaks scans git history, and a shallow clone would
+      # miss a secret committed earlier in the PR and removed in a later commit.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Always runs for real: the repo is PUBLIC, so secrets must never land.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Secret scan
+        run: gitleaks detect --source . --redact
+
+      - name: Dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+
+      - name: Set up Go
+        if: ${{ hashFiles('apps/core-api/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/core-api/go.mod
+          cache: true
+          cache-dependency-path: apps/core-api/go.sum
+
+      - name: Go vulnerability scan (govulncheck + gosec)
+        run: |
+          if [ ! -f apps/core-api/go.mod ]; then
+            echo "stub: no Go toolchain yet — check activates when apps/core-api/go.mod lands"
+            exit 0
+          fi
+          # govulncheck v1.9.0, gosec v2.30.0 — pinned (ADR-002).
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          cd apps/core-api
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          "$(go env GOPATH)/bin/gosec" ./...
+
+      - name: Set up Python
+        if: ${{ hashFiles('apps/ai-engine/pyproject.toml', 'apps/ai-engine/requirements.txt', 'apps/ai-engine/requirements-dev.txt') != '' }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            apps/ai-engine/pyproject.toml
+            apps/ai-engine/requirements.txt
+            apps/ai-engine/requirements-dev.txt
+
+      - name: Python dependency audit (pip-audit)
+        run: |
+          if [ ! -f apps/ai-engine/pyproject.toml ] && ! compgen -G 'apps/ai-engine/requirements*.txt' > /dev/null; then
+            echo "stub: no Python toolchain yet — check activates when apps/ai-engine/pyproject.toml or requirements*.txt lands"
+            exit 0
+          fi
+          # pip-audit 2.9.0 — pinned.
+          python -m pip install --quiet 'pip-audit==2.9.0'
+          cd apps/ai-engine
+          audited=0
+          for req in requirements*.txt; do
+            if [ -f "$req" ]; then
+              pip-audit -r "$req"
+              audited=1
+            fi
+          done
+          if [ "$audited" -eq 0 ] && [ -f pyproject.toml ]; then
+            python -m pip install --quiet -e . && pip-audit
+          fi
+
+      - name: Set up Node
+        if: ${{ hashFiles('apps/web/package.json') != '' }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: npm audit (production dependencies only)
+        run: |
+          if [ ! -f apps/web/package.json ]; then
+            echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
+            exit 0
+          fi
+          cd apps/web
+          # npm audit reads the lockfile; generate it without installing when absent.
+          if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
+          npm audit --omit=dev
+
+      # Scans locally built images; when the registry/deploy story lands
+      # (ADR-007) this should reuse the images produced by the `build` job
+      # instead of rebuilding them here.
+      - name: Image vulnerability scan (trivy)
+        run: |
+          if ! find apps -mindepth 2 -maxdepth 2 -name 'Dockerfile' -print -quit | grep -q .; then
+            echo "stub: no Dockerfiles yet — check activates when apps/*/Dockerfile lands"
+            exit 0
+          fi
+          # trivy v0.76.2 — pinned release tarball.
+          curl -sSfL -o /tmp/trivy.tar.gz \
+            https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          find apps -mindepth 2 -maxdepth 2 -name 'Dockerfile' | sort | while IFS= read -r df; do
+            app_dir="$(dirname "$df")"
+            img="ci-scan-$(basename "$app_dir")"
+            docker build -t "$img" "$app_dir"
+            /tmp/trivy image --severity HIGH,CRITICAL --exit-code 1 "$img"
+          done
+
+  devin-scope:
+    name: devin-scope
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # gh api needs it to list PR files
+    steps:
+      # AGENTS.md rule 8: Devin may only touch connector code and its tests.
+      - name: Enforce Devin change scope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          # "Devin PR" = bot login containing 'devin' or a devin/* head branch.
+          # A false positive (e.g. a human named Devin) fails closed: their PR
+          # just gets scope-checked too. Tighten to the exact bot login once the
+          # integration's real username is known.
+          user_lc="${PR_USER,,}"
+          head_lc="${HEAD_REF,,}"
+          if [[ "$user_lc" != *devin* ]] && [[ "$head_lc" != devin* ]]; then
+            echo "not a Devin PR (user=$PR_USER, head=$HEAD_REF) — scope check inactive"
+            exit 0
+          fi
+          echo "Devin PR detected (user=$PR_USER, head=$HEAD_REF)"
+          echo "every changed path must stay under apps/ai-engine/connectors/ or apps/ai-engine/tests/"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' > /tmp/devin-changed.txt
+          bad=0
+          while IFS= read -r f; do
+            case "$f" in
+              apps/ai-engine/connectors/* | apps/ai-engine/tests/*) ;;
+              *) echo "OUT OF SCOPE: $f"; bad=1 ;;
+            esac
+          done < /tmp/devin-changed.txt
+          if [ "$bad" -ne 0 ]; then
+            echo "devin-scope: changed files outside the allowed scope (AGENTS.md rule 8)"
+            exit 1
+          fi
+          echo "all changed paths are inside the Devin scope"
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No push and no registry auth on PRs; pushing/deploying waits for the
+      # CI/CD-and-environments ADR-007 (AGENTS.md, CI/CD "After merge").
+      - name: Build core-api image
+        run: |
+          if [ ! -f apps/core-api/Dockerfile ]; then
+            echo "stub: no Dockerfile yet — check activates when apps/core-api/Dockerfile lands"
+            exit 0
+          fi
+          docker build -t quotepilot-core-api:ci apps/core-api
+
+      - name: Build ai-engine image
+        run: |
+          if [ ! -f apps/ai-engine/Dockerfile ]; then
+            echo "stub: no Dockerfile yet — check activates when apps/ai-engine/Dockerfile lands"
+            exit 0
+          fi
+          docker build -t quotepilot-ai-engine:ci apps/ai-engine
+
+      - name: Build web image
+        run: |
+          if [ ! -f apps/web/Dockerfile ]; then
+            echo "stub: no Dockerfile yet — check activates when apps/web/Dockerfile lands"
+            exit 0
+          fi
+          docker build -t quotepilot-web:ci apps/web
