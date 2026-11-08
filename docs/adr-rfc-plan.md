@@ -6,13 +6,13 @@ ADR = a decision we make and record. RFC = a proposal that needs input from othe
 
 | ID | Title | Status | Notes / blockers |
 |---|---|---|---|
-| ADR-001 | Modular monorepo: Go core + stateless Python ai-engine, contracts-first | **Drafted** (Proposed) | Needs team buy-in (Marcelo prefers Python). Reversible via contract. Wording to amend: contracts are OpenAPI 3.0.3, not 3.1 (see ADR-002). |
+| ADR-001 | Modular monorepo: Go core + stateless Python ai-engine, contracts-first | **Drafted** (Proposed) | Needs team buy-in (Marcelo prefers Python). Reversible via contract. |
 | ADR-002 | Go core stack, `InTenantTx` design, spike gate | **Drafted** (Proposed) | The allow-list of libraries that `AGENTS.md` refers to. The spike (Mission 3) decides Accepted versus the Python fallback. |
-| ADR-003 | Postgres on Supabase: roles, pooler mode, extensions, storage, local dev | **Drafted** (Proposed) | Open: region and plan, account owner, connection limits. Local role model implemented in `infra/postgres/` (PR #2); departures from the first sketch (sequence grants, extensions, PUBLIC revokes, stand-in roles, EXECUTE revoke, search_path) are recorded in the ADR's Revision notes. ADR-003 owns the role model and the acceptance checks; ADR-007 owns the hosted provisioning runbook (roles, schemas, default privileges, search_path, extensions). |
+| ADR-003 | Postgres on Supabase: roles, pooler mode, extensions, storage, local dev | **Drafted** (Proposed) | Region/plan/conn limits verified 2026-11-08: `sa-east-1`, Pro for the demo/pilot project (Free pauses after ~7 days idle), Nano = 60 direct / 200 pooler connections. Local role model implemented in `infra/postgres/` (PR #2); departures from the first sketch (sequence grants, extensions, PUBLIC revokes, stand-in roles, EXECUTE revoke, search_path) are recorded in the ADR's Revision notes. ADR-003 owns the role model and the acceptance checks; ADR-007 owns the hosted provisioning runbook (roles, schemas, default privileges, search_path, extensions). |
 | ADR-004 | Quote pipeline as staged River jobs; worker is the only caller of the pricing engine (MVP) | **Drafted** (Proposed) | Retry counts and per-stage timeouts to tune in the spike. |
-| ADR-005 | Auth (magic link, JWT), tenant resolution, platform path with `SECURITY DEFINER` functions, waiter registry, 1-click approval token | **Drafted** (Proposed) | Role matrix to confirm with Marcelo. Resend retry behaviour for non-2xx to verify. |
+| ADR-005 | Auth (magic link, JWT), tenant resolution, platform path with `SECURITY DEFINER` functions, waiter registry, 1-click approval token | **Drafted** (Proposed) | Role matrix to confirm with Marcelo. Resend retry verified 2026-11-08: any non-2xx retries 8× over ~27h; 2xx-ack design holds. |
 | ADR-006 | AI agents architecture in `ai-engine` (decision model for routing and confidence, structured LLM extraction) | **Approved** (2026-11-07, owner Marcelo) | Written by the team. RFC-004 builds on it and suggests one wording change. |
-| ADR-007 | CI/CD and environments: registry, dev/staging, deploy mechanism, secrets, IPv4/IPv6 path per environment, hosted DB provisioning (roles, schemas, default privileges, search_path, extensions) | **Drafted** (Proposed) | Written during Mission 2. Open: VPS provider/size, web hosting (Amanda), monitoring, demo environment. Deploy jobs wait for acceptance. |
+| ADR-007 | CI/CD and environments: registry, dev/staging, deploy mechanism, secrets, IPv4/IPv6 path per environment, hosted DB provisioning (roles, schemas, default privileges, search_path, extensions) | **Drafted** (Proposed) | Written during Mission 2. Deploy host proposed as Fly.io `gru` (~$12/mo, verified 2026-11-08) with Lightsail SP VPS as documented fallback; monitoring (Better Stack free) and demo-env defaults proposed. Open: web hosting (Amanda), Pedro's sign-off. Deploy jobs wait for acceptance. |
 | ADR-008 | Testing strategy: schema lint, isolation tests, money tests, contract tests, evaluations | **Drafted** (Proposed) | Numbered 008 because 006 was taken. Needs the golden quotes from the pilot companies. |
 
 ## RFCs
@@ -41,7 +41,7 @@ ADR = a decision we make and record. RFC = a proposal that needs input from othe
 | Consent to send tenant data to third-party APIs, including the decision-model vendor (RFC-004) | Unknown | Pilot companies |
 | Wording of the prompt-injection claim in ADR-006 (RFC-004 section 7) | Suggest "limits the blast radius" | Marcelo |
 | How failing page content reaches Devin, given a public repo (RFC-003) | Minimal excerpt on a branch, subject to terms of use | Pedro and Amanda |
-| Supabase region, plan and account owner (ADR-003) | Closest region, team-controlled account | Pedro with the team |
+| Supabase region, plan and account owner (ADR-003) | `sa-east-1`, Pro for demo/pilot project, team-controlled account — verified defaults 2026-11-08 | Pedro with the team |
 
 ## Suggested order
 

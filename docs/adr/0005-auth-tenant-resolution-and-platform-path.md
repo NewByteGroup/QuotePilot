@@ -100,7 +100,7 @@ Decision: while still inside its own tenant transaction, pricing calls `platform
 
 1. Read the raw body and verify the Svix signature and timestamp before parsing anything. Reject on failure.
 2. For each recipient address in the event, normalise it (lower case, plus-tag removed) and call `platform_resolve_inbound_alias`.
-3. Exactly one organization matches: continue. More than one distinct organization (a message addressed to two tenants): quarantine by id and do not guess. None: record the message id and a counter at platform level, store nothing tenant-scoped, and answer 2xx so the sender does not retry forever. Confirm Resend's retry rules for non-2xx before relying on this.
+3. Exactly one organization matches: continue. More than one distinct organization (a message addressed to two tenants): quarantine by id and do not guess. None: record the message id and a counter at platform level, store nothing tenant-scoped, and answer 2xx so the sender does not retry. Resend (Svix) retries **any** non-2xx — no 4xx/5xx distinction — eight times over ~27 hours (immediate, 5s, 5m, 30m, 2h, 5h, 10h, +10h), so an error response for a permanently undeliverable message would replay it for a day; the documented way to abort a delivery explicitly is the `webhook-delivery: abort-message` response header. Duplicates are normal under retries, which the `(organization_id, resend_message_id)` idempotent insert in step 4 already covers.
 4. In `InTenantTx(organization_id)`: insert the RFQ with `UNIQUE (organization_id, resend_message_id)` and enqueue the ingest job with `InsertTx` (ADR-004). A duplicate delivery inserts and enqueues nothing.
 5. The inbound alias is immutable in the MVP, so an old address cannot start resolving to a different tenant.
 
@@ -160,7 +160,6 @@ Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in co
 ## Open items
 
 - Confirm the role matrix with Marcelo and the pilot companies.
-- Resend retry behaviour for non-2xx responses to the webhook (decides the orphan-message handling in section 7).
 - Whether web and API share a registrable domain (CSRF design in section 4).
 - Rate limiting if `core-api` ever runs as more than one instance.
 - Where login-event audit records live and how long they are kept (LGPD).

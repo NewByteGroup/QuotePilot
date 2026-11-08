@@ -188,9 +188,9 @@ The `ALTER DEFAULT PRIVILEGES ... REVOKE` for those roles is in the init script.
 
 ## Open items
 
-- Region and compute size for staging and production; who pays and which plan (Pedro, with the team).
-- Which account owns the organization (section 7).
-- Exact connection-limit numbers for the chosen compute size.
+- Region and compute size for staging and production; who pays and which plan (Pedro, with the team). **Verified 2026-11-08:** `sa-east-1` (São Paulo) is Supabase's only South America region and the default for both projects. Free plans pause after ~7 days of low activity (one-click restore, kept restorable for a year), so the staging project that demos and the pilot run against must be Pro (~$25/mo); disposable developer projects can stay Free.
+- Which account owns the organization (section 7). Proposed default: a team-controlled NewByte account owns the Supabase org; Marcelo and Amanda are invited at developer level. Pedro confirms at provisioning time.
+- Exact connection-limit numbers for the chosen compute size. **Verified:** Nano (the default compute) allows 60 direct and 200 shared-pooler connections; raising pooler limits needs a larger compute add-on. Size `pgxpool` well under 60 per role and use Supavisor session mode — which River needs anyway for LISTEN/NOTIFY.
 - Migrations tool and how migrations are applied in CI (ADR-002, ADR-007).
 - The privileged pre-tenant role (ADR-005).
 - Confirm whether River's schema uses `bigserial` (for example its job id) and which River version ADR-002 pins.

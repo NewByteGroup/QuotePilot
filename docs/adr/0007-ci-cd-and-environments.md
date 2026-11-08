@@ -26,17 +26,17 @@ Two hosted environments, matching the two deploy triggers in `AGENTS.md`:
 | `dev` | push to `develop` (images built, pushed, deployed automatically) | Integration and dogfooding | `quotepilot-staging` (shared, section 5) |
 | `staging` | push to `main` | Demo and pre-final; the 12/12 environment | `quotepilot-staging` until the production project exists |
 
-Production is created before the pilot tenants go live (ADR-003 section 6); until then `staging` and `dev` share the one hosted project, separated by database *data*, not infrastructure. Both deploy the same compose stack; the environment differs only in its variables.
+Production is created before the pilot tenants go live (ADR-003 section 6); until then `staging` and `dev` share the one hosted project, separated by database *data*, not infrastructure. Both deploy the same image set to separate Fly apps (`quotepilot-dev-*`, `quotepilot-staging-*`); the environment differs only in its variables.
 
-**Recommended mechanism: one VPS running `docker compose`, fronted by Caddy for TLS.** Reasons: it is the same runtime shape as local dev and CI (`docker-compose.yml` already exists), a three-person team can debug it, and a VPS with both IPv4 and IPv6 can reach the hosted database over the **direct connection** (ADR-003 section 3) instead of the pooler. `core-api` and `ai-engine` run as two services on the VPS's private Docker network; `ai-engine` is never exposed publicly. Deploy is `ssh` + `docker compose pull && up -d` from a GitHub Actions job gated on the environment.
+**Recommended mechanism: Fly.io, region `gru` (São Paulo)** — revised 2026-11-08 on verified pricing. The earlier draft proposed one VPS + Caddy + the existing compose file; the facts flipped it: (a) `gru` is the same region as Supabase `sa-east-1`, so app→DB latency stays in-country; (b) two always-on services (`core-api` + `ai-engine`, 512 MB shared-cpu-1x each) cost roughly **$12/mo** at the `gru` region multiplier — cheaper than every São Paulo VPS found (AWS Lightsail $24/mo, Vultr ~$30/mo, Akamai/Linode $33.60/mo; Hetzner, the original default, has no South America region at all); (c) Fly machines have IPv6, so the **direct connection** to the hosted database (ADR-003 section 3) still applies — no pooler in the path, River `LISTEN/NOTIFY` unaffected; (d) both services are stateless containers over an external database — exactly Fly's model — with TLS and private service-to-service networking built in (`ai-engine` is never exposed publicly). Deploy is `fly deploy` from a GitHub Actions job gated on the environment.
 
-**Alternatives documented:** Fly.io (also IPv6-capable, less to manage, but another platform to learn and its machines model is one more thing at 2 a.m.); Render/Railway (IPv4-only egress in the plans we would use, which forces the session-mode pooler path for every request — viable fallback, not the default). If the VPS proves a burden during the online phase we move to Fly.io without changing the images or the database.
+**Alternative documented: one São Paulo VPS + Caddy + the existing compose file** — AWS Lightsail at ~$24/mo is the best verified in-region price (~2 vCPU/4 GB). It keeps the "same runtime shape as local dev" property and `ssh` + `docker compose pull && up -d` deploys, at double the price plus full OS-patch responsibility. If Fly.io friction appears during the online phase we land here without changing the images or the database. Render/Railway remain fallbacks (IPv4-only egress in the plans we would use forces the session-mode pooler for all database traffic).
 
 `apps/web` hosting is **Amanda's decision** (current assumption: Vercel; Vercel is IPv4-only, which only matters for server-side calls from the web app — the browser talks to `core-api` directly).
 
 ### 3. Secrets
 
-- Only GitHub **environments** (`dev`, `staging`) hold deploy-time secrets: `POSTGRES_DSN`, `MIGRATOR_DSN`, `AI_ENGINE_SERVICE_TOKEN`, Resend API key and webhook signing secret, Firecrawl key, S3 access keys, JWT signing keys, the VPS `SSH_PRIVATE_KEY` and host.
+- Only GitHub **environments** (`dev`, `staging`) hold deploy-time secrets: `POSTGRES_DSN`, `MIGRATOR_DSN`, `AI_ENGINE_SERVICE_TOKEN`, Resend API key and webhook signing secret, Firecrawl key, S3 access keys, JWT signing keys, `FLY_API_TOKEN` (environment-scoped token).
 - Workflows reference secrets with `environment:` on the job; they are never echoed, never written into the repo, and `.env.example` continues to hold names only (ADR-003 section 7).
 - The Devin repair loop keeps its own boundary: its token opens PRs only, reads no secrets, and `devin-scope` is a required check (RFC-003 section 6).
 - Rotation: any credential pasted into a chat or log is rotated; role passwords and S3 keys rotate on suspicion, not schedule.
@@ -45,7 +45,7 @@ Production is created before the pilot tenants go live (ADR-003 section 6); unti
 
 | Path | Transport | Why |
 |---|---|---|
-| `core-api` / River workers on the VPS → hosted DB | **direct connection** (IPv6 available on the host) | No pooler in the path; River `LISTEN/NOTIFY` and prepared statements just work |
+| `core-api` / River workers on Fly `gru` → hosted DB | **direct connection** (IPv6 on the machine) | No pooler in the path; River `LISTEN/NOTIFY` and prepared statements just work |
 | CI (GitHub runners) → hosted DB, if ever needed | session-mode pooler (IPv4) | Runners are IPv4-only historically; CI normally uses the service container, not hosted |
 | Migrations (`cmd/migrate`, `qp_migrator`) | direct when reachable, else session mode | Never transaction mode (ADR-003 section 3) |
 | Local dev | `127.0.0.1` to the compose container | — |
@@ -56,7 +56,7 @@ If a host ever loses IPv6, the fallback is session-mode pooler — a connection-
 
 This is the executable form of ADR-003 section 6. Run once per hosted project, as the Supabase `postgres` user, with passwords from the secret store — never from the repo.
 
-1. **Create the project** (`quotepilot-staging` first): organization owned by the team account, region closest to `core-api` and the pilot users (São Paulo if offered), a plan that does not pause and has daily backups. Record region, plan and connection limits in the config.
+1. **Create the project** (`quotepilot-staging` first): organization owned by the team account, region `sa-east-1` (São Paulo — verified as Supabase's only South America region), plan **Pro** (~$25/mo — the Free plan pauses after ~7 days of low activity and the demo/pilot project must not pause; Nano compute: 60 direct / 200 shared-pooler connections). Record region, plan and connection limits in the config.
 2. **Disable the Data API and `pg_graphql`** in project settings (ADR-003 section 2).
 3. **Roles.** `postgres` is not a superuser on Supabase: create `qp_migrator` and `qp_app` (`LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`), then `GRANT qp_migrator TO postgres` with the `SET` option so `postgres` can run `CREATE SCHEMA ... AUTHORIZATION qp_migrator` and `ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator`. Confirm the exact grant syntax at provisioning (Postgres 16 membership options).
 4. **Extensions.** Schema `extensions` already exists on hosted — do not create it. `GRANT USAGE ON SCHEMA extensions TO qp_migrator, qp_app` if `PUBLIC` does not already have it; `CREATE EXTENSION vector` (≥ 0.8) and `pg_trgm` there as `postgres` (ADR-003 section 4).
@@ -76,13 +76,13 @@ This is the executable form of ADR-003 section 6. Run once per hosted project, a
 
 ### 6. Deploy job shape (once accepted)
 
-- `push` to `develop`: build → push `ghcr.io` images tagged `<sha>` + `dev` → deploy job with `environment: dev` → `ssh` → `docker compose pull && up -d` → `cmd/migrate` as `qp_migrator` before the new containers start.
+- `push` to `develop`: build → push `ghcr.io` images tagged `<sha>` + `dev` → deploy job with `environment: dev` → `fly deploy --image ghcr.io/...:<sha>` per app → `cmd/migrate` as `qp_migrator` (Fly release command) before the new machines go live.
 - `push` to `main`: same flow against `staging`, promoting the exact image SHAs that `develop` last built (re-tag, never rebuild) so staging runs what dev proved.
-- Migrations always run before the new version's containers; a failed migration stops the deploy.
+- Migrations always run before the new version goes live; a failed migration stops the deploy.
 
 ## Alternatives considered
 
-1. **Fly.io for the app services.** Strong fit (IPv6, Docker-native, scale-to-zero for a quiet dev environment). Kept as the documented alternative because a VPS + the existing compose file is the smallest step from local dev, and the team's remaining unknown is deploy mechanics, not platform features.
+1. **A São Paulo VPS + Caddy + compose** (AWS Lightsail ~$24/mo). The earlier draft's default: identical runtime shape to local dev and CI, `ssh` deploys, full control. Now the documented alternative — the verified prices put it at double Fly.io `gru` plus OS-patching duty, for the same region and the same IPv6 direct-connection property. Reverts cleanly: same images, same database.
 2. **Render or Railway.** Easiest git-push deploys, but IPv4-only egress forces the session-mode pooler for all database traffic. Acceptable fallback; not chosen while IPv6 hosting is available.
 3. **Supabase for everything (Edge Functions, hosted workers).** Conflicts with ADR-001's boundary: `ai-engine` must stay a separately deployable runtime and only `core-api` may hold database credentials.
 4. **A Kubernetes cluster or any orchestrator.** Absurd for 4 tenants and a 4-week MVP.
@@ -95,15 +95,15 @@ This is the executable form of ADR-003 section 6. Run once per hosted project, a
 - The direct-connection path removes the pooler as a variable for River and prepared statements.
 
 **Negative / risks**
-- A VPS is ours to patch and watch. Acceptable for the MVP window; monitoring is Caddy access logs plus container health until observability lands.
+- Fly.io is a third platform to learn (machines model, `fly.toml`, release commands) versus `ssh` + compose. Acceptable: deploy mechanics was the remaining unknown either way, and the VPS alternative is a clean fallback.
 - The `roles.sql` exception list can drift from hosted reality. Mitigation: every exception is named and justified in the table; re-run the check after any Supabase-side change.
 - `staging` and `dev` sharing one Supabase project risks cross-talk in demos. Mitigation: they deploy the same schema; data separation is by usage, and production separates before real tenants.
 
 ## Open items
 
-- VPS provider and size (a small Hetzner-class instance is the default; Pedro picks and provisions).
-- Whether the 12/12 demo runs `staging` or a freshly minted production project (decide with the pilot timeline).
-- Monitoring/alerting for the hosted environments (deferred; revisit after the spike).
+- Deploy host: **resolved into the proposal** — Fly.io `gru` (verified ~$12/mo for both services, same region as `sa-east-1`, IPv6, managed TLS); Lightsail São Paulo VPS (~$24/mo) is the documented alternative. Pedro confirms at provisioning.
+- Whether the 12/12 demo runs `staging` or a freshly minted production project (decide with the pilot timeline). Proposed default: `staging` doubles as the demo environment — it is already the "Demo and pre-final" environment above — and production is minted only when pilot tenants onboard.
+- Monitoring/alerting: proposed default — a hosted free tier (Better Stack: 10 monitors, 3-minute checks, one status page, Slack/email alerts) watching both environments' health endpoints. Hosted over self-hosted Uptime Kuma on purpose, so alerts still fire when the host itself is dead.
 - Amanda's call on `apps/web` hosting (Vercel assumed) and the registrable-domain question it raises for CSRF (ADR-005 section 4).
 
 ## Verification at provisioning (acceptance for this ADR)
