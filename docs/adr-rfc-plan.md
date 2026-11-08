@@ -12,7 +12,7 @@ ADR = a decision we make and record. RFC = a proposal that needs input from othe
 | ADR-004 | Quote pipeline as staged River jobs; worker is the only caller of the pricing engine (MVP) | **Drafted** (Proposed) | Retry counts and per-stage timeouts to tune in the spike. |
 | ADR-005 | Auth (magic link, JWT), tenant resolution, platform path with `SECURITY DEFINER` functions, waiter registry, 1-click approval token | **Drafted** (Proposed) | Role matrix to confirm with Marcelo. Resend retry behaviour for non-2xx to verify. |
 | ADR-006 | AI agents architecture in `ai-engine` (decision model for routing and confidence, structured LLM extraction) | **Approved** (2026-11-07, owner Marcelo) | Written by the team. RFC-004 builds on it and suggests one wording change. |
-| ADR-007 | CI/CD and environments: registry, dev/staging, deploy mechanism, secrets, IPv4/IPv6 path per environment, hosted DB provisioning (roles, schemas, default privileges, search_path, extensions) | **To write** | Written during Mission 2. Deploy jobs wait for it. Hosted DB provisioning depends on ADR-003 section 6. |
+| ADR-007 | CI/CD and environments: registry, dev/staging, deploy mechanism, secrets, IPv4/IPv6 path per environment, hosted DB provisioning (roles, schemas, default privileges, search_path, extensions) | **Drafted** (Proposed) | Written during Mission 2. Open: VPS provider/size, web hosting (Amanda), monitoring, demo environment. Deploy jobs wait for acceptance. |
 | ADR-008 | Testing strategy: schema lint, isolation tests, money tests, contract tests, evaluations | **Drafted** (Proposed) | Numbered 008 because 006 was taken. Needs the golden quotes from the pilot companies. |
 
 ## RFCs
