@@ -38,6 +38,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/quotes/{quoteId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Everything needed to audit one quote (split-screen audit) */
+        get: operations["getQuoteDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -140,6 +157,66 @@ export interface components {
             /** Format: date-time */
             refreshedAt: string;
         };
+        QuoteDetail: {
+            quote: components["schemas"]["InboxQuote"];
+            email: components["schemas"]["QuoteEmail"];
+            /** @description Fields the agent extracted (or inferred) from the email. */
+            extraction: components["schemas"]["ExtractedField"][];
+            /** @description Null while the quote is still processing. */
+            pricing: components["schemas"]["PriceComposition"] | null;
+        };
+        QuoteEmail: {
+            /** Format: email */
+            from: string;
+            /** Format: email */
+            to: string;
+            /** Format: date-time */
+            receivedAt: string;
+            /** @description Email body split into paragraphs of segments, so extracted spans can be highlighted. */
+            paragraphs: components["schemas"]["EmailSegment"][][];
+            attachments: components["schemas"]["EmailAttachment"][];
+        };
+        EmailSegment: {
+            text: string;
+            /** @enum {string} */
+            highlight: "none" | "extracted" | "inferred";
+        };
+        EmailAttachment: {
+            fileName: string;
+            sizeBytes: number;
+        };
+        ExtractedField: {
+            label: string;
+            value: string;
+            /** @description True when the value was assumed, not read from the email. */
+            inferred: boolean;
+        };
+        PriceComposition: {
+            sections: components["schemas"]["PriceSection"][];
+            totalCost: components["schemas"]["Money"];
+            /** @description Target margin as a decimal string (no floats). */
+            marginPercent: string;
+            margin: components["schemas"]["Money"];
+            proposalTotal: components["schemas"]["Money"];
+            confidencePercent: number;
+        };
+        PriceSection: {
+            title: string;
+            source: components["schemas"]["PriceSource"] | null;
+            items: components["schemas"]["PriceItem"][];
+            note: string | null;
+        };
+        PriceSource: {
+            label: string;
+            /** @enum {string} */
+            kind: "private_rate" | "public_snapshot";
+        };
+        PriceItem: {
+            label: string;
+            detail: string | null;
+            amount: components["schemas"]["Money"];
+            inferred: boolean;
+        };
     };
     responses: {
         /** @description Invalid request parameters. */
@@ -153,6 +230,15 @@ export interface components {
         };
         /** @description Missing or invalid credentials. */
         Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Resource does not exist in the active organization. */
+        NotFound: {
             headers: {
                 [name: string]: unknown;
             };
@@ -214,6 +300,30 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    getQuoteDetail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                quoteId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quote with the original email, agent extraction and price composition. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuoteDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

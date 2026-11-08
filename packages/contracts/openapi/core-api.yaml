@@ -62,6 +62,29 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /v1/quotes/{quoteId}:
+    get:
+      operationId: getQuoteDetail
+      summary: Everything needed to audit one quote (split-screen audit)
+      tags: [quotes]
+      parameters:
+        - name: quoteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Quote with the original email, agent extraction and price composition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuoteDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 components:
   securitySchemes:
     bearerAuth:
@@ -77,6 +100,12 @@ components:
             $ref: "#/components/schemas/Error"
     Unauthorized:
       description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource does not exist in the active organization.
       content:
         application/json:
           schema:
@@ -292,3 +321,133 @@ components:
         refreshedAt:
           type: string
           format: date-time
+    QuoteDetail:
+      type: object
+      required: [quote, email, extraction, pricing]
+      properties:
+        quote:
+          $ref: "#/components/schemas/InboxQuote"
+        email:
+          $ref: "#/components/schemas/QuoteEmail"
+        extraction:
+          type: array
+          description: Fields the agent extracted (or inferred) from the email.
+          items:
+            $ref: "#/components/schemas/ExtractedField"
+        pricing:
+          description: Null while the quote is still processing.
+          oneOf:
+            - $ref: "#/components/schemas/PriceComposition"
+            - type: "null"
+    QuoteEmail:
+      type: object
+      required: [from, to, receivedAt, paragraphs, attachments]
+      properties:
+        from:
+          type: string
+          format: email
+        to:
+          type: string
+          format: email
+        receivedAt:
+          type: string
+          format: date-time
+        paragraphs:
+          type: array
+          description: Email body split into paragraphs of segments, so extracted spans can be highlighted.
+          items:
+            type: array
+            items:
+              $ref: "#/components/schemas/EmailSegment"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmailAttachment"
+    EmailSegment:
+      type: object
+      required: [text, highlight]
+      properties:
+        text:
+          type: string
+        highlight:
+          type: string
+          enum: [none, extracted, inferred]
+    EmailAttachment:
+      type: object
+      required: [fileName, sizeBytes]
+      properties:
+        fileName:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+    ExtractedField:
+      type: object
+      required: [label, value, inferred]
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+        inferred:
+          type: boolean
+          description: True when the value was assumed, not read from the email.
+    PriceComposition:
+      type: object
+      required: [sections, totalCost, marginPercent, margin, proposalTotal, confidencePercent]
+      properties:
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/PriceSection"
+        totalCost:
+          $ref: "#/components/schemas/Money"
+        marginPercent:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
+          description: Target margin as a decimal string (no floats).
+        margin:
+          $ref: "#/components/schemas/Money"
+        proposalTotal:
+          $ref: "#/components/schemas/Money"
+        confidencePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+    PriceSection:
+      type: object
+      required: [title, source, items, note]
+      properties:
+        title:
+          type: string
+        source:
+          oneOf:
+            - $ref: "#/components/schemas/PriceSource"
+            - type: "null"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PriceItem"
+        note:
+          type: [string, "null"]
+    PriceSource:
+      type: object
+      required: [label, kind]
+      properties:
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [private_rate, public_snapshot]
+    PriceItem:
+      type: object
+      required: [label, detail, amount, inferred]
+      properties:
+        label:
+          type: string
+        detail:
+          type: [string, "null"]
+        amount:
+          $ref: "#/components/schemas/Money"
+        inferred:
+          type: boolean

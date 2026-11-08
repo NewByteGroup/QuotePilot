@@ -4,7 +4,13 @@ import type { paths } from '@quotepilot/contracts/core-api'
 import type { Schemas } from '@/api/client'
 import { API_BASE_URL } from '@/api/client'
 
-import { buildInboxQuotes, buildInboxSummary, countByStatus, sessionFixture } from './fixtures'
+import {
+  buildInboxQuotes,
+  buildInboxSummary,
+  buildQuoteDetail,
+  countByStatus,
+  sessionFixture,
+} from './fixtures'
 
 const http = createOpenApiHttp<paths>({ baseUrl: API_BASE_URL })
 
@@ -37,5 +43,12 @@ export const handlers = [
     const status = query.get('status') as Schemas['QuoteStatus'] | null
     const page = buildInboxQuotePage(new Date(), status ?? undefined, query.get('q') ?? '')
     return response(200).json(page)
+  }),
+  http.get('/v1/quotes/{quoteId}', ({ params, response }) => {
+    const quote = buildInboxQuotes(new Date()).find((item) => item.id === params.quoteId)
+    if (!quote) {
+      return response(404).json({ code: 'not_found', message: 'Quote not found' })
+    }
+    return response(200).json(buildQuoteDetail(quote))
   }),
 ]

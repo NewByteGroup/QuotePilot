@@ -1,21 +1,12 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 
 import { server } from '@/mocks/node'
+import { renderApp } from '@/test/render'
 
-import { InboxPage } from './inbox-page'
-
-function renderInbox() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
-    <QueryClientProvider client={client}>
-      <InboxPage />
-    </QueryClientProvider>,
-  )
-}
+const renderInbox = () => renderApp('/')
 
 describe('InboxPage', () => {
   it('renders summary and quotes from the contract mock', async () => {
@@ -29,7 +20,7 @@ describe('InboxPage', () => {
     expect(within(summary).getByText('RFQs hoje')).toBeInTheDocument()
     expect(within(summary).getByText('Polímeros Sul · 48 min')).toBeInTheDocument()
 
-    expect(screen.getByText(/R\$\s23\.260,00/)).toBeInTheDocument()
+    expect(screen.getByText(/R\$\s23\.260,55/)).toBeInTheDocument()
     expect(screen.getByText('Mostrando 14 de 14 cotações')).toBeInTheDocument()
   })
 

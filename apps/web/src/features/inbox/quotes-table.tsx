@@ -1,4 +1,5 @@
 import { Mail } from 'lucide-react'
+import { Link, useNavigate } from 'react-router'
 
 import type { Schemas } from '@/api/client'
 import { Badge } from '@/components/ui/badge'
@@ -14,19 +15,12 @@ import { cn } from '@/lib/utils'
 
 import {
   EQUIPMENT_LABELS,
-  STATUS_LABELS,
   formatDuration,
   formatMoney,
   formatReceivedAt,
   minutesUntil,
 } from './format'
-
-const STATUS_STYLES: Record<Schemas['QuoteStatus'], { badge: string; dot: string }> = {
-  ready_to_send: { badge: 'bg-green-50 text-green-700', dot: 'bg-green-600' },
-  awaiting_review: { badge: 'bg-amber-50 text-amber-700', dot: 'bg-amber-500' },
-  processing: { badge: 'bg-violet-50 text-violet-700', dot: 'bg-violet-500' },
-  sent: { badge: 'border-border bg-card text-muted-foreground', dot: 'bg-neutral-400' },
-}
+import { StatusBadge } from './status-badge'
 
 const AUTO_APPROVE_CONFIDENCE = 95
 
@@ -62,6 +56,7 @@ type QuotesTableProps = {
 }
 
 export function QuotesTable({ quotes, totalCount, now }: QuotesTableProps) {
+  const navigate = useNavigate()
   return (
     <div className="bg-card overflow-hidden rounded-lg border">
       <Table>
@@ -82,13 +77,23 @@ export function QuotesTable({ quotes, totalCount, now }: QuotesTableProps) {
             <TableRow
               key={quote.id}
               data-sla-at-risk={quote.slaAtRisk || undefined}
-              className={cn('h-14', quote.slaAtRisk && 'bg-red-50 hover:bg-red-50/80')}
+              onClick={() => navigate(`/quotes/${quote.id}`)}
+              className={cn(
+                'h-14 cursor-pointer',
+                quote.slaAtRisk && 'bg-red-50 hover:bg-red-50/80',
+              )}
             >
               <TableCell className="pl-4">
                 <div className="flex items-center gap-3">
                   <Mail className="text-muted-foreground size-4 shrink-0" aria-hidden />
                   <div className="min-w-0">
-                    <p className="truncate font-medium">{quote.customerName}</p>
+                    <Link
+                      to={`/quotes/${quote.id}`}
+                      onClick={(event) => event.stopPropagation()}
+                      className="block truncate font-medium hover:underline"
+                    >
+                      {quote.customerName}
+                    </Link>
                     <p className="text-muted-foreground truncate text-xs">{quote.subject}</p>
                   </div>
                 </div>
@@ -102,16 +107,7 @@ export function QuotesTable({ quotes, totalCount, now }: QuotesTableProps) {
                 </Badge>
               </TableCell>
               <TableCell>
-                <Badge
-                  className={cn('rounded-sm font-normal', STATUS_STYLES[quote.status].badge)}
-                  variant={quote.status === 'sent' ? 'outline' : 'default'}
-                >
-                  <span
-                    aria-hidden
-                    className={cn('size-1.5 rounded-full', STATUS_STYLES[quote.status].dot)}
-                  />
-                  {STATUS_LABELS[quote.status]}
-                </Badge>
+                <StatusBadge status={quote.status} />
               </TableCell>
               <TableCell className="text-right font-semibold">
                 {quote.estimatedTotal ? formatMoney(quote.estimatedTotal) : <Dash />}
