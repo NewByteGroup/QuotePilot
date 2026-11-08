@@ -36,7 +36,7 @@ The equation in spec section 4.4 is a good outline, but the engine cannot be wri
 | Organization rules, resolved by precedence route, then modal, then `ALL` | `pricing_rules` |
 | Valid private tariffs for the route | `private_tariffs` |
 | Pinned public snapshots (terminal fees, carrier FX) and the PTAX reference rate | Layer C, by `public_snapshot_id` |
-| Quote date and an injected clock | the worker |
+| Quote date, pricing instant `priced_at` and an injected clock | the worker |
 
 **Output struct:** lines (category, description, source type, referenced tariff or snapshot id, original currency and amount, FX rate used, cost BRL, sell BRL, flags), totals, `warnings`, the list of `assumptions` applied, a status of `COMPLETE` or `INCOMPLETE` with reasons, and an `inputs_hash`.
 
@@ -68,7 +68,7 @@ Notes:
    - LCL: chargeable W/M is the greater of weight in tonnes and volume in cubic metres (1 tonne = 1 m³ convention).
    - Air: chargeable weight is the greater of gross kg and volumetric kg, with volumetric kg = volume m³ × 167 (the usual 6000 cm³ per kg convention).
    **[business] confirm the conventions with the pilot companies.**
-3. **Select tariffs.** Filter by route, modal, equipment and validity on the quote date (`valid_from <= date <= valid_until`). Filtering is deterministic on codes; embeddings only help rank service descriptions among already-valid rows (spec section 5.4 warning applies). If several carriers qualify, the default is: price the lowest net cost, list the others as alternatives in the audit view. **[business] one price or several options?** Missing tariff for a required group makes the result `INCOMPLETE`; the engine never invents a number.
+3. **Select tariffs.** Filter by route, modal and equipment. For each tariff natural key (carrier, route, modal, equipment, charge_category, charge_code), consider the rows whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing time (`activated_at <= priced_at`); take the row from the batch with the latest `activated_at`. If that row is a tombstone (`is_removed`), that natural key is dropped from the candidates (for example one carrier's rate); whether the result is then `INCOMPLETE` follows the offer rule in open question 12. See RFC-002 step 3 (tariff versioning). Filtering is deterministic on codes; embeddings only help rank service descriptions among already-valid rows (spec section 5.4 warning applies). If several carriers qualify, the default is: price the lowest net cost, list the others as alternatives in the audit view. **[business] one price or several options?** Missing tariff for a required group makes the result `INCOMPLETE`; the engine never invents a number.
 4. **Freight and origin lines.** `quantity × net_amount`, never below `min_amount`, converted to BRL (section 7). Surcharges (BAF, GRI, peak season) are their own lines, identified by `charge_category` and `charge_code` on the tariff row (comment 11).
 5. **CIF base in BRL.** `(goods value + freight + insurance)` where freight is the tariff freight (EXW, FCA, FOB) or the declared freight (CIF family). Converted at the customs rate (section 7).
 6. **Terminal lines.** Look up the public fee band for the CIF base, weight and volume. Storage covers the first period only unless the RFQ says otherwise. **[business] confirm the storage period assumption.**
@@ -120,10 +120,11 @@ The spec equation applies `M` to the entire cost, terminal pass-through fees inc
 | 9 | Storage period assumption | Pilot companies | First period only |
 | 10 | Add an insurance line | Marcelo | No; insurance is an input only |
 | 11 | Half-up rounding | Marcelo | Half up |
+| 12 | What makes a tariff offer complete: must one carrier cover every required freight and origin group, or may groups from different parties combine (for example EXW origin charges from an origin agent plus ocean freight)? | Marcelo, pilot companies | Per carrier: an offer is usable only if that carrier covers every required freight and origin group; public terminal fees are carrier-independent; `INCOMPLETE` if no offer is usable. Never combine across carriers silently. |
 
 ## 10. Impact
 
-- **Data model v1.2:** `charge_category` and `charge_code` on tariffs; `margin_scope` (and `k`) on pricing rules; `inputs_hash` and line `flags` on quotes; a rounding rule note in the schema comments.
+- **Data model v1.2:** `charge_category` and `charge_code` on tariffs; `margin_scope` (and `k`) on pricing rules; `inputs_hash` and line `flags` on quotes; a rounding rule note in the schema comments; tariff versioning (`is_removed`, batch `activated_at`, quote `priced_at`) as defined in RFC-002 step 3 (tariff versioning).
 - **ADR-004:** unchanged. The worker remains the only caller.
 - **ADR-008:** the money tests in that ADR implement sections 5 and 6.
 - **Connectors (RFC-003):** terminal bands and carrier FX must be exposed in a shape the lookups above can use.
