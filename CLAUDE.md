@@ -19,7 +19,7 @@ of truth between them. Postgres 16 + pgvector on Supabase, with RLS enforced. Di
 ## Where things are
 
 - `docs/adr-rfc-plan.md`: status of every ADR and RFC (done, to write, owner, blockers).
-- `docs/adr/`: ADR-001 (monorepo, Go core + Python ai-engine), ADR-003 (Postgres on Supabase) and ADR-004 (River staged jobs) drafted.
+- `docs/adr/`: ADR-001 (monorepo, Go core + Python ai-engine), ADR-002 (Go core stack and spike gate), ADR-003 (Postgres on Supabase), ADR-004 (River staged jobs), ADR-005 (auth and tenant resolution) and ADR-008 (testing strategy) drafted.
 - Marcelo's product spec (Portuguese) and the 17 Notion review comments on sections 4 and 5 are kept locally and are not in git (the repo is public). Sections 4 and 5 and the pricing equation (4.4) are Pedro's.
 
 ## Decisions so far
@@ -80,7 +80,7 @@ saying what belongs there. Show the tree and wait for approval before committing
 If it does not pass quickly, switch the core to Python/FastAPI behind the same contract
 (ADR-001, Reversibility).
 
-**Then:** ADR-002, ADR-005, ADR-006 and RFC-001..004 (ADR-007 is written during Mission 2), in the order in `docs/adr-rfc-plan.md`.
+**Then:** ADR-002, ADR-005, ADR-008 and RFC-001..004 are drafted. The next steps are answering the RFC open questions (owners are in `docs/adr-rfc-plan.md`) and writing ADR-007 during Mission 2.
 
 ## Working with Pedro
 
