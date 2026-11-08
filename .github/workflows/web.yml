@@ -1,3 +1,4 @@
+# Job names are the branch-protection contract in AGENTS.md (lint, test, contracts-drift, build).
 name: web
 
 on:
@@ -29,36 +30,68 @@ permissions:
   contents: read
 
 jobs:
-  web:
+  lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-
-      - name: Contracts lint
+      - name: OpenAPI lint
         run: pnpm --filter @quotepilot/contracts lint
-      - name: Contracts drift (TypeScript)
+      - name: eslint + prettier --check + tsc --noEmit
+        run: pnpm --filter @quotepilot/web lint
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @quotepilot/web test
+
+  contracts-drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Regenerate TypeScript and fail on any diff
         run: |
           pnpm --filter @quotepilot/contracts generate
           git diff --exit-code -- packages/contracts/generated
 
-      - name: Lint
-        run: pnpm --filter @quotepilot/web lint
-      - name: Test
-        run: pnpm --filter @quotepilot/web test
-      - name: Build
-        run: pnpm --filter @quotepilot/web build
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @quotepilot/web build
       - name: Preview smoke test
         run: |
           pnpm --filter @quotepilot/web preview --port 4173 --strictPort &
           for _ in $(seq 1 30); do
-            curl -fsS http://localhost:4173/ | grep -q '<div id="root">' && exit 0
+            if curl -fsS http://localhost:4173/ | grep -q '<div id="root">'; then exit 0; fi
             sleep 1
           done
           echo "vite preview did not serve the app" >&2
