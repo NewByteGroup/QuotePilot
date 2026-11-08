@@ -102,7 +102,13 @@ A wrong tariff silently corrupts every later quote, so activation is a human ste
 
 1. A tariff-update email or an uploaded CSV creates a `private_tariff_batches` row in status `PENDING_REVIEW`.
 2. A user allowed to activate (proposed: `ADMIN` or `OWNER`, see open question 9) sees a diff against the active batch: rows added, removed and changed, with changes beyond a configured percentage highlighted.
-3. On confirmation by a user allowed to activate (open question 9) the batch becomes active. Tariff rows are never updated (comment 11): activation sets `activated_at` on the new batch and `superseded_at` on the previous batch (batch-level fields, each written once). Tariff selection (RFC-001) joins each row to its batch and uses the rows of the batch that was active on the quote date, together with the row's own `valid_from`/`valid_until`, so a past quote still resolves to the same rows (rule 9). Impact: data model v1.2 needs these batch columns and RFC-001 tariff selection must join on the batch.
+3. On confirmation by a user allowed to activate (open question 9) the batch becomes active. Tariffs are versioned per key, append-only (comment 11, rule 9):
+   - Tariff rows are immutable: never updated, never deleted. A row's **natural key** is (carrier, route, modal, equipment, charge_category, charge_code).
+   - A batch carries only the rows it changes. A changed or new price is a new row; a removed price is a **tombstone row** (`is_removed = true`) for the same natural key. Rows a batch does not mention stay in force, so a one-carrier update leaves the other carriers untouched.
+   - Activation writes `activated_at` (timestamptz) once on the batch. That is the only write: no batch is ever marked as replaced.
+   - **Selection** (RFC-001 step 3): among the rows of a natural key whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing instant (`activated_at <= priced_at`), take the row from the batch with the latest `activated_at`. If that row is a tombstone, the key has no tariff: the line is unresolved and the quote is `INCOMPLETE`.
+   - A quote stores `priced_at` (timestamptz, the pricing instant, in addition to the quote date) and the ids of the tariff rows it used. **Replay reads those recorded row ids** and never re-runs selection, so tariffs activated later cannot change a past quote. Recalculation re-runs selection and creates a new quote version (rule 9).
+   - Impact: data model v1.2 needs batch `activated_at`, row `is_removed` plus an index on the natural key, and quote `priced_at`.
 
 ## 7. Retention and privacy
 
@@ -124,7 +130,7 @@ Raw emails contain personal data (names, addresses) and commercial secrets. Prop
 
 ## 9. Impact
 
-- **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; batch `activated_at` and `superseded_at`; suppression list; per-tenant caps.
+- **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; batch `activated_at`; tariff row `is_removed` and natural-key index; quote `priced_at` (see step 3, tariff versioning); suppression list; per-tenant caps.
 - **ADR-004:** stage 1 gains the immediate-download rule and the skip rules; stage 5 and 7 gain the rendering and sender decisions.
 - **`packages/contracts`:** a render request and response, with money as strings.
 
