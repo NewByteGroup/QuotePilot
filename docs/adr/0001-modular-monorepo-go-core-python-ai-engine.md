@@ -39,7 +39,7 @@ QuotePilot is a multi-tenant B2B SaaS. Three facts shape the architecture:
 
 ### Contracts first
 
-`packages/contracts/` is the single source of truth for the shapes exchanged between components (OpenAPI 3.1 and JSON Schema):
+`packages/contracts/` is the single source of truth for the shapes exchanged between components (OpenAPI 3.0.3 and JSON Schema — 3.0.3 not 3.1, per ADR-002: `oapi-codegen` does not support 3.1):
 
 - core-api HTTP API (consumed by `web`)
 - core-api to ai-engine requests/responses (RFQ extraction, connector output, render requests)
