@@ -286,7 +286,7 @@ secrets only from GitHub environments, never echoed. Run the same checks locally
 - Inject dependencies through constructor/parameter, not globals or imports.
 - Wrap third-party libraries behind a thin interface owned by this project (Resend, Firecrawl,
   LLM and embedding providers, Supabase Storage).
-- Go stack candidates are in ADR-002 (once written). Do not add a library that is not there
+- Go stack candidates are in ADR-002. Do not add a library that is not there
   without asking.
 
 ## Structure
