@@ -1,4 +1,4 @@
-.PHONY: test test-ai test-web test-integration db-up db-reset lint contracts-drift ci
+.PHONY: test test-ai test-web test-integration db-up db-reset db-check db-check-negative lint contracts-drift ci
 
 test:
 	$(MAKE) -C apps/core-api test
@@ -22,6 +22,14 @@ db-up:
 db-reset:
 	docker compose down -v
 	$(MAKE) db-up
+
+# Runs infra/postgres/checks/roles.sql against the running db container (read-only assertions).
+db-check:
+	docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < infra/postgres/checks/roles.sql
+
+# Proves each roles.sql assertion fails on a mutation; every mutation runs in a rolled-back transaction.
+db-check-negative:
+	bash infra/postgres/checks/negative-tests.sh
 
 lint:
 	$(MAKE) -C apps/core-api lint
