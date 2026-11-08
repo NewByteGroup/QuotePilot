@@ -29,6 +29,7 @@ The team's guardrail is three or four connectors done well. Candidates:
 A connector is a Python module in `apps/ai-engine/connectors/<slug>/` with two parts: fetch (get the raw content) and parse (turn it into rates). Its output is a `ConnectorOutput` defined in `packages/contracts`:
 
 - `connector_slug`, `parser_version`, `source_url`, `fetched_at`, `source_content_hash`
+- `raw_content`: the fetched bytes, base64, size-capped by a configured limit; its SHA-256 must equal `source_content_hash`, which `core-api` verifies before storing it under the platform prefix. If the content exceeds the cap the connector fails its hard checks rather than truncating.
 - `rates`: typed rows (kind, keys such as terminal and fee band, amount as a decimal string, currency, unit, validity if known)
 - `diagnostics`: rows found, columns seen, structure signature, notes
 
@@ -54,7 +55,7 @@ The spec's score `S_conf` must not come from an LLM's opinion of itself. It is c
 | Date on the page matches the expected freshness | soft, weighted |
 | Parser version and fixture suite pass | hard in CI, informational at runtime |
 
-`S_conf` is the weighted share of checks passed, from 0 to 1. **A failed hard check forces `DEGRADED` regardless of the score.** `S_conf` below 0.95 (the spec's threshold) triggers healing. Weights and thresholds are configuration, calibrated on recorded fixtures, and reviewed when a connector is added.
+`S_conf` is the weighted share of checks passed, from 0 to 1. **A failed hard check forces `DEGRADED` regardless of the score.** A connector entering `DEGRADED`, whether through a failed hard check or `S_conf` below 0.95 (the spec's threshold), triggers healing. Weights and thresholds are configuration, calibrated on recorded fixtures, and reviewed when a connector is added.
 
 Status machine: `HEALTHY` to `DEGRADED` (low score or hard fail), then `HEALING` while a repair is open, then `HEALTHY` after a repaired parser passes. A connector that exhausts its repair budget moves to `FAILED` and waits for a human. `FAILED` is an addition to the spec's three statuses (data model v1.2).
 

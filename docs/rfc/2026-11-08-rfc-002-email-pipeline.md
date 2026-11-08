@@ -101,8 +101,8 @@ Tenant data needed for rendering (lines, totals, branding) is passed in the requ
 A wrong tariff silently corrupts every later quote, so activation is a human step.
 
 1. A tariff-update email or an uploaded CSV creates a `private_tariff_batches` row in status `PENDING_REVIEW`.
-2. The analyst sees a diff against the active batch: rows added, removed and changed, with changes beyond a configured percentage highlighted.
-3. On confirmation the batch becomes active. Tariffs are append-only: a new batch closes the old rows by `valid_until` rather than updating them (comment 11).
+2. A user allowed to activate (proposed: `ADMIN` or `OWNER`, see open question 9) sees a diff against the active batch: rows added, removed and changed, with changes beyond a configured percentage highlighted.
+3. On confirmation by a user allowed to activate (open question 9) the batch becomes active. Tariff rows are never updated (comment 11): activation sets `activated_at` on the new batch and `superseded_at` on the previous batch (batch-level fields, each written once). Tariff selection (RFC-001) joins each row to its batch and uses the rows of the batch that was active on the quote date, together with the row's own `valid_from`/`valid_until`, so a past quote still resolves to the same rows (rule 9). Impact: data model v1.2 needs these batch columns and RFC-001 tariff selection must join on the batch.
 
 ## 7. Retention and privacy
 
@@ -120,10 +120,11 @@ Raw emails contain personal data (names, addresses) and commercial secrets. Prop
 | 6 | Retention period and deletion process | Pilot companies | 12 months |
 | 7 | Virus scanning | Pedro | Not in the MVP |
 | 8 | Resend retry behaviour for non-2xx responses | Pedro | Verify before relying on it (ADR-005) |
+| 9 | Who may activate a tariff batch: `ADMIN`/`OWNER` only (matches the ADR-005 matrix) or `PRICING_ANALYST` too? | Pedro and Marcelo | `ADMIN`/`OWNER` only (proposed) |
 
 ## 9. Impact
 
-- **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; suppression list; per-tenant caps.
+- **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; batch `activated_at` and `superseded_at`; suppression list; per-tenant caps.
 - **ADR-004:** stage 1 gains the immediate-download rule and the skip rules; stage 5 and 7 gain the rendering and sender decisions.
 - **`packages/contracts`:** a render request and response, with money as strings.
 

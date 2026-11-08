@@ -68,7 +68,7 @@ A field's **status** is the source of truth. The numeric confidence is kept for 
 | Amber | Anything else short of red: inferred, unverified evidence, low auditor confidence, a soft check failed |
 | Red | A hard check failed or a required field is missing |
 
-A quote is `READY` only if every required field is green and the pricing result has no amber flags (RFC-001). Otherwise it is `NEEDS_REVIEW`, and no 1-click link is issued for it (ADR-005). This is the spec's "100% confidence turns green" rule expressed as a state rather than a number: the model never outputs a probability of exactly 1, so a threshold on the number alone would never turn anything green.
+A quote is `READY` only if every required field is green, the pricing result is complete (not `INCOMPLETE`) and has no amber flags (RFC-001). Otherwise it is `NEEDS_REVIEW`, and no 1-click link is issued for it (ADR-005). This is the spec's "100% confidence turns green" rule expressed as a state rather than a number: the model never outputs a probability of exactly 1, so a threshold on the number alone would never turn anything green.
 
 `extraction_confidence` (`NUMERIC(5,4)`) is stored as the minimum auditor confidence across required fields, for ordering and dashboards, and is no longer what decides green. `auto_approve_threshold` in the pricing rules then acts on status: it must be reworded in the data model (v1.2).
 
