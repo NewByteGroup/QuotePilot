@@ -1,0 +1,294 @@
+openapi: 3.1.0
+info:
+  title: QuotePilot core-api
+  version: 0.1.0
+  description: |
+    HTTP API exposed by core-api and consumed by web (ADR-001, contracts first).
+    Money is always a decimal string plus an ISO 4217 currency, never a JSON number.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+tags:
+  - name: session
+    description: Signed-in user and active organization.
+  - name: inbox
+    description: RFQs received by the organization and their quote status.
+paths:
+  /v1/session:
+    get:
+      operationId: getSession
+      summary: Current user and active organization
+      tags: [session]
+      responses:
+        "200":
+          description: Session of the signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/inbox/quotes:
+    get:
+      operationId: listInboxQuotes
+      summary: Quotes in the inbox of the active organization
+      tags: [inbox]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Only quotes in this status. Omit for all.
+          schema:
+            $ref: "#/components/schemas/QuoteStatus"
+        - name: q
+          in: query
+          required: false
+          description: Case-insensitive match on RFQ number, customer name or subject.
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        "200":
+          description: Inbox page with summary counters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxQuotePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: Invalid request parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          examples: [invalid_parameter]
+        message:
+          type: string
+    Session:
+      type: object
+      required: [user, organization]
+      properties:
+        user:
+          $ref: "#/components/schemas/SessionUser"
+        organization:
+          $ref: "#/components/schemas/SessionOrganization"
+    SessionUser:
+      type: object
+      required: [id, name, role, organizationCount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        role:
+          type: string
+          enum: [admin, operator]
+        organizationCount:
+          type: integer
+          minimum: 1
+    SessionOrganization:
+      type: object
+      required: [id, name, planName, inboundAddress]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        planName:
+          type: string
+        inboundAddress:
+          type: string
+          format: email
+          description: Address that receives RFQ emails for this organization.
+    QuoteStatus:
+      type: string
+      enum: [processing, awaiting_review, ready_to_send, sent]
+    Equipment:
+      type: string
+      enum: [fcl_20dv, fcl_40hc, lcl, air]
+    UnLocode:
+      type: string
+      pattern: "^[A-Z]{2}[A-Z2-9]{3}$"
+      examples: [BRSSZ]
+    Route:
+      type: object
+      required: [origin, destination]
+      properties:
+        origin:
+          $ref: "#/components/schemas/UnLocode"
+        destination:
+          $ref: "#/components/schemas/UnLocode"
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: "^-?\\d+(\\.\\d+)?$"
+          description: Decimal amount as a string (no floats).
+          examples: ["23260.55"]
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          examples: [BRL]
+    InboxQuote:
+      type: object
+      required:
+        - id
+        - rfqNumber
+        - customerName
+        - subject
+        - route
+        - equipment
+        - status
+        - estimatedTotal
+        - confidencePercent
+        - slaDueAt
+        - slaAtRisk
+        - receivedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        rfqNumber:
+          type: integer
+          minimum: 1
+        customerName:
+          type: string
+        subject:
+          type: string
+        route:
+          $ref: "#/components/schemas/Route"
+        equipment:
+          $ref: "#/components/schemas/Equipment"
+        status:
+          $ref: "#/components/schemas/QuoteStatus"
+        estimatedTotal:
+          description: Null while the quote is still processing.
+          oneOf:
+            - $ref: "#/components/schemas/Money"
+            - type: "null"
+        confidencePercent:
+          description: Deterministic extraction confidence (RFC-004). Null while processing.
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+        slaDueAt:
+          description: Deadline to answer the customer. Null once the quote is sent.
+          type: [string, "null"]
+          format: date-time
+        slaAtRisk:
+          type: boolean
+        receivedAt:
+          type: string
+          format: date-time
+    InboxStatusCounts:
+      type: object
+      required: [all, processing, awaiting_review, ready_to_send, sent]
+      properties:
+        all:
+          type: integer
+          minimum: 0
+        processing:
+          type: integer
+          minimum: 0
+        awaiting_review:
+          type: integer
+          minimum: 0
+        ready_to_send:
+          type: integer
+          minimum: 0
+        sent:
+          type: integer
+          minimum: 0
+    SlaRiskHighlight:
+      type: object
+      required: [customerName, slaDueAt]
+      properties:
+        customerName:
+          type: string
+        slaDueAt:
+          type: string
+          format: date-time
+    InboxSummary:
+      type: object
+      required:
+        - receivedToday
+        - receivedYesterday
+        - readyToSend
+        - autoApproveConfidencePercent
+        - avgResponseMinutes
+        - responseTargetMinutes
+        - slaAtRiskCount
+        - mostUrgentSlaRisk
+      properties:
+        receivedToday:
+          type: integer
+          minimum: 0
+        receivedYesterday:
+          type: integer
+          minimum: 0
+        readyToSend:
+          type: integer
+          minimum: 0
+        autoApproveConfidencePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        avgResponseMinutes:
+          type: integer
+          minimum: 0
+        responseTargetMinutes:
+          type: integer
+          minimum: 0
+        slaAtRiskCount:
+          type: integer
+          minimum: 0
+        mostUrgentSlaRisk:
+          oneOf:
+            - $ref: "#/components/schemas/SlaRiskHighlight"
+            - type: "null"
+    InboxQuotePage:
+      type: object
+      required: [items, summary, statusCounts, refreshedAt]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxQuote"
+        summary:
+          $ref: "#/components/schemas/InboxSummary"
+        statusCounts:
+          $ref: "#/components/schemas/InboxStatusCounts"
+        refreshedAt:
+          type: string
+          format: date-time
