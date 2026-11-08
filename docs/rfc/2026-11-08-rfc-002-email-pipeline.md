@@ -101,8 +101,14 @@ Tenant data needed for rendering (lines, totals, branding) is passed in the requ
 A wrong tariff silently corrupts every later quote, so activation is a human step.
 
 1. A tariff-update email or an uploaded CSV creates a `private_tariff_batches` row in status `PENDING_REVIEW`.
-2. The analyst sees a diff against the active batch: rows added, removed and changed, with changes beyond a configured percentage highlighted.
-3. On confirmation the batch becomes active. Tariffs are append-only: a new batch closes the old rows by `valid_until` rather than updating them (comment 11).
+2. A user allowed to activate (proposed: `ADMIN` or `OWNER`, see open question 9) sees a diff against the **effective tariff set** (the rows selection below would use, resolved per natural key across all activated batches, not the latest batch alone, because batches are sparse): rows added, removed and changed, with the price change measured against the effective price for that key at the start of the window the pending row changes (its `valid_from`), so a future-dated change is compared with the price in force when it starts; how already-started, backdated or expired windows are presented is left to the implementing ADR, with changes beyond a configured percentage highlighted.
+3. On confirmation by a user allowed to activate (open question 9) the batch becomes active. Tariffs are versioned per key, append-only (comment 11, rule 9):
+   - Tariff rows are immutable: never updated, never deleted. A row's **natural key** is (carrier, route, modal, equipment, charge_category, charge_code).
+   - A batch carries only the rows it changes. A changed or new price is a new row; a removed price is a **tombstone row** (`is_removed = true`) for the same natural key. Rows a batch does not mention stay in force, so a one-carrier update leaves the other carriers untouched.
+   - Activation writes `activated_at` (timestamptz) once on the batch. That is the only write: no batch is ever marked as replaced.
+   - **Selection** (RFC-001 step 3): among the rows of a natural key whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing instant (`activated_at <= priced_at`), take the row from the batch with the latest `activated_at`. If that row is a tombstone, that natural key is dropped from the candidates (for example one carrier's rate was removed); whether the quote is then `INCOMPLETE` follows the offer rule in RFC-001 open question 12 (by default a carrier offer is usable only if that carrier still covers every required group), so a removal never silently blocks a quote that another complete offer can price.
+   - A quote stores `priced_at` (timestamptz, the pricing instant, in addition to the quote date) and the ids of the tariff rows it used. **Replay reads those recorded row ids** and never re-runs selection, so tariffs activated later cannot change a past quote. Recalculation re-runs selection and creates a new quote version (rule 9).
+   - Impact: data model v1.2 needs batch `activated_at`, row `is_removed` plus an index on the natural key, and quote `priced_at`.
 
 ## 7. Retention and privacy
 
@@ -120,10 +126,11 @@ Raw emails contain personal data (names, addresses) and commercial secrets. Prop
 | 6 | Retention period and deletion process | Pilot companies | 12 months |
 | 7 | Virus scanning | Pedro | Not in the MVP |
 | 8 | Resend retry behaviour for non-2xx responses | Pedro | Verify before relying on it (ADR-005) |
+| 9 | Who may activate a tariff batch: `ADMIN`/`OWNER` only (matches the ADR-005 matrix) or `PRICING_ANALYST` too? | Pedro and Marcelo | `ADMIN`/`OWNER` only (proposed) |
 
 ## 9. Impact
 
-- **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; suppression list; per-tenant caps.
+- **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; batch `activated_at`; tariff row `is_removed` and natural-key index; quote `priced_at` (see step 3, tariff versioning); suppression list; per-tenant caps.
 - **ADR-004:** stage 1 gains the immediate-download rule and the skip rules; stage 5 and 7 gain the rendering and sender decisions.
 - **`packages/contracts`:** a render request and response, with money as strings.
 

@@ -44,8 +44,10 @@ Expected failures when `roles.sql` is pointed at hosted Supabase, to be resolved
 (not yet written). Items marked "unverified" have not been tried against a real project.
 
 - `[B3]`: the platform `postgres` role is a member of `qp_migrator` (see above); needs an allowlist.
-- `[G]`: fails unless `REVOKE TEMPORARY ON DATABASE ... FROM PUBLIC` was applied. Who owns the
-  database on Supabase, and so who may run that revoke, is unverified.
+- `[G]`: needs no exception (ADR-003 acceptance item 8): it must pass on hosted, so
+  `REVOKE TEMPORARY ON DATABASE ... FROM PUBLIC` has to be applied there. Who owns the database on
+  Supabase, and so who may run that revoke, is unverified; if it cannot be applied, revisit `[G]`
+  and acceptance item 8 together.
 - `[M]`: flags partitions that lack their own ENABLE + FORCE RLS. This is intended.
 - `[X]` (allowlist of grantees in `app`/`river`) needs a named exception list for platform roles
   there; unverified which roles Supabase grants by default.
