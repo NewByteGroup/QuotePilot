@@ -43,7 +43,7 @@ Every PR still records the exact commands and output in its description (`AGENTS
 For `internal/pricing`, which is pure and decimal-only (ADR-004):
 
 - **Invariant: the sum of line `sell_amount_brl` equals `final_price_brl`, exactly.** Checked by property-based tests over generated inputs (Go's built-in fuzzing or `testing/quick`), plus table tests for the cases RFC-001 will define (rounding allocation, minimums, per-unit charges, expired tariffs).
-- Totals never go negative; a higher margin never lowers the price; converting a line and summing in a different order gives the same total.
+- Totals never go negative; a higher margin never lowers the price; permuting the order of the (already rounded) lines gives the same total; the test must not regroup conversions, because RFC-001 rounds each converted line before totalling (two converted costs of BRL 0.005 total BRL 0.02, not 0.01).
 - **Golden vectors:** at least ten historical quotes from the pilot companies, supplied by Marcelo, with the expected totals. Stored as synthetic values with the same structure, not the real figures, because the repo is public. The real set stays on the team's private storage and is run locally.
 - **No floats.** A test parses the package source with `go/parser` and fails if `float32` or `float64` appears in `internal/pricing`. This catches a mistake that no behavioural test would.
 - Recalculation creates a new version and never mutates the old one; replaying a quote with the recorded snapshot ids and FX rates reproduces the same numbers.

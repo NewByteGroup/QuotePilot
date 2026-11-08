@@ -95,7 +95,7 @@ WHERE n.nspname IN ('app', 'river')
   AND has_table_privilege(r.rolname, c.oid, p.priv);
 ```
 
-`infra/postgres/checks/roles.sql` is the executable version: assertions that exit non-zero on any offender. Locally, the init script creates `NOLOGIN` stand-ins `anon`, `authenticated` and `service_role`, so the same check runs locally as on hosted.
+`infra/postgres/checks/roles.sql` is the executable version: assertions that exit non-zero on any offender. Locally, the init script creates `NOLOGIN` stand-ins `anon`, `authenticated` and `service_role`, so the grants and ACL assertions run unchanged on hosted. Before hosted use, `roles.sql` needs a named exception list tracked in ADR-007 (to be written): assertion [B3] (nobody is a member of `qp_migrator` or `qp_app`) rejects the hosted `postgres` membership that section 6 requires, and [G] and [X] also need hosted exceptions (platform roles in [X]). The stand-in roles make the other assertions run identically.
 
 The check must also assert that the three roles exist (otherwise `has_table_privilege` errors) and
 that `has_schema_privilege(role, 'app', 'USAGE')` is false for each. Also check `PUBLIC` grants
@@ -182,7 +182,7 @@ The `ALTER DEFAULT PRIVILEGES ... REVOKE` for those roles is in the init script.
 4. `vector` is 0.8 or newer and `pg_trgm` is present.
 5. The spike's isolation suite passes against the hosted project as well as the local one.
 6. A presigned upload and download round-trip works through the S3 endpoint.
-7. Default privileges cover sequences (granted to `qp_app`) and functions (closed in `app`, open to `qp_app` in `river`). This is a manual check until `roles.sql` asserts `pg_default_acl` directly (follow-up): `SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl FROM pg_default_acl;`.
+7. Default privileges cover sequences (granted to `qp_app`) and functions (closed in `app`, open to `qp_app` in `river`). This is asserted by tags K1a, K1b, K2, K3, K4, K5 and [X] in `infra/postgres/checks/roles.sql` and exercised by `make db-check-negative`. Optional inspection query: `SELECT defaclrole::regrole, defaclnamespace::regnamespace, defaclobjtype, defaclacl FROM pg_default_acl;`.
 8. `has_database_privilege` shows `CONNECT` true and `TEMPORARY` false for both `qp_app` and `qp_migrator`.
 9. Revoking `TEMPORARY` from `PUBLIC` on the hosted database does not break Supabase-managed roles that rely on it.
 
