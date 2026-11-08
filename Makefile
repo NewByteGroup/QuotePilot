@@ -27,10 +27,13 @@ lint:
 	$(MAKE) -C apps/core-api lint
 	$(MAKE) -C apps/ai-engine lint
 	$(MAKE) -C apps/web lint
-	@echo "stub: would run actionlint and OpenAPI lint"
+	pnpm --filter @quotepilot/contracts lint
+	@echo "stub: would run actionlint"
 
 contracts-drift:
-	@echo "stub: would regenerate Go, Pydantic and TypeScript from packages/contracts and sqlc, and fail on any diff"
+	pnpm --filter @quotepilot/contracts generate
+	git diff --exit-code -- packages/contracts/generated
+	@echo "stub: would regenerate Go, Pydantic and sqlc, and fail on any diff"
 
 # db-up is not part of ci yet; add it before test-integration once that target stops being a stub.
 ci:
