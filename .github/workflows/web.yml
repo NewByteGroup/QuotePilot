@@ -1,0 +1,65 @@
+name: web
+
+on:
+  pull_request:
+    paths:
+      - apps/web/**
+      - packages/contracts/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .nvmrc
+      - .github/workflows/web.yml
+  push:
+    branches: [develop, main]
+    paths:
+      - apps/web/**
+      - packages/contracts/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .nvmrc
+      - .github/workflows/web.yml
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Contracts lint
+        run: pnpm --filter @quotepilot/contracts lint
+      - name: Contracts drift (TypeScript)
+        run: |
+          pnpm --filter @quotepilot/contracts generate
+          git diff --exit-code -- packages/contracts/generated
+
+      - name: Lint
+        run: pnpm --filter @quotepilot/web lint
+      - name: Test
+        run: pnpm --filter @quotepilot/web test
+      - name: Build
+        run: pnpm --filter @quotepilot/web build
+      - name: Preview smoke test
+        run: |
+          pnpm --filter @quotepilot/web preview --port 4173 --strictPort &
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:4173/ | grep -q '<div id="root">' && exit 0
+            sleep 1
+          done
+          echo "vite preview did not serve the app" >&2
+          exit 1
