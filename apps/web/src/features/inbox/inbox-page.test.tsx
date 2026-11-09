@@ -14,7 +14,7 @@ describe('InboxPage', () => {
 
     expect(await screen.findByText('Importex Trading')).toBeInTheDocument()
     expect(screen.getByText(/atlantico@in\.quotepilot\.app/)).toBeInTheDocument()
-    expect(screen.getByText('Atlântico Cargo')).toBeInTheDocument()
+    expect(await screen.findByText('Atlântico Cargo Ltda')).toBeInTheDocument()
 
     const summary = screen.getByRole('region', { name: 'Resumo' })
     expect(within(summary).getByText('RFQs hoje')).toBeInTheDocument()

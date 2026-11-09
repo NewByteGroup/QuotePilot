@@ -76,6 +76,12 @@ export function QuoteAuditPage() {
           <p className="text-muted-foreground pl-8 text-sm">
             {quote.subject} · recebido {formatReceivedAt(quote.receivedAt, now)}
           </p>
+          <Link
+            to={`/quotes/${quote.id}/aprovacao`}
+            className="text-primary pl-8 text-sm hover:underline"
+          >
+            Ver e-mail de aprovação
+          </Link>
         </div>
         {quote.slaDueAt ? (
           <SlaBox dueAt={quote.slaDueAt} atRisk={quote.slaAtRisk} now={now} />

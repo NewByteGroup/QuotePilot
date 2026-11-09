@@ -8,6 +8,7 @@ type NavItem = { label: string; to: string; badge?: number; active?: boolean }
 
 type AppSidebarProps = {
   session?: Schemas['Session']
+  identity?: Schemas['CompanyIdentity']
   inboxPendingCount?: number
 }
 
@@ -44,11 +45,12 @@ function initials(name: string): string {
     .join('')
 }
 
-export function AppSidebar({ session, inboxPendingCount }: AppSidebarProps) {
+export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarProps) {
   const { pathname } = useLocation()
   const inboxActive = pathname === '/' || pathname.startsWith('/quotes')
   const organization = session?.organization
   const user = session?.user
+  const companyName = identity?.legalName ?? organization?.name
   return (
     <aside className="bg-card sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r px-3 py-5 lg:flex">
       <div className="flex items-center gap-2 px-2">
@@ -60,11 +62,22 @@ export function AppSidebar({ session, inboxPendingCount }: AppSidebarProps) {
         type="button"
         className="hover:bg-muted mt-5 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left"
       >
-        <span className="flex size-8 items-center justify-center rounded-md bg-neutral-900 text-sm font-semibold text-white">
-          {organization?.name.charAt(0) ?? '·'}
-        </span>
+        {identity?.letterheadLogoUrl ? (
+          <img
+            src={identity.letterheadLogoUrl}
+            alt=""
+            className="size-8 shrink-0 rounded-md border bg-white object-contain p-0.5"
+          />
+        ) : (
+          <span
+            className="flex size-8 shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white"
+            style={{ backgroundColor: identity?.primaryColor ?? '#171717' }}
+          >
+            {companyName?.charAt(0) ?? '·'}
+          </span>
+        )}
         <span className="min-w-0 flex-1 leading-tight">
-          <span className="block truncate text-sm font-medium">{organization?.name ?? '—'}</span>
+          <span className="block truncate text-sm font-medium">{companyName ?? '—'}</span>
           <span className="text-muted-foreground block truncate text-xs">
             {organization?.planName ?? ''}
           </span>
@@ -77,14 +90,18 @@ export function AppSidebar({ session, inboxPendingCount }: AppSidebarProps) {
           title="Empresa"
           items={[
             { label: 'Inbox de cotações', to: '/', badge: inboxPendingCount, active: inboxActive },
-            { label: 'Tarifas & regras', to: '#' },
+            { label: 'Tarifas & regras', to: '/tarifas', active: pathname.startsWith('/tarifas') },
           ]}
         />
         <NavSection
           title="Plataforma"
           items={[
-            { label: 'Conectores', to: '#' },
-            { label: 'Auto-reparo', to: '#' },
+            { label: 'Conectores', to: '/conectores', active: pathname.startsWith('/conectores') },
+            {
+              label: 'Auto-reparo',
+              to: '/auto-reparo',
+              active: pathname.startsWith('/auto-reparo'),
+            },
           ]}
         />
       </nav>

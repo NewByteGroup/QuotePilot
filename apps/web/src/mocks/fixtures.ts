@@ -470,6 +470,9 @@ function pricingFor(quote: Schemas['InboxQuote']): Schemas['PriceComposition'] |
     margin: centsToMoney(totalCents - costCents),
     proposalTotal: centsToMoney(totalCents),
     confidencePercent: quote.confidencePercent,
+    fx: { label: 'dólar armador', rate: '5.42', referenceLabel: 'PTAX', referenceRate: '5.38' },
+    validityHours: 72,
+    recalcFxThresholdPercent: '2',
   }
 }
 

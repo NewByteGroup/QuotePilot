@@ -55,6 +55,144 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/rates/net-rate-tables": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Negotiated carrier rate tables (private, per organization) */
+        get: operations["listNetRateTables"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pricing-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** General pricing parameters, margin per route and pricing automations */
+        get: operations["getPricingRules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pricing-rules/route-margins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add or override the margin of one or more routes */
+        post: operations["addRouteMargins"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/pricing-rules/automations/{automationKey}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Turn a pricing automation on or off */
+        patch: operations["updatePricingAutomation"];
+        trace?: never;
+    };
+    "/v1/organization/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Company identity used on outgoing quote emails and the PDF letterhead */
+        get: operations["getCompanyIdentity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update company data, primary color or signature */
+        patch: operations["updateCompanyIdentity"];
+        trace?: never;
+    };
+    "/v1/organization/identity/letterhead-logo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Upload the logo used on the PDF letterhead and outgoing emails (PNG, JPEG or SVG, up to 2 MB) */
+        put: operations["uploadLetterheadLogo"];
+        post?: never;
+        /** Remove the letterhead logo */
+        delete: operations["removeLetterheadLogo"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/connectors/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Shared public-data connectors, their health and the live repair */
+        get: operations["getConnectorOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/repairs/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Self-healing repair agent status, queue and session history */
+        get: operations["getRepairOverview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -199,6 +337,9 @@ export interface components {
             margin: components["schemas"]["Money"];
             proposalTotal: components["schemas"]["Money"];
             confidencePercent: number;
+            fx: components["schemas"]["AppliedFxRate"];
+            validityHours: number;
+            recalcFxThresholdPercent: components["schemas"]["DecimalPercent"];
         };
         PriceSection: {
             title: string;
@@ -216,6 +357,170 @@ export interface components {
             detail: string | null;
             amount: components["schemas"]["Money"];
             inferred: boolean;
+        };
+        /** @description Percentage as a decimal string (no floats), e.g. "12.0". */
+        DecimalPercent: string;
+        AppliedFxRate: {
+            /** @description Rate used to price, e.g. "dólar armador". */
+            label: string;
+            rate: string;
+            /** @description Reference rate shown for comparison, e.g. "PTAX". */
+            referenceLabel: string;
+            referenceRate: string;
+        };
+        /** @enum {string} */
+        NetRateTableStatus: "active" | "expiring" | "expired" | "processing";
+        NetRateTable: {
+            /** Format: uuid */
+            id: string;
+            carrier: string;
+            /** @description Trade lane as shown to the user, e.g. "Ásia → Santos". */
+            lane: string;
+            /** @example w44 */
+            weekLabel: string;
+            /** Format: date */
+            validFrom: string;
+            /** Format: date */
+            validTo: string;
+            /** Format: date-time */
+            uploadedAt: string;
+            fileName: string;
+            status: components["schemas"]["NetRateTableStatus"];
+            processingPercent: number | null;
+        };
+        NetRateTablePage: {
+            items: components["schemas"]["NetRateTable"][];
+            /** @description Quotes priced on an expired table snapshot. */
+            staleQuoteCount: number;
+        };
+        RouteMargin: {
+            route: components["schemas"]["Route"];
+            defaultMarginPercent: components["schemas"]["DecimalPercent"];
+            appliedMarginPercent: components["schemas"]["DecimalPercent"];
+            customized: boolean;
+        };
+        PricingAutomation: {
+            key: string;
+            label: string;
+            enabled: boolean;
+        };
+        PricingRules: {
+            targetMarginPercent: components["schemas"]["DecimalPercent"];
+            fxSpreadPercent: components["schemas"]["DecimalPercent"];
+            dispatchFee: components["schemas"]["Money"];
+            marginFloorPercent: components["schemas"]["DecimalPercent"];
+            routeMargins: components["schemas"]["RouteMargin"][];
+            automations: components["schemas"]["PricingAutomation"][];
+        };
+        NewRouteMargin: {
+            route: components["schemas"]["Route"];
+            /** @description Null applies the global margin floor. */
+            marginPercent: components["schemas"]["DecimalPercent"] | null;
+        };
+        AddRouteMarginsRequest: {
+            routes: components["schemas"]["NewRouteMargin"][];
+        };
+        UpdatePricingAutomationRequest: {
+            enabled: boolean;
+        };
+        UpdateCompanyIdentityRequest: {
+            legalName?: string;
+            /** @description CNPJ, formatted. */
+            taxId?: string;
+            address?: string;
+            /** @description Must be one of primaryColorOptions. */
+            primaryColor?: string;
+            signature?: components["schemas"]["CompanySignature"];
+        };
+        CompanySignature: {
+            title: string;
+            details: string;
+        };
+        CompanyIdentity: {
+            legalName: string;
+            /** @description CNPJ, formatted. */
+            taxId: string;
+            address: string;
+            primaryColor: string;
+            primaryColorOptions: string[];
+            signature: components["schemas"]["CompanySignature"];
+            /** Format: uri */
+            letterheadLogoUrl: string | null;
+        };
+        /** @enum {string} */
+        ConnectorKind: "fx" | "public_tariff" | "fx_reference";
+        Connector: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            kind: components["schemas"]["ConnectorKind"];
+            healthPercent: number;
+            latencyMs: number;
+            /** Format: date-time */
+            collectedAt: string;
+            detail: string | null;
+            /** @description True while a repair session is open for this connector. */
+            repairing: boolean;
+        };
+        ConnectorStats: {
+            activeSources: number;
+            sourceKindsSummary: string;
+            averageHealthPercent: components["schemas"]["DecimalPercent"];
+            degradedSourceNames: string[];
+            repairs7d: number;
+            repairMeanMinutes: number;
+            snapshots24h: number;
+            collectionFailures24h: number;
+        };
+        /** @enum {string} */
+        RepairEventKind: "anomaly" | "session_opened" | "tests_passed" | "pull_request_merged" | "reprocessed";
+        RepairEvent: {
+            /** Format: date-time */
+            at: string;
+            kind: components["schemas"]["RepairEventKind"];
+            message: string;
+            tag: string;
+            /** Format: uri */
+            sessionUrl: string | null;
+        };
+        RepairTimeline: {
+            connectorName: string;
+            events: components["schemas"]["RepairEvent"][];
+        };
+        ConnectorOverview: {
+            stats: components["schemas"]["ConnectorStats"];
+            connectors: components["schemas"]["Connector"][];
+            liveRepair: components["schemas"]["RepairTimeline"] | null;
+        };
+        RepairStats: {
+            repairs7d: number;
+            successRatePercent: number;
+            escalated7d: number;
+            mttrMinutes: number;
+            queued: number;
+        };
+        RepairQueueItem: {
+            connectorName: string;
+            /** @enum {string} */
+            state: "in_progress" | "waiting_slot" | "scheduled";
+            /** Format: date-time */
+            scheduledAt: string | null;
+        };
+        RepairSession: {
+            sessionNumber: number;
+            connectorName: string;
+            anomaly: string;
+            /** @enum {string} */
+            result: "resolved" | "escalated";
+            durationMinutes: number;
+            /** Format: date-time */
+            finishedAt: string;
+        };
+        RepairOverview: {
+            stats: components["schemas"]["RepairStats"];
+            current: components["schemas"]["RepairTimeline"] | null;
+            queue: components["schemas"]["RepairQueueItem"][];
+            history: components["schemas"]["RepairSession"][];
         };
     };
     responses: {
@@ -324,6 +629,241 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    listNetRateTables: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rate tables and how many quotes priced on an expired snapshot. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetRateTablePage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getPricingRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pricing rules of the active organization. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricingRules"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    addRouteMargins: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddRouteMarginsRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated pricing rules. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricingRules"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    updatePricingAutomation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                automationKey: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePricingAutomationRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated automation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricingAutomation"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getCompanyIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Company identity. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanyIdentity"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    updateCompanyIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateCompanyIdentityRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated company identity. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanyIdentity"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    uploadLetterheadLogo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Company identity with the new logo URL. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanyIdentity"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    removeLetterheadLogo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Company identity without a logo. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompanyIdentity"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getConnectorOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connector console data. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectorOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getRepairOverview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Auto-repair data. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RepairOverview"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
 }
