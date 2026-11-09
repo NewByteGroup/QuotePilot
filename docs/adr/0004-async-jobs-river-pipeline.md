@@ -1,8 +1,8 @@
 # ADR-004: Quote pipeline as staged async jobs on River (Postgres-native queue)
 
-- **Status:** Proposed
+- **Status:** Approved (open items remain)
 - **Date:** 2026-11-04
-- **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
+- **Deciders:** Pedro (backend lead). Original review request: Marcelo and Amanda.
 - **Related:** ADR-001 (monorepo, Go/Python boundary), ADR-002 (Go core stack), ADR-003 (Postgres hosting), RFC-001 (pricing engine), RFC-002 (email pipeline)
 
 ## Context
