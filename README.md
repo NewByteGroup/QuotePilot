@@ -16,9 +16,9 @@ The RFQ lands in your inbox. The quote leaves in minutes, with the math behind i
 
 ## What it is
 
-QuotePilot is a pricing copilot for freight forwarders and NVOCCs. It sits on the quote inbox, turns an unstructured RFQ into a structured shipment, prices it against your negotiated rates plus today's public terminal tariffs and carrier FX, and returns a proposal with a line-by-line audit trail for a one-click approval.
+QuotePilot is a pricing copilot for freight forwarders and NVOCCs. Its planned MVP turns an import or export RFQ into an auditable FCL or AIR quote for the requesting customer's payable costs under the Incoterm. When that customer pays ocean freight, a Python connector in `ai-engine` fetches an FCL offer from the Hapag-Lloyd API; `core-api` validates and persists the response and performs deterministic pricing. AIR uses valid tariff inputs when the customer pays air freight. LCL, Inland/Door-to-Door and AFRMM are outside the MVP.
 
-It is not a spreadsheet with an AI autocomplete bolted on. The extraction step is probabilistic and is allowed to be; the pricing step is deterministic, runs in `Decimal`, and every number in the final PDF can be traced back to the rate row, tariff snapshot and FX quote that produced it.
+It is not a spreadsheet with an AI autocomplete bolted on. The extraction step is probabilistic and is allowed to be; the pricing step is deterministic, runs in `Decimal`, and every number in the final PDF can be traced back to the validated offer or rate row, applicable tariff snapshot and FX rate that produced it.
 
 ## The problem
 
@@ -46,15 +46,15 @@ flowchart LR
 
 1. **The RFQ arrives.** Each company has its own quote address and its own inbox. Nothing is shared between tenants.
 2. **The agent extracts.** Incoterm, POL/POD, NCM, weight, volume, cargo value and mode come out of the body text and the attachments, with a per-field confidence score. What it could not read is marked, never guessed.
-3. **Costs are assembled.** Your negotiated net rates (scoped to the company), public terminal tariffs, surcharges and the carrier's dollar for the day.
-4. **The engine prices it.** Ocean/air freight, local charges, AFRMM, IOF, insurance and margin — computed in `Decimal`, with a line-by-line calculation memo.
+3. **Costs are assembled.** The Incoterm and import/export direction determine which costs the requesting customer owes. FCL uses a validated Hapag-Lloyd offer only when that customer pays ocean freight; AIR uses applicable tariff rows when the customer pays air freight. Other payable charges and FX inputs are recorded for audit.
+4. **The engine prices it.** Only payable base freight receives a cost-based markup: FCL `OCEAN_FREIGHT` has a `min_markup_usd` floor per container; AIR base freight uses `max(min_amount, chargeable_weight_kg × net_amount)` with `chargeable_weight_kg = max(gross_weight_kg, volume_m3 × 166.67)`. Payable local charges, FSC/SSC and fixed fees pass through at cost. Money math runs in `Decimal` in `core-api`.
 5. **Someone approves.** Inferred items are highlighted. On approval the proposal goes out in the customer's original thread, under your branding.
 
-## Core capabilities
+## Planned capabilities
 
 **RFQ inbox** — every request in one queue with status, extraction confidence, estimated value and SLA-at-risk flagging, so the analyst knows where to step in before the deadline breaks.
 
-**Rate tables and rules** — net rates uploaded as CSV or PDF with validity windows, target margin, FX spread, per-route floors, and a hard block on quoting negative margin. An expired table is surfaced before it can reach a calculation.
+**Rate tables and rules** — valid tariff inputs, FX spread and cost-based freight markup rules, including a per-container FCL minimum markup. An expired input is surfaced before it can reach a calculation.
 
 **Pricing engine** — deterministic money math in `Decimal`, an immutable snapshot referenced by every quote, and recalculation when FX moves inside the validity window.
 
@@ -62,7 +62,7 @@ flowchart LR
 
 **Self-healing parsers** — terminal portals and FX pages change layout without notice. When a source's extraction score drops below threshold, a repair cycle opens on its own: failing parser reproduced, fix applied, tests run in isolation, and a pull request opened for human review. The team sees a reviewed diff, not a fire.
 
-**One-click approval** — the approval email carries the quote summary, net margin, applied FX and validity, with inferred items marked. The link is single-use, signed and expires in 24 hours.
+**One-click approval** — a `READY` quote may receive a single-use signed link that expires in 24 hours. Quotes with inferred or uncertain items require review in the workspace before sending.
 
 ## Architecture
 
@@ -82,7 +82,7 @@ flowchart TD
     end
 
     subgraph Sourcing
-        CONN[Connector workers<br/>3–4 MVP sources]
+        CONN[Connector workers<br/>selected sources]
         SCORE[Integrity scoring<br/>+ self-healing cycle]
     end
 
@@ -104,7 +104,7 @@ Every tenant-scoped domain table carries `organization_id` and is protected by P
 
 ## Design principles
 
-- **Auditable or it did not happen.** Every quote resolves to a rate row, a tariff snapshot and an FX quote, all immutable.
+- **Auditable or it did not happen.** Every quote resolves to validated offer or tariff inputs, applicable snapshots and recorded FX rates, with immutable references for replay.
 - **Probabilistic extraction, deterministic pricing.** The model reads; the engine computes. They are never the same step.
 - **Money is never a float.** `Decimal` end to end, with the rounding rule stated per line.
 - **Humans approve, machines prepare.** Confidence and ambiguity are surfaced, not smoothed over.
@@ -112,9 +112,9 @@ Every tenant-scoped domain table carries `organization_id` and is protected by P
 
 ## Status
 
-Early development. The repository contains the app and contract scaffolds, local PostgreSQL role checks, and architecture documentation; the application code is being prepared for publication. The MVP connector scope is three or four sources, pending pilot-company input (RFC-003).
+Early development. The repository contains app and contract scaffolds, local PostgreSQL role checks, and architecture documentation. The FCL and AIR quote flows described above are planned; they are not implemented yet. The Hapag connector remains subject to source-specific validation and review.
 
-The pilot runs with four freight forwarding companies on maritime and air imports through Santos, Itajaí, Paranaguá, GRU and Viracopos. Targets we hold ourselves to:
+The pilot is planned with freight-forwarding companies for FCL and AIR imports and exports. Targets we hold ourselves to:
 
 - less than 5 minutes from inbox to proposal (against a 24–48 h market baseline today)
 - 100% of the calculation auditable, line by line
