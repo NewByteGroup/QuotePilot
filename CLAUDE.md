@@ -13,22 +13,23 @@ Postgres and storage: API, auth, tenant resolution, RLS transactions, pricing en
 state machine, Resend webhooks and sends, River job queue. `apps/ai-engine` (Python,
 stateless) hosts LLM agents, Firecrawl connectors, document rendering and embeddings calls.
 `apps/web` is React + TypeScript. `packages/contracts` (OpenAPI + JSON Schema) is the source
-of truth between them. Postgres 16 + pgvector on Supabase, with RLS enforced. Diagram:
+of truth between them. Postgres 16 + pgvector (Railway in dev, Supabase in prod) with RLS
+enforced; object storage on Cloudflare R2. Diagram:
 `docs/diagrams/quotepilot-architecture.excalidraw`.
 
 ## Where things are
 
 - `docs/adr-rfc-plan.md`: status of every ADR and RFC (done, to write, owner, blockers).
-- `docs/adr/`: ADR-001 (monorepo, Go core + Python ai-engine), ADR-002 (Go core stack and spike gate), ADR-003 (Postgres on Supabase), ADR-004 (River staged jobs), ADR-005 (auth and tenant resolution) and ADR-008 (testing strategy) drafted.
+- `docs/adr/`: ADR-001 (monorepo, Go core + Python ai-engine), ADR-002 (Go core stack and spike gate), ADR-003 (Postgres: Railway dev, Supabase prod, R2 storage), ADR-004 (River staged jobs), ADR-005 (auth and tenant resolution), ADR-007 (CI/CD, environments, hosted DB provisioning) and ADR-008 (testing strategy) drafted; ADR-006 (AI agents in `ai-engine`) approved.
 - Marcelo's product spec (Portuguese) and the 17 Notion review comments on sections 4 and 5 are kept locally and are not in git (the repo is public). Sections 4 and 5 and the pricing equation (4.4) are Pedro's.
 
 ## Decisions so far
 
-- ADR-001: Go core + stateless Python ai-engine. Marcelo prefers Python; the team justification was sent. Fallback: Python/FastAPI core behind the same contract if the Go spike fails.
+- ADR-001 (Approved): Go core + stateless Python ai-engine. The Python/FastAPI fallback behind the same contract remains, gated on ADR-002's spike.
 - ADR-004: staged River jobs; the worker is the only caller of the pricing engine in the MVP.
-- ADR-003 (Proposed): plain Postgres + S3 on Supabase; `qp_migrator` owner and `qp_app` NOBYPASSRLS roles; tables in schema `app`; Data API and pg_graphql disabled; session-mode pooler or direct connection (River needs LISTEN/NOTIFY); private storage bucket with tenant prefix enforced by core-api. Region, plan and account owner are still open.
-- Embeddings: `VECTOR(1024)` plus an `embedding_model` column, no ANN index in the MVP; provider chosen after a 30-minute eval (default OpenAI text-embedding-3-small at 1024 dims).
-- Document rendering (PDF and email HTML): default `ai-engine`; pending Amanda and Marcelo.
+- ADR-003 (On-Hold; provider topology fixed by product spec v1.2): Railway Postgres for dev, Supabase `quotepilot-prod` in `sa-east-1` for prod, Cloudflare R2 (`quotepilot-dev`/`quotepilot-prod` buckets) for object storage. The role model still applies: `qp_migrator` owner and `qp_app` NOBYPASSRLS roles, tables in schema `app`, RLS with stand-in roles locally, Data API and pg_graphql disabled on Supabase, session-mode pooler or direct connection (River needs LISTEN/NOTIFY). Plans, connection limits and account owner are still open.
+- Embeddings: `VECTOR(1024)` plus an `embedding_model` column, no ANN index in the MVP; provider fixed at `qwen/qwen3-embedding-8b` (1024 dims) by ADR-006's approved model matrix — a retrieval-quality eval is still owed.
+- Document rendering (PDF and email HTML): fixed to `ai-engine` by product spec v1.2; the renderer library and templates remain the open piece (RFC-002).
 
 ## Missions, in order
 
@@ -80,7 +81,7 @@ saying what belongs there. Show the tree and wait for approval before committing
 If it does not pass quickly, switch the core to Python/FastAPI behind the same contract
 (ADR-001, Reversibility).
 
-**Then:** ADR-002, ADR-005, ADR-008 and RFC-001..004 are drafted. The next steps are answering the RFC open questions (owners are in `docs/adr-rfc-plan.md`) and writing ADR-007 during Mission 2.
+**Then:** ADR-002, ADR-005, ADR-007, ADR-008 and RFC-001..004 are drafted (ADR-001 and ADR-004 approved; ADR-003 on hold pending its open items). The next steps are answering the RFC open questions (owners are in `docs/adr-rfc-plan.md`).
 
 ## Working with Pedro
 
