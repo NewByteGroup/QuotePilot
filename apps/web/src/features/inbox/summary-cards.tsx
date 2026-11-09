@@ -1,3 +1,5 @@
+import { useTranslation } from 'react-i18next'
+
 import type { Schemas } from '@/api/client'
 import { Card, CardContent } from '@/components/ui/card'
 
@@ -29,32 +31,36 @@ function SummaryCard({
 }
 
 export function SummaryCards({ summary, now }: { summary: Schemas['InboxSummary']; now: Date }) {
+  const { t } = useTranslation()
   const delta = summary.receivedToday - summary.receivedYesterday
   const urgent = summary.mostUrgentSlaRisk
   return (
-    <section aria-label="Resumo" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+    <section
+      aria-label={t('inbox.summary.label')}
+      className="grid grid-cols-2 gap-3 xl:grid-cols-4"
+    >
       <SummaryCard
-        label="RFQs hoje"
+        label={t('inbox.summary.today')}
         value={String(summary.receivedToday)}
-        hint={`${delta >= 0 ? '+' : ''}${delta} vs ontem`}
+        hint={t('inbox.summary.vsYesterday', { delta: `${delta >= 0 ? '+' : ''}${delta}` })}
       />
       <SummaryCard
-        label="Prontas para 1-clique"
+        label={t('inbox.summary.ready')}
         value={String(summary.readyToSend)}
-        hint={`confiança ≥ ${summary.autoApproveConfidencePercent}%`}
+        hint={t('inbox.summary.confidence', { percent: summary.autoApproveConfidencePercent })}
       />
       <SummaryCard
-        label="Tempo médio de resposta"
-        value={`${summary.avgResponseMinutes} min`}
-        hint={`meta < ${summary.responseTargetMinutes} min`}
+        label={t('inbox.summary.avgResponse')}
+        value={t('common.minutes', { count: summary.avgResponseMinutes })}
+        hint={t('inbox.summary.target', { count: summary.responseTargetMinutes })}
       />
       <SummaryCard
-        label="SLA em risco"
+        label={t('inbox.summary.slaRisk')}
         value={String(summary.slaAtRiskCount)}
         hint={
           urgent
-            ? `${urgent.customerName} · ${minutesUntil(urgent.slaDueAt, now)} min`
-            : 'nenhuma cotação'
+            ? `${urgent.customerName} · ${t('common.minutes', { count: minutesUntil(urgent.slaDueAt, now) })}`
+            : t('inbox.summary.noQuote')
         }
         alert={summary.slaAtRiskCount > 0}
       />

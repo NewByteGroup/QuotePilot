@@ -1,5 +1,6 @@
 import { Plus } from 'lucide-react'
 import { Fragment, useState, type FormEvent } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { useAddRouteMargins } from '@/api/queries'
 import { Button } from '@/components/ui/button'
@@ -45,6 +46,7 @@ type AddRouteDialogProps = {
 }
 
 export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDialogProps) {
+  const { t } = useTranslation()
   const [rows, setRows] = useState<RouteRow[]>([emptyRow()])
   const addRoutes = useAddRouteMargins()
 
@@ -81,43 +83,42 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
       <DialogContent className="sm:max-w-xl">
         <form onSubmit={handleSubmit} className="space-y-4">
           <DialogHeader>
-            <DialogTitle>Adicionar rota</DialogTitle>
+            <DialogTitle>{t('addRoute.title')}</DialogTitle>
             <DialogDescription>
-              Defina origem, destino e margem. Margem vazia usa o piso global de{' '}
-              {formatPercent(floorPercent)}.
+              {t('addRoute.description', { percent: formatPercent(floorPercent) })}
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid grid-cols-[1fr_1fr_6rem] gap-2 text-sm">
-            <span className="text-muted-foreground text-xs">Origem</span>
-            <span className="text-muted-foreground text-xs">Destino</span>
-            <span className="text-muted-foreground text-xs">Margem</span>
+            <span className="text-muted-foreground text-xs">{t('addRoute.origin')}</span>
+            <span className="text-muted-foreground text-xs">{t('addRoute.destination')}</span>
+            <span className="text-muted-foreground text-xs">{t('addRoute.margin')}</span>
             {rows.map((row, index) => (
               <Fragment key={index}>
                 <select
-                  aria-label={`Origem da rota ${index + 1}`}
+                  aria-label={t('addRoute.originOf', { n: index + 1 })}
                   value={row.origin}
                   onChange={(event) => updateRow(index, { origin: event.target.value })}
                   className={selectClassName}
                 >
-                  <option value="">Selecionar porto…</option>
+                  <option value="">{t('addRoute.selectPort')}</option>
                   {ORIGIN_PORTS.map((port) => (
                     <option key={port}>{port}</option>
                   ))}
                 </select>
                 <select
-                  aria-label={`Destino da rota ${index + 1}`}
+                  aria-label={t('addRoute.destinationOf', { n: index + 1 })}
                   value={row.destination}
                   onChange={(event) => updateRow(index, { destination: event.target.value })}
                   className={selectClassName}
                 >
-                  <option value="">Selecionar porto…</option>
+                  <option value="">{t('addRoute.selectPort')}</option>
                   {DESTINATION_PORTS.map((port) => (
                     <option key={port}>{port}</option>
                   ))}
                 </select>
                 <Input
-                  aria-label={`Margem da rota ${index + 1}`}
+                  aria-label={t('addRoute.marginOf', { n: index + 1 })}
                   inputMode="decimal"
                   placeholder={formatPercent(floorPercent)}
                   value={row.margin}
@@ -134,29 +135,29 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
             className="text-primary inline-flex items-center gap-1 text-sm hover:underline"
           >
             <Plus className="size-4" />
-            Adicionar outra rota
+            {t('addRoute.addAnother')}
           </button>
 
           {!marginsValid ? (
             <p role="alert" className="text-sm text-red-700">
-              Margem inválida: use um número, por exemplo 10,5.
+              {t('addRoute.invalidMargin')}
             </p>
           ) : null}
           {addRoutes.isError ? (
             <p role="alert" className="text-sm text-red-700">
-              Não foi possível salvar as rotas.
+              {t('addRoute.saveError')}
             </p>
           ) : null}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => handleOpenChange(false)}>
-              Cancelar
+              {t('common.cancel')}
             </Button>
             <Button
               type="submit"
               disabled={completeRows.length === 0 || !marginsValid || addRoutes.isPending}
             >
-              Salvar rotas
+              {t('addRoute.save')}
             </Button>
           </DialogFooter>
         </form>

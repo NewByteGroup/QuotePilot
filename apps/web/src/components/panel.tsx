@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { cn } from '@/lib/utils'
 
@@ -40,17 +41,18 @@ export function StatCard({ label, value, hint }: { label: string; value: string;
 }
 
 export function QueryFallback({ isError, what }: { isError: boolean; what: string }) {
+  const { t } = useTranslation()
   if (isError) {
     return (
       <p
         role="alert"
         className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700"
       >
-        Não foi possível carregar {what}.
+        {t('common.loadError', { what })}
       </p>
     )
   }
-  return <p className="text-muted-foreground text-sm">Carregando {what}…</p>
+  return <p className="text-muted-foreground text-sm">{t('common.loading', { what })}</p>
 }
 
 export function PageHeader({ title, subtitle }: { title: string; subtitle: ReactNode }) {

@@ -1,7 +1,9 @@
 import { ChevronDown } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { NavLink, useLocation } from 'react-router'
 
 import type { Schemas } from '@/api/client'
+import { initials } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
 type NavItem = { label: string; to: string; badge?: number; active?: boolean }
@@ -20,7 +22,7 @@ function NavSection({ title, items }: { title: string; items: NavItem[] }) {
       </p>
       {items.map((item) => (
         <NavLink
-          key={item.label}
+          key={item.to}
           to={item.to}
           aria-current={item.active ? 'page' : undefined}
           className={cn(
@@ -36,21 +38,13 @@ function NavSection({ title, items }: { title: string; items: NavItem[] }) {
   )
 }
 
-function initials(name: string): string {
-  return name
-    .split(' ')
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part.charAt(0).toUpperCase())
-    .join('')
-}
-
 export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarProps) {
+  const { t } = useTranslation()
   const { pathname } = useLocation()
-  const inboxActive = pathname === '/' || pathname.startsWith('/quotes')
   const organization = session?.organization
   const user = session?.user
   const companyName = identity?.legalName ?? organization?.name
+
   return (
     <aside className="bg-card sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r px-3 py-5 lg:flex">
       <div className="flex items-center gap-2 px-2">
@@ -85,20 +79,29 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
         <ChevronDown className="text-muted-foreground size-4" />
       </button>
 
-      <nav className="mt-3 flex-1" aria-label="Principal">
+      <nav className="mt-3 flex-1" aria-label={t('nav.main')}>
         <NavSection
-          title="Empresa"
+          title={t('nav.company')}
           items={[
-            { label: 'Inbox de cotações', to: '/', badge: inboxPendingCount, active: inboxActive },
-            { label: 'Tarifas & regras', to: '/tarifas', active: pathname.startsWith('/tarifas') },
+            {
+              label: t('nav.inbox'),
+              to: '/',
+              badge: inboxPendingCount,
+              active: pathname === '/' || pathname.startsWith('/quotes'),
+            },
+            { label: t('nav.rates'), to: '/tarifas', active: pathname.startsWith('/tarifas') },
           ]}
         />
         <NavSection
-          title="Plataforma"
+          title={t('nav.platform')}
           items={[
-            { label: 'Conectores', to: '/conectores', active: pathname.startsWith('/conectores') },
             {
-              label: 'Auto-reparo',
+              label: t('nav.connectors'),
+              to: '/conectores',
+              active: pathname.startsWith('/conectores'),
+            },
+            {
+              label: t('nav.repairs'),
               to: '/auto-reparo',
               active: pathname.startsWith('/auto-reparo'),
             },
@@ -114,7 +117,8 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
           <span className="min-w-0 leading-tight">
             <span className="block truncate text-sm font-medium">{user.name}</span>
             <span className="text-muted-foreground block truncate text-xs">
-              {user.role === 'admin' ? 'Admin' : 'Operador'} · {user.organizationCount} empresas
+              {user.role === 'admin' ? t('nav.admin') : t('nav.operator')} ·{' '}
+              {t('nav.organizations', { count: user.organizationCount })}
             </span>
           </span>
         </div>

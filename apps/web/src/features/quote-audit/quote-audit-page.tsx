@@ -1,10 +1,12 @@
 import { ChevronLeft } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { Link, useParams } from 'react-router'
 
 import { useQuoteDetail } from '@/api/queries'
-import { cn } from '@/lib/utils'
 import { formatDuration, formatReceivedAt, minutesUntil } from '@/features/inbox/format'
 import { StatusBadge } from '@/features/inbox/status-badge'
+import { formatTime } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 import { EmailPanel } from './email-panel'
 import { PricePanel } from './price-panel'
@@ -12,9 +14,9 @@ import { PricePanel } from './price-panel'
 const HIGH_PRIORITY_MINUTES = 90
 
 function SlaBox({ dueAt, atRisk, now }: { dueAt: string; atRisk: boolean; now: Date }) {
+  const { t } = useTranslation()
   const minutesLeft = minutesUntil(dueAt, now)
   const high = atRisk || minutesLeft < HIGH_PRIORITY_MINUTES
-  const time = new Date(dueAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
   return (
     <div
       className={cn(
@@ -22,21 +24,25 @@ function SlaBox({ dueAt, atRisk, now }: { dueAt: string; atRisk: boolean; now: D
         high ? 'border-red-300 bg-red-50 text-red-700' : 'bg-card text-muted-foreground',
       )}
     >
-      <p>SLA: responder até {time}</p>
+      <p>{t('audit.slaUntil', { time: formatTime(dueAt) })}</p>
       <p>
-        restam {formatDuration(minutesLeft)} · prioridade {high ? 'alta' : 'normal'}
+        {t('audit.slaRemaining', {
+          duration: formatDuration(minutesLeft),
+          priority: high ? t('audit.high') : t('audit.normal'),
+        })}
       </p>
     </div>
   )
 }
 
 export function QuoteAuditPage() {
+  const { t } = useTranslation()
   const { quoteId = '' } = useParams()
   const detail = useQuoteDetail(quoteId)
   const now = new Date()
 
   if (detail.isPending) {
-    return <main className="text-muted-foreground flex-1 p-6 text-sm">Carregando cotação…</main>
+    return <main className="text-muted-foreground flex-1 p-6 text-sm">{t('audit.loading')}</main>
   }
 
   if (detail.isError) {
@@ -46,10 +52,10 @@ export function QuoteAuditPage() {
           role="alert"
           className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700"
         >
-          Não foi possível carregar esta cotação.
+          {t('audit.loadError')}
         </p>
         <Link to="/" className="text-primary text-sm hover:underline">
-          Voltar para a inbox
+          {t('audit.back')}
         </Link>
       </main>
     )
@@ -63,7 +69,7 @@ export function QuoteAuditPage() {
           <div className="flex flex-wrap items-center gap-3">
             <Link
               to="/"
-              aria-label="Voltar para a inbox"
+              aria-label={t('audit.back')}
               className="text-muted-foreground hover:text-foreground"
             >
               <ChevronLeft className="size-5" />
@@ -74,13 +80,16 @@ export function QuoteAuditPage() {
             <StatusBadge status={quote.status} />
           </div>
           <p className="text-muted-foreground pl-8 text-sm">
-            {quote.subject} · recebido {formatReceivedAt(quote.receivedAt, now)}
+            {t('audit.received', {
+              subject: quote.subject,
+              when: formatReceivedAt(quote.receivedAt, now),
+            })}
           </p>
           <Link
             to={`/quotes/${quote.id}/aprovacao`}
             className="text-primary pl-8 text-sm hover:underline"
           >
-            Ver e-mail de aprovação
+            {t('audit.approvalEmailLink')}
           </Link>
         </div>
         {quote.slaDueAt ? (

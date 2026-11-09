@@ -1,7 +1,7 @@
+import { useTranslation } from 'react-i18next'
+
 import type { Schemas } from '@/api/client'
 import { cn } from '@/lib/utils'
-
-import { STATUS_LABELS } from './format'
 
 export type StatusFilter = Schemas['QuoteStatus'] | 'all'
 
@@ -14,8 +14,9 @@ type StatusFiltersProps = {
 }
 
 export function StatusFilters({ counts, value, onChange }: StatusFiltersProps) {
+  const { t } = useTranslation()
   return (
-    <div role="group" aria-label="Filtrar por status" className="flex flex-wrap gap-2">
+    <div role="group" aria-label={t('inbox.filterLabel')} className="flex flex-wrap gap-2">
       {ORDER.map((status) => (
         <button
           key={status}
@@ -27,7 +28,7 @@ export function StatusFilters({ counts, value, onChange }: StatusFiltersProps) {
             value === status && 'border-primary bg-accent text-accent-foreground hover:bg-accent',
           )}
         >
-          {status === 'all' ? 'Todos' : STATUS_LABELS[status]} · {counts[status]}
+          {status === 'all' ? t('inbox.all') : t(`quoteStatus.${status}`)} · {counts[status]}
         </button>
       ))}
     </div>
