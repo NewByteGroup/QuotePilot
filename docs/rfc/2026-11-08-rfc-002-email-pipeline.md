@@ -76,9 +76,9 @@ Anyone who learns a tenant's alias can email it, and each message would reach an
 
 The analyst receives an internal email with the quote summary and the 1-click link (ADR-005 section 8). It goes out from the platform sender, carries no customer-facing branding, and is clearly marked internal.
 
-## 4. Rendering location (decision needed)
+## 4. Rendering implementation (`ai-engine` location fixed)
 
-The spec's "React Email" templates need Node, and a Go core does not run TSX (comment 3). The API only needs HTML.
+The product spec v1.2 places PDF and email HTML rendering in `ai-engine`. The original alternatives below explain that choice; the renderer library, templates and output-quality check remain open in this draft RFC. The earlier spec's "React Email" templates need Node, and a Go core does not run TSX (comment 3). The API only needs HTML.
 
 | Option | Description | Cost |
 |---|---|---|
@@ -86,7 +86,7 @@ The spec's "React Email" templates need Node, and a Go core does not run TSX (co
 | B. Go in `core-api` | `html/template` plus a headless browser for PDF | Heavy image and a browser in the core |
 | C. Small Node service | Keeps React Email as designed | A third runtime and deploy |
 
-**Recommendation: A.** One-hour check before committing: render the real company template to PDF inside the `ai-engine` image and compare it with Marcelo's design for fonts, page breaks, and pt-BR formatting (R$ 1.234,56 and dd/mm/aaaa). The choice of PDF library is made by that check, not here. **Owner: Amanda and Marcelo.**
+**Location: A, fixed by product spec v1.2.** Before choosing the PDF library and finalizing templates, run a one-hour check: render the real company template to PDF inside the `ai-engine` image and compare it with Marcelo's design for fonts, page breaks, and pt-BR formatting (R$ 1.234,56 and dd/mm/aaaa). The library choice is made by that check, not here. **Owner: Amanda and Marcelo.**
 
 Tenant data needed for rendering (lines, totals, branding) is passed in the request. That is allowed because it carries no `organization_id` (ADR-001 rule 3). The logo is sent as an inline data URI with a size cap, so `ai-engine` never needs a storage URL.
 
@@ -120,7 +120,7 @@ Raw emails contain personal data (names, addresses) and commercial secrets. Prop
 |---|---|---|---|
 | 1 | Forwarding behaviour on the four real mailboxes | Marcelo, pilot companies | Test in week 1 |
 | 2 | Sender identity A or B | Amanda, Marcelo | A |
-| 3 | Rendering location A, B or C | Amanda, Marcelo | A, after the one-hour check |
+| 3 | Which renderer library and templates meet the output-quality check in section 4 | Amanda, Marcelo | `ai-engine` location is fixed; run the one-hour check before choosing details |
 | 4 | Resend plan limits: attachment size, inbound volume, verified domains | Amanda | Verify before launch |
 | 5 | Per-tenant sender allow-list | Pilot companies | Open (no allow-list) |
 | 6 | Retention period and deletion process | Pilot companies | 12 months |
@@ -131,9 +131,9 @@ Raw emails contain personal data (names, addresses) and commercial secrets. Prop
 ## 9. Impact
 
 - **Data model v1.2:** `kind` and `IGNORED` status on RFQs; RFC `Message-ID` and header columns; batch status `PENDING_REVIEW`; batch `activated_at`; tariff row `is_removed` and natural-key index; quote `priced_at` (see step 3, tariff versioning); suppression list; per-tenant caps.
-- **ADR-004:** stage 1 gains the immediate-download rule and the skip rules; stage 5 and 7 gain the rendering and sender decisions.
+- **ADR-004:** stage 1 gains the immediate-download rule and the skip rules; stage 5 and 7 gain the renderer implementation and sender decisions.
 - **`packages/contracts`:** a render request and response, with money as strings.
 
 ## 10. Acceptance for moving to an ADR
 
-Sections 3.1 and 4 decided; the forwarding test done on at least two real mailboxes; Resend plan limits recorded.
+Section 3.1 decided; renderer library and templates in section 4 validated by the output-quality check; the forwarding test done on at least two real mailboxes; Resend plan limits recorded.
