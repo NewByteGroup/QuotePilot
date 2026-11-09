@@ -1,8 +1,8 @@
 # ADR-001: Modular monorepo with a Go core and a stateless Python ai-engine
 
-- **Status:** Proposed
+- **Status:** Approved (open items remain)
 - **Date:** 2026-11-04
-- **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
+- **Deciders:** Pedro (backend lead). Original review request: Marcelo and Amanda.
 - **Related:** ADR-002 (Go core stack), ADR-003 (Postgres hosting), ADR-004 (async jobs), RFC-003 (connectors and Devin loop)
 
 ## Context
@@ -39,7 +39,7 @@ QuotePilot is a multi-tenant B2B SaaS. Three facts shape the architecture:
 
 ### Contracts first
 
-`packages/contracts/` is the single source of truth for the shapes exchanged between components (OpenAPI 3.1 and JSON Schema):
+`packages/contracts/` is the single source of truth for the shapes exchanged between components (OpenAPI 3.0.3 and JSON Schema; see ADR-002):
 
 - core-api HTTP API (consumed by `web`)
 - core-api to ai-engine requests/responses (RFQ extraction, connector output, render requests)
@@ -97,6 +97,6 @@ quotepilot/
 
 ## Open items
 
-- Where document rendering runs (PDF and email HTML). Default proposal: `ai-engine` (Jinja2 plus an HTML-to-PDF library), with HTML/CSS templates owned by Marcelo and Amanda. Needs their decision (RFC-002).
-- Embedding provider and vector dimension (proposal: 1024 plus an `embedding_model` column), see the data-model comments.
+- PDF and email HTML render in `ai-engine` per product spec v1.2. The renderer library, templates and output-quality check still need Amanda's and Marcelo's confirmation in RFC-002; the RFC remains a draft.
+- Implement the approved ADR-006 embedding choice (`qwen/qwen3-embedding-8b`, 1024 dimensions) and record `embedding_model` in the data model. Vendor consent and evaluation remain open in RFC-004.
 - Service-to-service auth between `core-api` and `ai-engine` (private network plus a shared service token is the minimum).
