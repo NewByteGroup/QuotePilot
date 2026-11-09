@@ -82,7 +82,7 @@ flowchart TD
     end
 
     subgraph Sourcing
-        CONN[Connector workers<br/>18 public sources]
+        CONN[Connector workers<br/>3–4 MVP sources]
         SCORE[Integrity scoring<br/>+ self-healing cycle]
     end
 
@@ -98,9 +98,9 @@ flowchart TD
     ENGINE --> APPROVE --> MAIL
 ```
 
-Every table in the domain model carries `organization_id` and is protected by PostgreSQL row-level security. Attachments and generated PDFs live under a per-tenant storage prefix and are reachable only through signed URLs issued after a permission check. AI context is recovered inside the requesting tenant's transaction — no memory is shared across executions.
+Every tenant-scoped domain table carries `organization_id` and is protected by PostgreSQL row-level security. Attachments and generated PDFs live under a per-tenant storage prefix and are reachable only through signed URLs issued after a permission check. AI context is recovered inside the requesting tenant's transaction — no memory is shared across executions.
 
-**Stack.** PostgreSQL with row-level security, a Python service layer for ingestion and pricing, a custom web frontend, Resend for inbound and outbound mail, Firecrawl for public tariff and FX collection, and Devin for building and repairing connectors. The public site and its lead API are delivered as a separate repository.
+**Stack.** A Go `core-api` owns ingestion, tenant-scoped database and storage access, deterministic decimal pricing, and River jobs. A stateless Python `ai-engine` handles extraction, public-source connectors, and rendering; React and TypeScript power the web frontend. PostgreSQL enforces row-level security: Railway hosts development Postgres with pgvector, and Supabase hosts production Postgres in `sa-east-1`. Cloudflare R2 stores private files in separate development and production buckets; Railway hosts the services, and Cloudflare Pages hosts the frontend. Resend handles inbound and outbound mail, Firecrawl collects selected public tariff sources, and Devin proposes connector repairs for human review. The public site and its lead API are delivered as a separate repository.
 
 ## Design principles
 
@@ -112,7 +112,7 @@ Every table in the domain model carries `organization_id` and is protected by Po
 
 ## Status
 
-Early development. This repository currently carries the license and this document; the application code is being prepared for publication.
+Early development. The repository contains the app and contract scaffolds, local PostgreSQL role checks, and architecture documentation; the application code is being prepared for publication. The MVP connector scope is three or four sources, pending pilot-company input (RFC-003).
 
 The pilot runs with four freight forwarding companies on maritime and air imports through Santos, Itajaí, Paranaguá, GRU and Viracopos. Targets we hold ourselves to:
 
