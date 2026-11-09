@@ -1,9 +1,9 @@
 # ADR-001: Modular monorepo with a Go core and a stateless Python ai-engine
 
-- **Status:** Proposed
+- **Status:** Approved (open items remain)
 - **Date:** 2026-11-04
-- **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
-- **Related:** ADR-002 (Go core stack), ADR-003 (Postgres hosting), ADR-004 (async jobs), RFC-003 (connectors and Devin loop)
+- **Deciders:** Pedro (backend lead). Reviewed and approved by Marcelo and Amanda.
+- **Related:** ADR-002 (Go core stack), ADR-003 (Postgres on Railway dev / Supabase prod, R2 storage), ADR-004 (async jobs), RFC-003 (connectors and Devin loop)
 
 ## Context
 
@@ -97,6 +97,6 @@ quotepilot/
 
 ## Open items
 
-- Where document rendering runs (PDF and email HTML). Default proposal: `ai-engine` (Jinja2 plus an HTML-to-PDF library), with HTML/CSS templates owned by Marcelo and Amanda. Needs their decision (RFC-002).
-- Embedding provider and vector dimension (proposal: 1024 plus an `embedding_model` column), see the data-model comments.
+- Document rendering details. Product spec v1.2 fixes the location: `ai-engine` renders the PDF and email HTML, with templates owned by Marcelo and Amanda. RFC-002 still requests their confirmation of the renderer and template details.
+- Embedding consent and evaluation questions (RFC-004). The approved ADR-006 model matrix selects `qwen/qwen3-embedding-8b` at 1024 dimensions, recorded with `embedding_model`.
 - Service-to-service auth between `core-api` and `ai-engine` (private network plus a shared service token is the minimum).
