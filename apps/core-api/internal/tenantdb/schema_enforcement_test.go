@@ -305,19 +305,23 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 	require.Error(t, directErr, "qp_app must not SELECT app.organizations directly")
 	assert.Contains(t, directErr.Error(), "permission denied")
 
-	// Memberships surface only (organization_id, role); lookup is
-	// case-insensitive. The decoy row must not come back for our email.
+	// Memberships surface the org-switcher row (organization_id, name, slug,
+	// role) since migration 0003 (spec 2026-11-10-tenant-resolution-api
+	// section 3.3); lookup is case-insensitive. The decoy row must not come
+	// back for our email.
 	var memberOrg uuid.UUID
-	var memberRole string
+	var memberName, memberSlug, memberRole string
 	var memberRows int
 	require.NoError(t, db.Pool().QueryRow(ctx,
 		`SELECT count(*) FROM app.list_memberships_for_email($1)`,
 		strings.ToUpper(userEmail)).Scan(&memberRows))
 	assert.Equal(t, 1, memberRows, "the function must return only this email's memberships")
 	require.NoError(t, db.Pool().QueryRow(ctx,
-		`SELECT organization_id, role FROM app.list_memberships_for_email($1)`,
-		strings.ToUpper(userEmail)).Scan(&memberOrg, &memberRole))
+		`SELECT organization_id, name, slug, role FROM app.list_memberships_for_email($1)`,
+		strings.ToUpper(userEmail)).Scan(&memberOrg, &memberName, &memberSlug, &memberRole))
 	assert.Equal(t, org, memberOrg)
+	assert.Equal(t, "Test "+orgSlug, memberName, "the switcher needs the org's display name")
+	assert.Equal(t, orgSlug, memberSlug)
 	assert.Equal(t, "OWNER", memberRole)
 
 	// get_current_organization inside a tenant tx; NULL outside one.

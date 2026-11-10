@@ -29,10 +29,13 @@ import (
 var tenantPolicyAllowlist = []string{"organization_memberships"}
 
 // platformTablesNoRLS is the full set of app tables with no tenant policy:
-// Layer A identity plus Layer C globals plus goose's bookkeeping table
-// (no organization_id, nothing for RLS to filter). A new unprotected table
-// fails this assertion until the list is edited on purpose (ADR-008 section 3).
+// Layer A identity (including the 0003 auth/session tables) plus Layer C
+// globals plus goose's bookkeeping table (no organization_id, nothing for RLS
+// to filter). A new unprotected table fails this assertion until the list is
+// edited on purpose (ADR-008 section 3).
 var platformTablesNoRLS = []string{
+	"auth_login_tokens",
+	"auth_sessions",
 	"connectors",
 	"goose_db_version",
 	"healing_sessions",
@@ -43,8 +46,11 @@ var platformTablesNoRLS = []string{
 }
 
 // layerATables are revoked from qp_app entirely; the platform functions are
-// the only path in (spec section 3).
-var layerATables = []string{"organizations", "users", "organization_memberships"}
+// the only path in (spec section 3, tenant-resolution spec section 3.2).
+var layerATables = []string{
+	"organizations", "users", "organization_memberships",
+	"auth_login_tokens", "auth_sessions",
+}
 
 // layerCTables keep SELECT but no writes for qp_app (spec section 5).
 var layerCTables = []string{"connectors", "public_snapshots", "healing_sessions"}
@@ -54,11 +60,21 @@ var layerCTables = []string{"connectors", "public_snapshots", "healing_sessions"
 var appendOnlyTables = []string{"private_tariffs", "tenant_audit_logs", "carrier_offers"}
 
 // tenantFunctions are the tenant-facing SECURITY DEFINER surface; qp_app gets
-// EXECUTE on exactly these signatures (spec section 3).
+// EXECUTE on exactly these signatures (spec section 3, tenant-resolution spec
+// section 5 — the 0003 auth/session family joins the original three).
 var tenantFunctions = []string{
 	"app.resolve_inbound_org(text)",
 	"app.list_memberships_for_email(text)",
 	"app.get_current_organization()",
+	"app.find_user_by_email(text)",
+	"app.create_login_token(uuid, text, timestamptz)",
+	"app.consume_login_token(text)",
+	"app.create_session(uuid, text, timestamptz)",
+	"app.rotate_session(text, text, timestamptz)",
+	"app.revoke_session(uuid)",
+	"app.revoke_session_family_by_hash(text)",
+	"app.get_membership(uuid, uuid)",
+	"app.get_user_profile(uuid)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;
@@ -253,6 +269,23 @@ func TestSchemaLintGrants(t *testing.T) {
 		assert.False(t, publicExec, "PUBLIC must not EXECUTE %s", fn)
 	}
 
+	// The documented return shape is part of the contract too: a
+	// DROP+recreate that widens the column set keeps EXECUTE but drifts the
+	// callers' expectations, so pin pg_get_function_result for the
+	// TABLE-returning tenant functions. Type names render under this
+	// session's search_path (qp_migrator's is app,extensions), so
+	// membership_role appears unqualified.
+	for sig, want := range map[string]string{
+		"app.list_memberships_for_email(text)":        "TABLE(organization_id uuid, name text, slug text, role membership_role)",
+		"app.rotate_session(text, text, timestamptz)": "TABLE(session_id uuid, user_id uuid, rotated boolean)",
+		"app.get_user_profile(uuid)":                  "TABLE(id uuid, email text, full_name text)",
+	} {
+		var result string
+		require.NoError(t, migrator.QueryRow(ctx,
+			`SELECT pg_get_function_result($1::regprocedure)`, sig).Scan(&result))
+		assert.Equal(t, want, result, "return shape drifted on %s", sig)
+	}
+
 	// The platform split (Devin Review): qp_admin — never qp_app — EXECUTEs
 	// the platform_* functions, so the tenant credential physically cannot
 	// reach teardown or Layer C writes.
@@ -292,6 +325,10 @@ func TestSchemaLintGrants(t *testing.T) {
 	wantTenant := canonicalize(tenantFunctions)
 	wantPlatform := canonicalize(platformFunctions)
 
+	// COLLATE "C" on both catalog ORDER BYs: Go's sort.Strings is bytewise
+	// but the database collation folds '_' before alphanumerics, so
+	// "revoke_session(uuid)" and "revoke_session_family_by_hash(text)" order
+	// differently on the two sides without it.
 	executableBy := func(role string) []string {
 		rows, err := migrator.Query(ctx, `
 			SELECT p.oid::regprocedure::text
@@ -299,7 +336,7 @@ func TestSchemaLintGrants(t *testing.T) {
 			JOIN pg_namespace n ON n.oid = p.pronamespace
 			WHERE n.nspname = 'app'
 			  AND has_function_privilege($1, p.oid, 'EXECUTE')
-			ORDER BY 1`, role)
+			ORDER BY p.oid::regprocedure::text COLLATE "C"`, role)
 		require.NoError(t, err)
 		var fns []string
 		for rows.Next() {
@@ -326,7 +363,7 @@ func TestSchemaLintGrants(t *testing.T) {
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
 		WHERE n.nspname = 'app' AND p.prosecdef
-		ORDER BY 1`)
+		ORDER BY p.oid::regprocedure::text COLLATE "C"`)
 	require.NoError(t, err)
 	for rows.Next() {
 		var name string
