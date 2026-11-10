@@ -6,6 +6,10 @@
 # exits non-zero and "ERROR:  <fragment>" appears AFTER that marker, so an error raised by the
 # mutation itself (before the marker, or no marker at all) can never count as PASS.
 # Works from any directory.
+#
+# Connection: defaults to `docker compose exec db` (local). Set QP_CHECK_DSN to a
+# full libpq DSN to hit any Postgres over TCP instead — used by CI, where the
+# database is a service container and there is no compose service to exec into.
 set -euo pipefail
 
 CHECKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +20,11 @@ failed=0
 failures=()
 
 run_psql() {
-  docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+  if [ -n "${QP_CHECK_DSN:-}" ]; then
+    psql -X -v ON_ERROR_STOP=1 -q "$QP_CHECK_DSN"
+  else
+    docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+  fi
 }
 
 # case_raises FRAGMENT MUTATION_SQL: sets $out; returns 0 only if roles.sql raised FRAGMENT.

@@ -1,0 +1,7 @@
+# CODEOWNERS — review is required from these owners before merge on the paths
+# below (AGENTS.md, Protected branches). Only the paths that section names are
+# listed: everything else merges on the normal checks.
+apps/core-api/** @pcnasc
+apps/core-api/db/migrations/** @pcnasc
+packages/contracts/** @pcnasc
+apps/ai-engine/connectors/** @pcnasc @themallet
