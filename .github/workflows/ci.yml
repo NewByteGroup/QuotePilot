@@ -456,6 +456,27 @@ jobs:
             exit 1
           fi
 
+      - name: Regenerate oapi-codegen and check for drift
+        run: |
+          if [ ! -f apps/core-api/oapi-codegen.yaml ]; then
+            echo "stub: no oapi-codegen config yet — check activates when apps/core-api/oapi-codegen.yaml lands"
+            exit 0
+          fi
+          # oapi-codegen v2.8.2 — pinned (ADR-002: std-http-server +
+          # strict-server, committed output). Runs from apps/core-api so the
+          # config's relative output path resolves; keep the version in sync
+          # with OAPI_CODEGEN_VERSION in packages/contracts/Makefile.
+          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.2
+          (cd apps/core-api && "$(go env GOPATH)/bin/oapi-codegen" \
+            -config oapi-codegen.yaml ../../packages/contracts/openapi/core-api.yaml)
+          git diff --exit-code -- apps/core-api
+          untracked="$(git ls-files --others --exclude-standard -- apps/core-api)"
+          if [ -n "$untracked" ]; then
+            echo "contracts-drift: oapi-codegen regeneration produced untracked files:"
+            echo "$untracked"
+            exit 1
+          fi
+
   migrations:
     name: migrations
     runs-on: ubuntu-latest
