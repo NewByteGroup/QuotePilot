@@ -218,6 +218,8 @@ func TestSessionFailuresAreUniform500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
+	assert.Len(t, r.q.creates, 1,
+		"the inert orphan: a session row committed before the signing failed")
 }
 
 // TestSessionEmptyMembershipsIsArray pins the contract for a user with no

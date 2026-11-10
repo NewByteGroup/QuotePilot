@@ -50,6 +50,19 @@ func (e *Endpoints) PostAuthSession(
 	if err != nil {
 		return nil, err
 	}
+	return e.issueSession(ctx, userID, profile, memberships)
+}
+
+// issueSession is the write tail: mint the refresh, sign the access JWT and
+// wrap the body in the cookie-carrying 200. A signing failure leaves an
+// inert session row — its opaque refresh exists nowhere outside Postgres,
+// so nobody can ever present it (the row dies at expiry).
+func (e *Endpoints) issueSession(
+	ctx context.Context,
+	userID uuid.UUID,
+	profile authapi.UserProfile,
+	memberships []authapi.Membership,
+) (authapi.PostAuthSessionResponseObject, error) {
 	refresh, sessionID, err := e.mintSession(ctx, userID)
 	if err != nil {
 		return nil, err
