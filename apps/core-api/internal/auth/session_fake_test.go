@@ -75,16 +75,21 @@ func (r *stubRows) Next() bool {
 }
 
 // Scan assigns the current row's columns positionally; only the dest types
-// ListMembershipsForEmail uses are handled — anything else fails the test
-// rather than silently skipping a column.
+// the auth store scans are handled — uuid, *uuid for NULL-able columns
+// (rotate_session's reuse row returns NULL ids), string and bool — anything
+// else fails the test rather than silently skipping a column.
 func (r *stubRows) Scan(dest ...any) error {
 	row := r.rows[r.i-1]
 	for j, v := range row {
 		switch d := dest[j].(type) {
 		case *uuid.UUID:
 			*d = v.(uuid.UUID)
+		case **uuid.UUID:
+			*d = v.(*uuid.UUID)
 		case *string:
 			*d = v.(string)
+		case *bool:
+			*d = v.(bool)
 		default:
 			return fmt.Errorf("stubRows: unhandled dest %T", dest[j])
 		}

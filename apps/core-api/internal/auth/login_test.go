@@ -448,9 +448,9 @@ func TestLoginEmailRateLimit(t *testing.T) {
 }
 
 // TestUnimplementedEndpointsFailLoud pins the stub contract: the contract
-// mounts all six routes, so the four this PR does not implement must fail
-// loudly through the uniform 500 — never a silent 200 or 204 (a 204 on
-// logout would claim a revocation that did not happen).
+// mounts all six routes, so the three still unimplemented must fail loudly
+// through the uniform 500 — never a silent 200 or 204 (a 204 on logout
+// would claim a revocation that did not happen).
 func TestUnimplementedEndpointsFailLoud(t *testing.T) {
 	r := newRig(t, &platform.FakeMailSender{}, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 
@@ -459,7 +459,6 @@ func TestUnimplementedEndpointsFailLoud(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodPost, "/auth/refresh", `{}`},
 		{http.MethodPost, "/auth/logout", `{}`},
 		{http.MethodGet, "/me", ``},
 		{http.MethodGet, "/me/organization", ``},
