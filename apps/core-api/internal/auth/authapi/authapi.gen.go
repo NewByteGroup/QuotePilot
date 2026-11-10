@@ -207,9 +207,12 @@ type Unauthorized = Error
 
 // GetMeOrganizationParams defines parameters for GetMeOrganization.
 type GetMeOrganizationParams struct {
-	// XOrganizationID Organization the request scopes to — also part of the CSRF posture,
-	// since a cross-site form cannot set headers (ADR-005 section 4).
-	XOrganizationID OrganizationIDHeader `json:"X-Organization-Id"`
+	// XOrganizationID Organization the request scopes to — required by the middleware, not
+	// the binding layer (an absent value reaches ResolveTenant as empty and
+	// gets the 400 {"error":"missing_organization"} only after
+	// authentication). Also part of the CSRF posture, since a cross-site
+	// form cannot set headers (ADR-005 section 4).
+	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
 }
 
 // PostAuthLoginJSONRequestBody defines body for PostAuthLogin for application/json ContentType.
@@ -330,7 +333,7 @@ func (siw *ServerInterfaceWrapper) GetMeOrganization(w http.ResponseWriter, r *h
 
 	headers := r.Header
 
-	// ------------- Required header parameter "X-Organization-Id" -------------
+	// ------------- Optional header parameter "X-Organization-Id" -------------
 	if valueList, found := headers[http.CanonicalHeaderKey("X-Organization-Id")]; found {
 		var XOrganizationID OrganizationIDHeader
 		n := len(valueList)
@@ -339,18 +342,14 @@ func (siw *ServerInterfaceWrapper) GetMeOrganization(w http.ResponseWriter, r *h
 			return
 		}
 
-		err = runtime.BindStyledParameterWithOptions("simple", "X-Organization-Id", valueList[0], &XOrganizationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""})
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Organization-Id", valueList[0], &XOrganizationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
 		if err != nil {
 			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Organization-Id", Err: err})
 			return
 		}
 
-		params.XOrganizationID = XOrganizationID
+		params.XOrganizationID = &XOrganizationID
 
-	} else {
-		err := fmt.Errorf("Header parameter X-Organization-Id is required, but not found")
-		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "X-Organization-Id", Err: err})
-		return
 	}
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

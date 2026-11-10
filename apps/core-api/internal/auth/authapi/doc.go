@@ -8,10 +8,11 @@
 // NewStrictHandlerWithOptions + HandlerWithOptions — HandlerWithOptions, not
 // HandlerFromMux, because the uniform {"error": ...} bodies of spec section 7
 // plug in at three distinct hooks:
-//   - StdHTTPServerOptions.ErrorHandlerFunc catches binding failures before
-//     the strict layer — RequiredHeaderError on X-Organization-Id must map to
-//     400 {"error":"missing_organization"}, not the generated plain-text
-//     default;
+//   - StdHTTPServerOptions.ErrorHandlerFunc catches wrapper-level binding
+//     failures (none today: X-Organization-Id is deliberately OPTIONAL in the
+//     contract so ResolveTenant — not the binder — emits
+//     {"error":"missing_organization"} AFTER Authenticate; a required binding
+//     would 400 an unauthenticated request before the uniform 401);
 //   - StrictHandlerOptions.RequestErrorHandlerFunc catches JSON-bind errors
 //     inside strict handlers — 400 {"error":"bad_request"};
 //   - StrictHandlerOptions.ResponseErrorHandlerFunc catches errors returned
@@ -22,10 +23,11 @@
 // and plants values on ctx (Authenticate for qp_access, a refresh-cookie
 // reader for qp_refresh), and WRITTEN by per-operation response types whose
 // Visit…Response(w) calls Set-Cookie before the body — the generated empty
-// response structs cannot carry cookies. StdHTTPServerOptions.Middlewares
-// applies to all six routes, so per-operation concerns (the login rate
-// limit, Authenticate on /me* but not /auth/*) gate on ctx.Value's
-// operationID or wrap at the mux level instead.
+// response structs cannot carry cookies. Per-operation concerns (the login
+// rate limit, Authenticate on /me* but not /auth/*) key off the operationID
+// argument StrictMiddlewareFunc receives — StdHTTPServerOptions.Middlewares
+// are plain http.Handler wraps with no operationID in ctx, so dispatch there
+// means matching r.URL.Path or wrapping at the mux level.
 //
 // The contract carries no cookie parameters on purpose: a required-cookie
 // parameter would emit a 400 binding error where the spec mandates the

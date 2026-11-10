@@ -163,7 +163,11 @@ paths:
         cleared, valid token or not: the response carries no validity oracle
         (spec section 8). The access JWT keeps verifying until its `exp`
         (≤15 min) — the accepted revocation lag of spec section 4.
+      # Cookie optional: logout must answer 204 even when the cookie is
+      # absent or already dead — a mandatory scheme would let generated
+      # clients refuse to send the call at all.
       security:
+        - {}
         - qpRefresh: []
       responses:
         '204':
@@ -262,10 +266,17 @@ components:
     OrganizationIdHeader:
       name: X-Organization-Id
       in: header
-      required: true
+      # Optional at the binding layer ON PURPOSE: ResolveTenant enforces
+      # presence AFTER Authenticate runs, so an unauthenticated request gets
+      # the uniform 401 even when the header is also absent — a required
+      # wrapper binding would emit 400 first (spec section 7 ordering).
+      required: false
       description: |
-        Organization the request scopes to — also part of the CSRF posture,
-        since a cross-site form cannot set headers (ADR-005 section 4).
+        Organization the request scopes to — required by the middleware, not
+        the binding layer (an absent value reaches ResolveTenant as empty and
+        gets the 400 {"error":"missing_organization"} only after
+        authentication). Also part of the CSRF posture, since a cross-site
+        form cannot set headers (ADR-005 section 4).
       schema:
         type: string
         description: |
