@@ -119,28 +119,41 @@ func TestCorrelationGeneratesWhenAbsent(t *testing.T) {
 // control characters or past the length cap are never echoed — a fresh
 // uuid takes their place so client bytes cannot reach a log line raw.
 func TestCorrelationRegeneratesMalformed(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		value string
-	}{
-		{"newline in value", "good-part\nforged-log-line"},
-		{"nul byte", "abc\x00def"},
-		{"del control char", "abc\x7f"},
-		{"overlong", strings.Repeat("a", maxRequestIDLenForTest+1)},
-		{"whitespace only", "   "},
-	} {
+	for _, tc := range malformedRequestIDs {
 		t.Run(tc.name, func(t *testing.T) {
-			p := &probe{}
-			req := httptest.NewRequest(http.MethodGet, "/me", nil)
-			req.Header.Set("X-Request-Id", tc.value)
-			rec := httptest.NewRecorder()
-			platform.Correlation(p.handler()).ServeHTTP(rec, req)
-
-			got := rec.Header().Get("X-Request-Id")
-			_, err := uuid.Parse(got)
-			require.NoError(t, err, "a malformed inbound id must be replaced, not echoed")
+			assertRequestIDRegenerated(t, tc.value)
 		})
 	}
+}
+
+// malformedRequestIDs is every inbound X-Request-Id shape the middleware
+// must refuse to echo — each would either forge log lines or alias
+// requests under a shared prefix.
+var malformedRequestIDs = []struct {
+	name  string
+	value string
+}{
+	{"newline in value", "good-part\nforged-log-line"},
+	{"nul byte", "abc\x00def"},
+	{"del control char", "abc\x7f"},
+	{"overlong", strings.Repeat("a", maxRequestIDLenForTest+1)},
+	{"whitespace only", "   "},
+}
+
+// assertRequestIDRegenerated runs one malformed id through Correlation and
+// requires the echoed header to be a fresh uuid, not the supplied value.
+func assertRequestIDRegenerated(t *testing.T, value string) {
+	t.Helper()
+	p := &probe{}
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("X-Request-Id", value)
+	rec := httptest.NewRecorder()
+	platform.Correlation(p.handler()).ServeHTTP(rec, req)
+
+	got := rec.Header().Get("X-Request-Id")
+	_, err := uuid.Parse(got)
+	require.NoError(t, err, "a malformed inbound id must be replaced, not echoed")
+	assert.NotEqual(t, value, got)
 }
 
 // maxRequestIDLenForTest mirrors the unexported cap the middleware applies
@@ -204,15 +217,11 @@ func TestMembershipLookupLogsError(t *testing.T) {
 	swapLogger(t, capture)
 
 	p := &probe{}
-	store := platform.NewStore(errQuerier{})
 	cfg := jwtConfig()
 	chain := platform.Correlation(platform.Authenticate(cfg)(
-		platform.ResolveTenant(store)(p.handler())))
-	req := authedRequest(t, cfg, uuid.New(), http.MethodGet, "/tenant/route")
-	req.Header.Set("X-Organization-Id", uuid.NewString())
-	req.Header.Set("X-Request-Id", "cid-membership-fail")
+		platform.ResolveTenant(platform.NewStore(errQuerier{}))(p.handler())))
 	rec := httptest.NewRecorder()
-	chain.ServeHTTP(rec, req)
+	chain.ServeHTTP(rec, tenantRequest(t, cfg, "cid-membership-fail"))
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, `{"error":"internal"}`, rec.Body.String(),
@@ -220,10 +229,27 @@ func TestMembershipLookupLogsError(t *testing.T) {
 	assert.Equal(t, "cid-membership-fail", rec.Header().Get("X-Request-Id"))
 	assert.False(t, p.called)
 
+	assertMembershipLog(t, capture, "cid-membership-fail")
+}
+
+// tenantRequest builds the authenticated, org-headed, correlation-carried
+// request the membership rig answers.
+func tenantRequest(t *testing.T, cfg *platform.Config, cid string) *http.Request {
+	t.Helper()
+	req := authedRequest(t, cfg, uuid.New(), http.MethodGet, "/tenant/route")
+	req.Header.Set("X-Organization-Id", uuid.NewString())
+	req.Header.Set("X-Request-Id", cid)
+	return req
+}
+
+// assertMembershipLog requires the driver-error record and checks it ties
+// to the request's correlation id and carries the wrapped cause.
+func assertMembershipLog(t *testing.T, capture *logCapture, cid string) {
+	t.Helper()
 	logRec, ok := capture.find("platform: membership lookup failed")
 	require.True(t, ok, "a driver error must produce a log line")
-	cid, _ := attr(logRec, "correlation_id")
-	assert.Equal(t, "cid-membership-fail", cid)
+	gotCID, _ := attr(logRec, "correlation_id")
+	assert.Equal(t, cid, gotCID)
 	errVal, _ := attr(logRec, "error")
 	assert.Contains(t, errVal, "driver down")
 }
