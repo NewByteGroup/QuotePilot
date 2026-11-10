@@ -574,8 +574,35 @@ REVOKE DELETE ON app.private_tariff_batches FROM qp_app;
 -- inbound_messages predates Layer A (0001 could not reference a table that
 -- did not exist yet). It is a tenant row like every other Camada B table, so
 -- it gets the same org FK — and the cascade lets platform_delete_organization
--- reach it. On a database that already ran 0001 with data, rows whose
--- organization_id matches no organization must be cleaned before this applies.
+-- reach it.
+--
+-- Upgrade guard (Devin Review): on a database that already ran 0001 with
+-- data, ADD CONSTRAINT validates every existing receipt against the new
+-- organizations registry, so orphans abort the upgrade — with a raw FK
+-- error if we let it get that far. A v1 receipt's organization_id is
+-- unverifiable against a registry that did not exist when it was written:
+-- backfilling the org or quarantining the receipt is an explicit operator
+-- decision, never the migration's. So the DO block fails loudly and legibly
+-- instead — NOT VALID would leave orphans permanently unenforced, and
+-- deleting the rows would silently drop receipts. FORCE RLS applies to
+-- qp_migrator too: an unscoped SELECT sees zero rows, so the guard disables
+-- RLS inside this transaction to read the real table (a raise rolls the
+-- whole migration back; success restores both flags before the ALTER).
+-- +goose StatementBegin
+DO $$
+BEGIN
+    EXECUTE 'ALTER TABLE app.inbound_messages DISABLE ROW LEVEL SECURITY';
+    IF EXISTS (
+        SELECT 1 FROM app.inbound_messages i
+        WHERE NOT EXISTS (SELECT 1 FROM app.organizations o WHERE o.id = i.organization_id)
+    ) THEN
+        RAISE EXCEPTION 'inbound_messages holds receipts for organizations that do not exist; reconcile them (backfill organizations or quarantine the receipts) before upgrading to v1.3 — refusing to upgrade rather than silently drop receipts';
+    END IF;
+    EXECUTE 'ALTER TABLE app.inbound_messages ENABLE ROW LEVEL SECURITY';
+    EXECUTE 'ALTER TABLE app.inbound_messages FORCE ROW LEVEL SECURITY';
+END $$;
+-- +goose StatementEnd
+
 -- +goose StatementBegin
 ALTER TABLE app.inbound_messages
     ADD CONSTRAINT inbound_messages_organization_id_fkey
@@ -908,13 +935,20 @@ GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_
 
 -- platform_delete_organization: controlled tenant teardown (spec section 4).
 -- The ONLY delete path for an organization — qp_app holds no privilege on
--- Layer A and nothing else can reach the registry. Two transaction-local GUCs
--- make the cascade work under the role model:
---   app.current_organization_id — the function runs as qp_migrator, which is
---     NOBYPASSRLS and subject to FORCE RLS like everyone; without a tenant
---     context the USING clause hides every tenant row from the cascaded
---     deletes and the org row could not be removed (verified in the lint
---     suite: an unscoped migrator sees zero tenant rows).
+-- Layer A and nothing else can reach the registry. Teardown deletes only the
+-- tenant the caller is already scoped into: the guard at the top of the body
+-- requires an InTenantTx pinned to p_org_id, so qp_app's EXECUTE grant can no
+-- longer reach an arbitrary org (Devin Review — the API opens that tenant
+-- transaction only after admin authorization). A deliberately malicious
+-- qp_app could still pin any context itself; that residual is the accepted
+-- GUC trust model documented in the spec. Two transaction-local GUCs make
+-- the cascade work under the role model:
+--   app.current_organization_id — pinned by the caller and verified here;
+--     the cascaded deletes need it because the function runs as
+--     qp_migrator, which is NOBYPASSRLS and subject to FORCE RLS like
+--     everyone: without a tenant context the USING clause hides every
+--     tenant row and the org row could not be removed (verified in the
+--     lint suite: an unscoped migrator sees zero tenant rows).
 --   app.tenant_teardown — tells block_approved_quote_mutation and
 --     block_sent_quote_line_mutation this is the deliberate teardown path, so
 --     the sent-quote immutability rules do not block the cascade. The flag
@@ -932,7 +966,11 @@ CREATE FUNCTION app.platform_delete_organization(p_org_id uuid) RETURNS void
     SET search_path = app
 AS $fn$
 BEGIN
-    PERFORM set_config('app.current_organization_id', p_org_id::text, true);
+    -- Scope first, before the teardown flag is raised: an InTenantTx pinned
+    -- to a different org (or no tenant context at all) must not delete.
+    IF NULLIF(current_setting('app.current_organization_id', true), '')::uuid IS DISTINCT FROM p_org_id THEN
+        RAISE EXCEPTION 'platform_delete_organization must run inside an InTenantTx scoped to organization %', p_org_id;
+    END IF;
     PERFORM set_config('app.tenant_teardown', 'on', true);
     DELETE FROM app.organizations AS o WHERE o.id = p_org_id;
     IF NOT FOUND THEN

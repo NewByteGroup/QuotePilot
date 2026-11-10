@@ -85,10 +85,15 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		return nil
 	}))
 
-	// The teardown call itself runs as qp_app through the platform function.
-	// Passing proves the triggers saw current_user = qp_migrator inside the
-	// cascades — the SECURITY DEFINER context the flag alone cannot fake.
-	_, err = db.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
+	// The teardown call itself runs as qp_app through the platform function,
+	// inside InTenantTx for the org being deleted — the function's scope
+	// guard refuses anything else (Devin Review). Passing proves the triggers
+	// saw current_user = qp_migrator inside the cascades — the SECURITY
+	// DEFINER context the flag alone cannot fake.
+	err = db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
+		return err
+	})
 	require.NoError(t, err)
 
 	// Organizations is Layer A (no RLS): the row must be gone outright.
@@ -123,10 +128,70 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		`SELECT count(*) FROM app.users WHERE id = $1`, userID.String()).Scan(&userRows))
 	assert.Equal(t, 1, userRows, "user identities outlive their orgs")
 
-	// Replaying teardown on a missing org raises instead of silently passing.
-	_, err = db.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
+	// Replaying teardown on a missing org raises instead of silently passing
+	// (still inside InTenantTx — unscoped calls now hit the scope guard
+	// first, which the negative test below covers).
+	err = db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
+		return err
+	})
 	require.Error(t, err, "second teardown call must raise")
 	assert.Contains(t, err.Error(), "unknown organization")
+}
+
+// TestSchemaEnforcementDeleteOrganizationScope is the scope-guard half of
+// the teardown contract (Devin Review): qp_app holds EXECUTE on
+// platform_delete_organization, but the function must refuse to delete any
+// org other than the one the caller's tenant transaction is pinned to —
+// and any call with no tenant context at all. Org B must survive both
+// attempts fully intact.
+func TestSchemaEnforcementDeleteOrganizationScope(t *testing.T) {
+	db := testenv.Open(t)
+	migrator := testenv.MigratorPool(t)
+	ctx := context.Background()
+
+	orgA := uuid.New()
+	testenv.SeedOrganization(t, orgA, "scope-org-a")
+	orgB := uuid.New()
+	testenv.SeedOrganization(t, orgB, "scope-org-b")
+
+	// A tenant row under B proves "fully intact" afterwards.
+	require.NoError(t, db.InTenantTx(ctx, orgB, func(ctx context.Context, tx pgx.Tx) error {
+		mustExec(t, ctx, tx,
+			`INSERT INTO app.inbound_messages (organization_id, resend_message_id) VALUES ($1, 'scope-b-1')`,
+			orgB.String())
+		return nil
+	}))
+
+	// Pinned to A but asking for B: the cross-scope call raises the guard.
+	err := db.InTenantTx(ctx, orgA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, orgB.String())
+		return err
+	})
+	require.Error(t, err, "teardown pinned to org A must refuse org B")
+	assert.Contains(t, err.Error(), "must run inside an InTenantTx scoped to organization")
+
+	// No tenant context at all raises the same guard.
+	_, err = db.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, orgB.String())
+	require.Error(t, err, "unscoped teardown call must refuse")
+	assert.Contains(t, err.Error(), "must run inside an InTenantTx scoped to organization")
+
+	// Org B is fully intact: the registry row and its tenant rows survived.
+	var orgRows int
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT count(*) FROM app.organizations WHERE id = $1`, orgB.String()).Scan(&orgRows))
+	assert.Equal(t, 1, orgRows, "org B must still exist")
+
+	tx, err := migrator.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `SELECT set_config('app.current_organization_id', $1, true)`, orgB.String())
+	require.NoError(t, err)
+	var msgRows int
+	require.NoError(t, tx.QueryRow(ctx,
+		`SELECT count(*) FROM app.inbound_messages WHERE organization_id = $1`,
+		orgB.String()).Scan(&msgRows))
+	assert.Equal(t, 1, msgRows, "org B tenant rows must survive refused teardowns")
 }
 
 // TestSchemaEnforcementTeardownFlagForge is the negative half of the

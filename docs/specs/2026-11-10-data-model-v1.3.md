@@ -296,17 +296,28 @@ to the connector being healed; `platform_update_healing_session` permits
 `resolved_at` already stamped).
 
 `platform_delete_organization(org_id)` is the **only** tenant-teardown
-path: it sets the transaction-local `app.tenant_teardown` flag, pins the
-tenant context, and deletes the organization row; cascades remove every
-Camada B row, membership and `inbound_messages` receipt. The immutability
-triggers honor the flag **only** alongside `current_user <> session_user`,
-which holds inside this SECURITY DEFINER function (owner `qp_migrator`)
-and nowhere in a direct `qp_app` session — so the teardown flag cannot be
-forged to unlock sent quotes, and it cannot leak protection to another org
-after teardown returns. Note the function is deliberately EXECUTE-able by
-`qp_app` for any org id: caller authorization (admin-only endpoint) lives
-in the API layer, consistent with the GUC trust model — flag for Pedro if
-a DB-level restriction is wanted later.
+path, and it can only delete **the org the caller is already scoped
+into**: it refuses unless
+`NULLIF(current_setting('app.current_organization_id', true), '')::uuid`
+already equals `org_id`, so an `InTenantTx` pinned to the target must wrap
+the call — the shape the API produces only after admin authorization.
+It then sets the transaction-local `app.tenant_teardown` flag and deletes
+the organization row; cascades remove every Camada B row, membership and
+`inbound_messages` receipt. The immutability triggers honor the flag
+**only** alongside `current_user <> session_user`, which holds inside
+this SECURITY DEFINER function (owner `qp_migrator`) and nowhere in a
+direct `qp_app` session — so the teardown flag cannot be forged to unlock
+sent quotes, and it cannot leak protection to another org after teardown
+returns. Residual: a deliberately malicious `qp_app` could still pin any
+tenant context itself — that is the accepted GUC trust model (the app
+role is trusted to pin the org it was authorized for); flag for Pedro if
+a dedicated teardown role is wanted later.
+
+Related upgrade guard: 0002 also refuses to run on a v1 database that
+holds `inbound_messages` receipts whose `organization_id` matches no
+organization — a v1 receipt's org id is unverifiable against a registry
+that did not exist, so backfill-or-quarantine is an explicit operator
+decision, never silent data loss or a `NOT VALID` escape hatch.
 
 ## 6. Enum types (`CREATE TYPE` in `app`)
 
