@@ -1,6 +1,6 @@
 # ADR-002: Go core stack, `InTenantTx` design and the spike gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-08
 - **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
 - **Related:** ADR-001 (monorepo, Go/Python boundary), ADR-003 (Postgres roles), ADR-004 (River pipeline), ADR-005 (auth and the platform path), ADR-008 (testing)
@@ -120,6 +120,8 @@ The spike decides whether this ADR and ADR-001 become Accepted or whether the co
 | Anything else, or an isolation criterion (2 or 4) still failing after the extension | Switch the core to Python/FastAPI behind the same contract. Write the amendment to ADR-001. The schema, SQL, RLS policies, roles and isolation tests carry over unchanged; only the Go code is lost. |
 
 **Timing:** the online phase ends 30/11. To keep the fallback affordable, the spike should finish within the first week of it. Pedro owns that date.
+
+**Gate outcome (2026-11-10): PASS.** All six criteria verified locally and in the real CI pipeline (`integration-test` applies migrations as `qp_migrator`, then runs the isolation/River suite; `migrations` job rebuilds from scratch; `contracts-drift` proves zero sqlc drift). The spike merged into `develop` as the implementation foundation via the normal review path rather than as-is. Per the table this ADR is Accepted; ADR-001 goes to the team for Accepted.
 
 **Note on agreement:** ADR-006 (AI agents, approved) assumes a Python `ai-engine`, which ADR-001 already fixed. It does not settle the Go-versus-Python question for the core. Marcelo's preference for Python is still unresolved, and a passing spike is the evidence to put in front of him.
 
