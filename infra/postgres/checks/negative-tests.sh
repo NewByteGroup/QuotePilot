@@ -217,6 +217,19 @@ run_case_in "$PLATFORM_SQL" "85 column SELECT to qp_admin"             "[N]"   "
 run_case "86 global EXECUTE default to qp_admin"     "[K1b]" "$ADP GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
 run_case_in "$PLATFORM_SQL" "87 river EXECUTE to qp_admin"             "[N]"   'CREATE FUNCTION river.neg_f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; REVOKE EXECUTE ON FUNCTION river.neg_f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION river.neg_f() TO qp_admin;'
 
+# Migration 0003 auth/session surface: every case is gated on an 0003
+# signature (run_case_if) so it SKIPs until the migration exists — the
+# mutations need the real function or table.
+run_case_if "$PLATFORM_SQL" "app.find_user_by_email(text)"            "88 qp_app EXECUTE revoked on tenant fn" "[N]"  'REVOKE EXECUTE ON FUNCTION app.find_user_by_email(text) FROM qp_app;'
+run_case_if "$PLATFORM_SQL" "app.rotate_session(text, text, timestamptz)" "89 qp_admin EXECUTE rotate_session"  "[N]"  'GRANT EXECUTE ON FUNCTION app.rotate_session(text, text, timestamptz) TO qp_admin;'
+run_case_if "$PLATFORM_SQL" "app.create_session(uuid, text, timestamptz)" "90 qp_app SELECT on auth_login_tokens" "[N]" 'GRANT SELECT ON app.auth_login_tokens TO qp_app;'
+run_case_if "$PLATFORM_SQL" "app.create_session(uuid, text, timestamptz)" "91 qp_app INSERT/DELETE on auth_sessions" "[N]" 'GRANT INSERT, DELETE ON app.auth_sessions TO qp_app;'
+run_case_if "$ROLES_SQL" "app.get_membership(uuid, uuid)"             "92 PUBLIC EXECUTE get_membership"     "[I]"  'GRANT EXECUTE ON FUNCTION app.get_membership(uuid, uuid) TO PUBLIC;'
+run_case_if "$ROLES_SQL" "app.get_user_profile(uuid)"                 "93 anon EXECUTE get_user_profile"     "[I]"  'GRANT EXECUTE ON FUNCTION app.get_user_profile(uuid) TO anon;'
+run_case_if "$ROLES_SQL" "app.consume_login_token(text)"              "94 anon SELECT auth_sessions"         "[H1]" 'GRANT SELECT ON app.auth_sessions TO anon;'
+run_case_if "$ROLES_SQL" "app.consume_login_token(text)"              "95 PUBLIC SELECT auth_login_tokens"   "[H4]" 'GRANT SELECT ON app.auth_login_tokens TO PUBLIC;'
+run_case_if "$PLATFORM_SQL" "app.revoke_session_family_by_hash(text)" "96 qp_admin EXECUTE revoke_session_family_by_hash" "[N]" 'GRANT EXECUTE ON FUNCTION app.revoke_session_family_by_hash(text) TO qp_admin;'
+
 echo
 echo "negative tests: $passed passed, $failed failed, $skipped skipped"
 if [ "$failed" -ne 0 ]; then

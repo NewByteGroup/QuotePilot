@@ -7,15 +7,19 @@
 -- it before migrations exist is a harmless pass (vacuous-true — the same
 -- tolerance roles.sql [M] shows on empty catalogs), never an error.
 
--- (N) The platform-path split (spec 2026-11-10-data-model-v1.3 section 5, ADR-005):
+-- (N) The function-path split (spec 2026-11-10-data-model-v1.3 section 5,
+-- spec 2026-11-10-tenant-resolution-api sections 3-5, ADR-005):
 -- qp_admin — and only qp_admin — EXECUTEs the platform_* SECURITY DEFINER
--- functions (Layer C writes and tenant teardown). qp_app keeps the three
--- tenant-facing functions and must not reach the platform five: an EXECUTE
--- grant to qp_app left a single in-function scope check between the exposed
--- API role and tenant deletion (Devin Review). qp_admin's whole surface is
--- schema-app USAGE plus these EXECUTEs — no relation or column privileges and
--- no default privileges in app/river, so a grant to it anywhere else means the
--- minimal-surface contract drifted.
+-- functions (Layer C writes and tenant teardown). qp_app keeps the
+-- tenant-facing functions — the original three plus the 0003 auth/session
+-- family — and must not reach the platform five: an EXECUTE grant to qp_app
+-- left a single in-function scope check between the exposed API role and
+-- tenant deletion (Devin Review). qp_admin's whole surface is schema-app
+-- USAGE plus these EXECUTEs — no relation or column privileges, no default
+-- privileges in app/river, and no grant on the tenant family — so a grant to
+-- it anywhere else means the minimal-surface contract drifted. qp_app's own
+-- EXECUTE set in app is pinned to the tenant allowlist, and the Layer A
+-- tables stay at zero table privileges for it.
 DO $$
 DECLARE
   bad text;
@@ -106,6 +110,75 @@ BEGIN
     FROM eff v WHERE v.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'qp_admin') $s$ INTO bad;
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_admin must receive no default privileges in app/river; offending: %', bad;
+  END IF;
+
+  -- The tenant-facing side of the split (migration 0003, tenant-resolution
+  -- spec section 5): qp_app must EXECUTE every tenant function — the original
+  -- three plus the auth/session family (skipped per-signature when absent
+  -- pre-migration, same to_regprocedure gating).
+  SELECT string_agg(f.fn, ', ') INTO bad
+  FROM (VALUES
+    ('app.resolve_inbound_org(text)'),
+    ('app.list_memberships_for_email(text)'),
+    ('app.get_current_organization()'),
+    ('app.find_user_by_email(text)'),
+    ('app.create_login_token(uuid, text, timestamptz)'),
+    ('app.consume_login_token(text)'),
+    ('app.create_session(uuid, text, timestamptz)'),
+    ('app.rotate_session(text, text, timestamptz)'),
+    ('app.revoke_session(uuid)'),
+    ('app.revoke_session_family_by_hash(text)'),
+    ('app.get_membership(uuid, uuid)'),
+    ('app.get_user_profile(uuid)')
+  ) AS f(fn)
+  WHERE to_regprocedure(f.fn) IS NOT NULL
+    AND NOT has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '[N] qp_app must EXECUTE every tenant-facing function; missing: %', bad;
+  END IF;
+
+  -- ...and nothing beyond them in schema app (river is out of scope: init
+  -- grants qp_app EXECUTE on river functions by default privilege). A new
+  -- unlisted tenant entry point granted to qp_app is drift, the same way an
+  -- unlisted platform entry point is for qp_admin.
+  SELECT string_agg(p.oid::regprocedure::text, ', ') INTO bad
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'app' AND has_function_privilege('qp_app', p.oid, 'EXECUTE')
+    AND p.oid <> ALL (ARRAY(
+      SELECT to_regprocedure(f.fn) FROM (VALUES
+        ('app.resolve_inbound_org(text)'),
+        ('app.list_memberships_for_email(text)'),
+        ('app.get_current_organization()'),
+        ('app.find_user_by_email(text)'),
+        ('app.create_login_token(uuid, text, timestamptz)'),
+        ('app.consume_login_token(text)'),
+        ('app.create_session(uuid, text, timestamptz)'),
+        ('app.rotate_session(text, text, timestamptz)'),
+        ('app.revoke_session(uuid)'),
+        ('app.revoke_session_family_by_hash(text)'),
+        ('app.get_membership(uuid, uuid)'),
+        ('app.get_user_profile(uuid)')
+      ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '[N] qp_app EXECUTE surface in app must equal the tenant-function allowlist; extra: %', bad;
+  END IF;
+
+  -- Layer A tables are function-gated for qp_app: no table privilege at all
+  -- (the Go lint's layerATables is the same list; to_regclass keeps the check
+  -- vacuous for tables a migration has not created yet).
+  SELECT string_agg(t.tbl || ' ' || p.priv, ', ') INTO bad
+  FROM (VALUES
+    ('app.organizations'),
+    ('app.users'),
+    ('app.organization_memberships'),
+    ('app.auth_login_tokens'),
+    ('app.auth_sessions')
+  ) AS t(tbl)
+  CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) AS p(priv)
+  WHERE to_regclass(t.tbl) IS NOT NULL
+    AND has_table_privilege('qp_app', to_regclass(t.tbl), p.priv);
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '[N] qp_app must hold no table privilege on Layer A tables; offending: %', bad;
   END IF;
 END $$;
 
