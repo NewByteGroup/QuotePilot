@@ -586,6 +586,26 @@ func (ns NullAppTariffSourceType) Value() (driver.Value, error) {
 	return string(ns.AppTariffSourceType), nil
 }
 
+type AppAuthLoginToken struct {
+	ID         pgtype.UUID
+	UserID     pgtype.UUID
+	TokenHash  string
+	ExpiresAt  pgtype.Timestamptz
+	ConsumedAt pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+}
+
+type AppAuthSession struct {
+	ID               pgtype.UUID
+	UserID           pgtype.UUID
+	FamilyID         pgtype.UUID
+	RefreshTokenHash string
+	ExpiresAt        pgtype.Timestamptz
+	RotatedAt        pgtype.Timestamptz
+	RevokedAt        pgtype.Timestamptz
+	CreatedAt        pgtype.Timestamptz
+}
+
 type AppCarrierOffer struct {
 	ID               pgtype.UUID
 	OrganizationID   pgtype.UUID
