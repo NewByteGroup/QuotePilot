@@ -55,7 +55,7 @@ type Input struct {
     Incoterm    Incoterm  // EXW FCA FAS FOB CFR CIF CPT CIP DAP DPU DDP
     Modal       Modal     // FCL | AIR (LCL arrives but is out of MVP)
     OriginLOCODE, DestLOCODE string
-    EquipmentOrUnit        string // '40HC' etc; matched to tariff/offers
+    EquipmentOrUnit        string // '40HC' etc; required for FCL/AIR, matched to tariff/offers
     ContainerCount         int    // FCL only
     GrossKg, VolumeM3      decimal.Decimal
     CargoValue    decimal.Decimal // goods value, feeds the import CIF base
@@ -138,8 +138,11 @@ not reuse the import matrix silently). `Direction=IMPORT`:
 | DDP | nothing — `COMPLETE`, zero lines, assumption `DDP_NOTHING_PAYABLE` | | | |
 
 *FCA origin group = applicable origin terminal/loading fees; inland
-pre-carriage stays out of MVP (any `INLAND`/`PRE_CARRIAGE` charge code in
-candidates is skipped with a warning).
+pre-carriage stays out of MVP (any `PRE_CARRIAGE` code or `INLAND` as a
+whole code token — `INLAND`, `INLAND_*`, `*_INLAND*`; `MAINLAND_*` does
+not count — tariff row, offer charge or fixed fee — is skipped with a
+warning; a fixed fee scoped to a group the matrix does not open was
+never a candidate and is ignored silently).
 
 Sea-only Incoterms (`FAS FOB CFR CIF`) with `Modal=AIR` → `INCOMPLETE
 {SEA_INCOTERM_ON_AIR}` (the extractor also flags it upstream; the engine
@@ -151,7 +154,8 @@ double-checks because inputs are untrusted).
 
 1. **Validate**: reject on programmer/config error — negative markup,
    negative cargo/weight/volume, `ContainerCount<1` for FCL,
-   `ContainerCount>0` for AIR, missing currencies, unsupported Incoterm.
+   `ContainerCount>0` for AIR, missing currencies, empty
+   `EquipmentOrUnit` for FCL/AIR, unsupported Incoterm.
 2. **Chargeable quantity**: FCL → `ContainerCount`; AIR →
    `chargeable_kg = max(GrossKg, VolumeM3 × 166.67)` (fixed MVP factor).
 3. **Version resolution (tariffs)**: group candidates by natural key
@@ -161,7 +165,14 @@ double-checks because inputs are untrusted).
    `batch_activated_at <= PricedAt`; take the row from the batch with the
    **latest** `batch_activated_at` (tie → later `created_at`, then id);
    if that winner `is_removed`, the natural key is dropped. Deterministic
-   ordering everywhere — never map iteration.
+   ordering everywhere — never map iteration. The worker's candidate
+   filters are untrusted (rule 6): before a row joins any pool the
+   engine re-verifies modal, origin LOCODE, destination LOCODE and
+   equipment/unit against the shipment (normalized). This spec defines
+   **no wildcard convention** for tariff rows — an empty field on either
+   side is not applicable (fail-closed, not even empty-vs-empty), unlike
+   offer charges where an empty `equipment_or_unit` is documented as
+   generic.
 4. **Carrier-offer candidacy (FCL)**: if `CarrierOffer` present, check
    `ExpiresAt` — a zero or past `ExpiresAt` means expired (`OFFER_EXPIRED`
    flag on the replacement tariff lines; fail-closed because the offer
@@ -177,7 +188,18 @@ double-checks because inputs are untrusted).
    carrier's rows silently.
 5. **Line building per required group** — cheapest **net cost** wins;
    non-winning complete options go to `Alternatives` (one price plus
-   audit alternatives, Q5 default):
+   audit alternatives, Q5 default). A freight alternative is a
+   **whole-option** price: its `SellBRL` is the freight aggregate the
+   option would sell at if that losing row replaced the winner of its
+   own charge code **inside its own source pool** — a tariff row swaps
+   within the tariff pool's per-code winners, an offer charge within
+   the offer's winners — never a hybrid of offer winners plus tariff
+   rows (Q12 forbids silent cross-carrier combinations). A code the
+   pool's winners do not cover adds its contribution to that pool's
+   aggregate. `CostBRL` stays the losing row's own net; an alternative
+   whose aggregate binds the floor carries `MIN_MARKUP_APPLIED` and the
+   floor's FX flags like the winners. Pass-through groups keep
+   standalone alternatives (sell = cost per line).
    - `INTL_FREIGHT`:
      - FCL owed → prefer `CarrierOffer` `OCEAN_FREIGHT` charge if usable,
        else tariff rows `charge_category='OCEAN_FREIGHT'`; none →
@@ -200,8 +222,13 @@ double-checks because inputs are untrusted).
 6. **CIF base (import only)**: `(CargoValue + freight + insurance)`;
    freight = payable freight net when owed, else `DeclaredFreight`;
    insurance = `DeclaredInsurance` or 0. Converted with the customs rate
-   (§6). Absent cargo value but a CIF band is required →
-   `INCOMPLETE{MISSING_CARGO_VALUE}`.
+   (§6); a zero-valued component is a known zero and resolves no rate.
+   Absent cargo value but a CIF band is required →
+   `INCOMPLETE{MISSING_CARGO_VALUE}`. When no freight is payable — the
+   CIF family (CFR/CIF/CPT/CIP) and DAP/DPU with `TerminalRequested` —
+   the seller-paid `DeclaredFreight` is a required input for the base:
+   nil → `INCOMPLETE{MISSING_DECLARED_FREIGHT}` and band selection is
+   skipped (a zero-valued `Money` is a known zero and stays valid).
 7. **FX conversion**: every non-BRL line converts with its resolved rate
    (§6); `OriginalAmount` keeps the source amount.
 8. **Rounding**: each `CostBRL` rounds half-up to the cent at conversion;
@@ -217,7 +244,8 @@ double-checks because inputs are untrusted).
   — the `max` comparison happens **in BRL** (the USD floor converts at
   the same carrier rate): algebraically identical for USD freight and the
   only coherent reading for non-USD lines. `MinMarkupUSD` NULL → floor
-  is 0. When the floor binds, flag `MIN_MARKUP_APPLIED`.
+  is 0; a zero floor likewise — it can never bind, so it resolves no
+  USD rate. When the floor binds, flag `MIN_MARKUP_APPLIED`.
   Within the tariff path the freight category competes **per charge
   code** like every other group — cheapest resolved row per code,
   distinct codes summed; an offer's freight charges are all additive.
@@ -280,8 +308,8 @@ as `hashInput` and unit-tested for stability — this hash is what makes
   `DECLARED_BASIS` (CIF base built from declared freight).
 - **Incomplete reasons**: `MISSING_TARIFF_GROUP:<category>`,
   `MISSING_TERMINAL_BAND`, `MISSING_CARGO_VALUE`, `MISSING_CUSTOMS_FX`,
-  `MISSING_FX:<currency>`, `NO_USABLE_OFFER`, `EXPORT_MATRIX_OPEN`,
-  `SEA_INCOTERM_ON_AIR`, `MODAL_OUT_OF_MVP`.
+  `MISSING_DECLARED_FREIGHT`, `MISSING_FX:<currency>`, `NO_USABLE_OFFER`,
+  `EXPORT_MATRIX_OPEN`, `SEA_INCOTERM_ON_AIR`, `MODAL_OUT_OF_MVP`.
 - **Assumptions** (always recorded, never silent): import-only Incoterm
   matrix, `STORAGE_FIRST_PERIOD_ONLY`, `CUSTOMS_RATE_UNCONFIRMED`,
   `PTAX_PREV_BUSINESS_DAY_SELL`, `NO_INSURANCE_LINE`, `AIR_FACTOR_166_67`,

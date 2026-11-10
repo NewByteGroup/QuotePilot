@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -90,12 +91,13 @@ func TestOfferChargesJoinGroupPools(t *testing.T) {
 }
 
 func TestIsPreCarriage(t *testing.T) {
-	for _, code := range []string{"INLAND", "PRE_CARRIAGE", "inland haulage", "PRE-CARRIAGE"} {
+	for _, code := range []string{"INLAND", "INLAND_HAULAGE", "PRE_CARRIAGE", "inland haulage", "PRE-CARRIAGE"} {
 		if !isPreCarriage(code) {
 			t.Fatalf("%q must be detected as pre-carriage", code)
 		}
 	}
-	if isPreCarriage("THC_ORI") || isPreCarriage("OCEAN_FREIGHT") {
+	// INLAND must be a whole token: MAINLAND is not a pre-carriage code.
+	if isPreCarriage("MAINLAND_FEE") || isPreCarriage("THC_ORI") || isPreCarriage("OCEAN_FREIGHT") {
 		t.Fatal("ordinary codes must not be skipped")
 	}
 }
@@ -114,6 +116,24 @@ func TestTariffCandsFor_RejectsMismatchedModal(t *testing.T) {
 	freight.Modal = ModalAIR
 	if got := freightTariffCands(in, []TariffCandidate{freight}, fxr); len(got) != 0 {
 		t.Fatalf("mismatched modal must be rejected in freight too: %+v", got)
+	}
+}
+
+// A misplaced-but-valid row — another route or equipment — must never
+// become a payable line (rule 6, PR15): collectors re-verify the
+// worker's route/equipment filters, not just the modal.
+func TestTariffCandsFor_RejectsMisplacedRows(t *testing.T) {
+	in := freightInput()
+	wrongRoute := tariffRow(testUUID1, testUUID2, "AGENT", ChargeCustoms, "CUSTOMS_CLEARANCE", "BRL", "450.0000")
+	wrongRoute.OriginLOCODE = "DEHAM"
+	wrongEquip := tariffRow(testUUID3, testUUID2, "AGENT", ChargeCustoms, "DOC_FEE", "BRL", "80.0000")
+	wrongEquip.EquipmentOrUnit = "20DV"
+	right := tariffRow(testUUID5, testUUID2, "AGENT", ChargeCustoms, "CUSTOMS_CLEARANCE", "BRL", "460.0000")
+	fxr := newFXResolver(in)
+	got := tariffCandsFor(ChargeCustoms, CategoryCustomsDispatch, in,
+		[]TariffCandidate{wrongRoute, wrongEquip, right}, fxr)
+	if len(got) != 1 || !got[0].net.Equal(d("460.0000")) {
+		t.Fatalf("only the exact-route/equipment row may price: %+v", got)
 	}
 }
 
@@ -212,5 +232,112 @@ func TestBandCands_LocationNormalized(t *testing.T) {
 	fxr := newFXResolver(in)
 	if _, outcome := bandCand(in, d("75000.00"), fxr); outcome != bandPriced {
 		t.Fatal("location match must normalize case and spaces")
+	}
+}
+
+// CIF family: the band is sized on a CIF base that needs the seller-paid
+// declared freight — a nil one is absent input, never a silent zero
+// (Devin review, PR15). The quote must not complete on the wrong band.
+func TestPrice_CFRNilDeclaredFreightIsIncomplete(t *testing.T) {
+	in := fobTariffInput("950.0000")
+	in.Incoterm = IncotermCFR // DeclaredFreight stays nil.
+	out := mustPrice(t, in)
+	if out.Status != StatusIncomplete {
+		t.Fatalf("INCOMPLETE expected: %+v", out)
+	}
+	if !hasReason(out, ReasonMissingDeclaredFreight) {
+		t.Fatalf("MISSING_DECLARED_FREIGHT expected: %v", out.Reasons)
+	}
+	if findLine(out.Lines, CategoryTerminalStorage, "TERMINAL_STORAGE") != nil {
+		t.Fatal("band selection must be skipped without the declared freight")
+	}
+}
+
+// An explicit zero-valued Money is a known zero, not an absent input:
+// the band is sized on cargo alone and the quote completes (PR15).
+func TestPrice_CFRZeroDeclaredFreightIsAKnownZero(t *testing.T) {
+	in := fobTariffInput("950.0000")
+	in.Incoterm = IncotermCFR
+	in.DeclaredFreight = &Money{Amount: decimal.Zero, Currency: "USD"}
+	out := mustComplete(t, in)
+	term := requireLine(t, out.Lines, CategoryTerminalStorage, "TERMINAL_STORAGE")
+	if !hasFlag(t, term, FlagDeclaredBasis) {
+		t.Fatalf("a known zero still marks DECLARED_BASIS: %+v", term)
+	}
+}
+
+// DAP with the terminal requested has the same declared-freight
+// requirement as the CIF family (PR15).
+func TestPrice_DAPRequestedTerminalNilDeclaredFreight(t *testing.T) {
+	in := dapInput()
+	in.TerminalRequested = true
+	in.DeclaredFreight = nil
+	out := mustPrice(t, in)
+	if out.Status != StatusIncomplete {
+		t.Fatalf("INCOMPLETE expected: %+v", out)
+	}
+	if !hasReason(out, ReasonMissingDeclaredFreight) {
+		t.Fatalf("MISSING_DECLARED_FREIGHT expected: %v", out.Reasons)
+	}
+}
+
+// A usable offer's pre-carriage charge is out of MVP exactly like a
+// tariff row: excluded from the pool and skipped with the same warning
+// (spec §3 FCA note, PR15).
+func TestPrice_OfferPreCarriageChargeSkipped(t *testing.T) {
+	in := fcaPreCarriageInput() // FCA; an INLAND tariff row already skips.
+	in.CarrierOffer = testOffer(testUUID4, ts(2026, 11, 20, 0, 0),
+		oceanCharge("2500.00", "40HC"),
+		offerCharge(ChargeOriginCharge, "ORI_FEE", "280.00", "USD", "40HC"),
+		offerCharge(ChargeOriginCharge, "INLAND", "300.00", "USD", "40HC"))
+	out := mustComplete(t, in)
+	if findLine(out.Lines, CategoryOriginCharges, "INLAND") != nil {
+		t.Fatal("a pre-carriage offer charge must never price")
+	}
+	if !slices.Contains(out.Warnings, "skipped out-of-MVP pre-carriage charge INLAND") {
+		t.Fatalf("the offer skip must warn like the tariff skip: %v", out.Warnings)
+	}
+}
+
+// Org fixed fees get the same pre-carriage guard (PR15).
+func TestPrice_FixedFeePreCarriageSkipped(t *testing.T) {
+	in := fcaPreCarriageInput()
+	in.FixedFees = []FixedFee{
+		{ChargeCode: "INLAND_HAULAGE", Category: CategoryOriginCharges, Amount: d("300.00"), Currency: "USD"},
+	}
+	out := mustComplete(t, in)
+	if findLine(out.Lines, CategoryOriginCharges, "INLAND_HAULAGE") != nil {
+		t.Fatal("a pre-carriage fixed fee must never price")
+	}
+	if !slices.Contains(out.Warnings, "skipped out-of-MVP pre-carriage charge INLAND_HAULAGE") {
+		t.Fatalf("the fee skip must warn: %v", out.Warnings)
+	}
+}
+
+// A pre-carriage fixed fee in a group the matrix never opens was never
+// a candidate, so its skip must not warn (PR15 review).
+func TestPrice_FixedFeePreCarriageInClosedGroupDoesNotWarn(t *testing.T) {
+	in := fobTariffInput("950.0000") // FOB: origin group is closed.
+	in.FixedFees = []FixedFee{
+		{ChargeCode: "INLAND_HAULAGE", Category: CategoryOriginCharges, Amount: d("300.00"), Currency: "USD"},
+	}
+	out := mustComplete(t, in)
+	if findLine(out.Lines, CategoryOriginCharges, "INLAND_HAULAGE") != nil {
+		t.Fatal("a fee in a closed group must never price")
+	}
+	if slices.Contains(out.Warnings, "skipped out-of-MVP pre-carriage charge INLAND_HAULAGE") {
+		t.Fatalf("a fee that was never a candidate must not warn: %v", out.Warnings)
+	}
+}
+
+// A zero-valued declared component is a known zero: it contributes
+// nothing to the CIF base and resolves no rate — a zero insurance in
+// a rate-less currency must not raise MISSING_CUSTOMS_FX (PR15 review).
+func TestPrice_ZeroDeclaredInsuranceNeedsNoFXRate(t *testing.T) {
+	in := fobTariffInput("950.0000") // USD rates only.
+	in.DeclaredInsurance = &Money{Amount: decimal.Zero, Currency: "EUR"}
+	out := mustComplete(t, in)
+	if hasReason(out, ReasonMissingCustomsFX) {
+		t.Fatalf("a known-zero amount must not resolve FX: %v", out.Reasons)
 	}
 }

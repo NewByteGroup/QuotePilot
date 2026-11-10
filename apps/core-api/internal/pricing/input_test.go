@@ -160,6 +160,38 @@ func TestValidate_RejectsMissingLOCODEs(t *testing.T) {
 	requireErr(t, in.validate(), "locode")
 }
 
+// Equipment/unit is a required extraction field for the MVP modals: an
+// empty one would slip an empty-vs-empty match past tariffApplies'
+// fail-closed gate, so validation rejects it (PR15 review).
+func TestValidate_RejectsMissingEquipment(t *testing.T) {
+	for _, base := range []func() Input{fobFCLInput, airFCAInput} {
+		in := base()
+		in.EquipmentOrUnit = ""
+		requireErr(t, in.validate(), "equipment")
+		in.EquipmentOrUnit = "   "
+		requireErr(t, in.validate(), "equipment")
+	}
+	// LCL is out of MVP: it exits on the modal before equipment matters.
+	in := fobFCLInput()
+	in.Modal = ModalLCL
+	in.EquipmentOrUnit = ""
+	if err := in.validate(); err != nil {
+		t.Fatalf("LCL does not require equipment: %v", err)
+	}
+	if _, err := Price(in, clock()); err != nil {
+		t.Fatalf("LCL empty equipment is a data gap, not a config error: %v", err)
+	}
+}
+
+// An empty equipment reaches Price's error path, never a priced line.
+func TestPrice_MissingEquipmentIsConfigError(t *testing.T) {
+	in := fobFCLInput()
+	in.EquipmentOrUnit = ""
+	if _, err := Price(in, clock()); err == nil {
+		t.Fatal("empty equipment must return a config error")
+	}
+}
+
 var badTariffCases = []struct {
 	name string
 	mut  func(*TariffCandidate)

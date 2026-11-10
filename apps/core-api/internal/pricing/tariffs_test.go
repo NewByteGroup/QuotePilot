@@ -114,6 +114,60 @@ func TestResolveTariffs_KeysAreIndependent(t *testing.T) {
 	}
 }
 
+// The shared applicability gate (PR15): a resolved row must match the
+// shipment's modal, route and equipment — the spec defines no wildcard
+// convention for tariff rows, so an empty field never matches
+// (fail-closed, unlike offer charges' documented generic equipment).
+func TestTariffApplies_RouteModalEquipmentGate(t *testing.T) {
+	in := freightInput() // FCL CNSHA -> BRSSZ, 40HC.
+	ok := tariffRow(testUUID1, testUUID2, "MSC", ChargeOceanFreight, "OCEAN_FREIGHT", "USD", "800.0000")
+	if !tariffApplies(ok, in) {
+		t.Fatal("an exact-match row must apply")
+	}
+	wrongOrigin := ok
+	wrongOrigin.OriginLOCODE = "CNSZX"
+	if tariffApplies(wrongOrigin, in) {
+		t.Fatal("another route's row must not apply")
+	}
+	wrongDest := ok
+	wrongDest.DestLOCODE = "BRRIO"
+	if tariffApplies(wrongDest, in) {
+		t.Fatal("another destination's row must not apply")
+	}
+	wrongEquip := ok
+	wrongEquip.EquipmentOrUnit = "20DV"
+	if tariffApplies(wrongEquip, in) {
+		t.Fatal("a 20DV row must not price a 40HC request")
+	}
+	noEquip := ok
+	noEquip.EquipmentOrUnit = ""
+	if tariffApplies(noEquip, in) {
+		t.Fatal("no generic convention: an empty equipment is not applicable")
+	}
+	emptyReq := in
+	emptyReq.EquipmentOrUnit = ""
+	if tariffApplies(ok, emptyReq) {
+		t.Fatal("an empty requested equipment matches nothing — even an empty row field")
+	}
+	bothEmpty := ok
+	bothEmpty.EquipmentOrUnit = ""
+	if tariffApplies(bothEmpty, emptyReq) {
+		t.Fatal("empty-vs-empty equipment must fail closed")
+	}
+	wrongModal := ok
+	wrongModal.Modal = ModalAIR
+	if tariffApplies(wrongModal, in) {
+		t.Fatal("another modal's row must not apply")
+	}
+	// Codes compare normalized: case and surrounding space are noise.
+	loose := ok
+	loose.OriginLOCODE = " cnsha "
+	loose.EquipmentOrUnit = " 40hc "
+	if !tariffApplies(loose, in) {
+		t.Fatal("locode/equipment matching must normalize case and spaces")
+	}
+}
+
 func TestResolveTariffs_OutputOrderDeterministic(t *testing.T) {
 	rows := []TariffCandidate{
 		tariffRow(testUUID1, testUUID2, "CARRIER_B", ChargeCustoms, "CUSTOMS_CLEARANCE", "BRL", "450.0000"),

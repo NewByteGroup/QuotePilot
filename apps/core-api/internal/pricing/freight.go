@@ -116,10 +116,12 @@ func offerCovers(o *CarrierOffer, in Input, g *groups) bool {
 
 // offerCharges returns the offer's charges of one category matching the
 // requested equipment (an empty equipment on the charge means generic).
+// Pre-carriage codes are out of MVP (spec §3 FCA note) and drop here so
+// they can neither satisfy coverage nor reach a price line.
 func offerCharges(o *CarrierOffer, cat ChargeCategory, equipment string) []OfferCharge {
 	out := make([]OfferCharge, 0, len(o.Charges))
 	for _, c := range o.Charges {
-		if c.Category != cat || !equipmentMatches(c.EquipmentOrUnit, equipment) {
+		if c.Category != cat || !equipmentMatches(c.EquipmentOrUnit, equipment) || isPreCarriage(c.Code) {
 			continue
 		}
 		out = append(out, c)
@@ -131,10 +133,14 @@ func offerCharges(o *CarrierOffer, cat ChargeCategory, equipment string) []Offer
 // line(s) — several lines can share one aggregate sell (spec §7) — and
 // the losing options' lines for the audit view.
 type freightResult struct {
-	winners     []candLine
-	alternates  []candLine
-	missing     bool
-	offerFailed bool // a usable offer produced no priceable line
+	winners    []candLine
+	alternates []candLine
+	// tariffWinners is the tariff pool's own per-code winners — the
+	// baseline tariff alternates price against, so an alternative is
+	// never a hybrid of offer winners plus tariff rows (Q12).
+	tariffWinners []candLine
+	missing       bool
+	offerFailed   bool // a usable offer produced no priceable line
 }
 
 // selectFreight picks the freight option (spec §4 step 5): a usable
@@ -155,13 +161,15 @@ func selectFreight(in Input, resolved []TariffCandidate, v offerVerdict, fxr *fx
 }
 
 // offerWinners returns the offer's priced freight lines when at least
-// one could be priced; tariff rows then become the alternatives.
+// one could be priced; tariff rows then become the alternatives, each
+// still priced against the tariff pool's own winners (never a hybrid).
 func offerWinners(in Input, o *CarrierOffer, tariffs []candLine, fxr *fxResolver) (freightResult, bool) {
 	winners := offerFreightCands(in, o, fxr)
 	if len(winners) == 0 {
 		return freightResult{}, false
 	}
-	return freightResult{winners: winners, alternates: tariffs}, true
+	pool := collectGroup(tariffs)
+	return freightResult{winners: winners, alternates: tariffs, tariffWinners: pool.winners}, true
 }
 
 // tariffFreight applies the same per-charge-code competition as
@@ -180,15 +188,18 @@ func tariffFreight(v offerVerdict, tariffs []candLine) freightResult {
 			res.winners[i].flags = append(res.winners[i].flags, FlagOfferExpired)
 		}
 	}
-	return freightResult{winners: res.winners, alternates: res.alternates, offerFailed: v.offerFailed}
+	return freightResult{winners: res.winners, alternates: res.alternates,
+		tariffWinners: res.winners, offerFailed: v.offerFailed}
 }
 
 // freightTariffCands prices every resolved freight tariff row: FCL nets
-// per container count, AIR nets on the chargeable base (spec §5).
+// per container count, AIR nets on the chargeable base (spec §5). The
+// shared applicability gate re-verifies modal, route and equipment —
+// a misplaced-but-valid row must never win the freight group (rule 6).
 func freightTariffCands(in Input, resolved []TariffCandidate, fxr *fxResolver) []candLine {
 	out := make([]candLine, 0, len(resolved))
 	for _, r := range resolved {
-		if r.ChargeCategory != freightCategory(in.Modal) || r.Modal != in.Modal {
+		if r.ChargeCategory != freightCategory(in.Modal) || !tariffApplies(r, in) {
 			continue
 		}
 		c := toFreightTariffCand(in, r)

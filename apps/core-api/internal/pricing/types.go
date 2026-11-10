@@ -115,13 +115,14 @@ const (
 type Reason string
 
 const (
-	ReasonMissingTerminalBand Reason = "MISSING_TERMINAL_BAND"
-	ReasonMissingCargoValue   Reason = "MISSING_CARGO_VALUE"
-	ReasonMissingCustomsFX    Reason = "MISSING_CUSTOMS_FX"
-	ReasonNoUsableOffer       Reason = "NO_USABLE_OFFER"
-	ReasonExportMatrixOpen    Reason = "EXPORT_MATRIX_OPEN"
-	ReasonSeaIncotermOnAir    Reason = "SEA_INCOTERM_ON_AIR"
-	ReasonModalOutOfMVP       Reason = "MODAL_OUT_OF_MVP"
+	ReasonMissingTerminalBand    Reason = "MISSING_TERMINAL_BAND"
+	ReasonMissingCargoValue      Reason = "MISSING_CARGO_VALUE"
+	ReasonMissingCustomsFX       Reason = "MISSING_CUSTOMS_FX"
+	ReasonMissingDeclaredFreight Reason = "MISSING_DECLARED_FREIGHT"
+	ReasonNoUsableOffer          Reason = "NO_USABLE_OFFER"
+	ReasonExportMatrixOpen       Reason = "EXPORT_MATRIX_OPEN"
+	ReasonSeaIncotermOnAir       Reason = "SEA_INCOTERM_ON_AIR"
+	ReasonModalOutOfMVP          Reason = "MODAL_OUT_OF_MVP"
 )
 
 // reasonMissingTariffGroup reports a required group that produced no

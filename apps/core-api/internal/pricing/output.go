@@ -57,6 +57,12 @@ type FXApplied struct {
 // CanonicalJSON marshals the output deterministically: struct field
 // order plus pre-sorted slices make the bytes stable, which is what the
 // determinism test compares (spec §10).
+//
+// Example:
+//
+//	b, err := out.CanonicalJSON()
+//	// b is byte-identical across runs of the same Input; persist it
+//	// with the quote for the audit view.
 func (o Output) CanonicalJSON() ([]byte, error) {
 	return json.Marshal(o)
 }

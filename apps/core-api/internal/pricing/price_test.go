@@ -420,3 +420,23 @@ func TestPrice_EmptySurchargePoolIsNotAGap(t *testing.T) {
 		t.Fatal("an empty surcharge pool is never a MISSING_TARIFF_GROUP")
 	}
 }
+
+// A zero min-markup floor can never bind, so it must not resolve USD:
+// an all-BRL FCL quote completes with no FX rates at all (PR15).
+func TestPrice_ZeroMinMarkupFloorNeedsNoUSDRate(t *testing.T) {
+	in := fobFCLInput()
+	in.CargoCurrency = "BRL"
+	in.MinMarkupUSD = dp("0.00")
+	in.FXRates = nil
+	in.Tariffs = []TariffCandidate{
+		tariffRow(testUUID1, testUUID2, "MSC", ChargeOceanFreight, "OCEAN_FREIGHT", "BRL", "950.0000"),
+		tariffRow(testUUID6, testUUID2, "AGENT", ChargeCustoms, "CUSTOMS_CLEARANCE", "BRL", "450.0000"),
+	}
+	in.Snapshots = []FeeBand{band("BRSSZ", "0", "30000", 5, "1400.0000")}
+	out := mustComplete(t, in)
+	if hasReason(out, reasonMissingFX("USD")) {
+		t.Fatal("a zero floor must not resolve USD")
+	}
+	freight := requireLine(t, out.Lines, CategoryIntlFreight, "OCEAN_FREIGHT")
+	requireMoneyEq(t, "sell", freight.SellBRL, d("2185.00")) // 1900 x 1.15
+}

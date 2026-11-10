@@ -44,9 +44,9 @@ func collectGroup(cands []candLine) groupResult {
 func tariffCandsFor(chcat ChargeCategory, cat Category, in Input, resolved []TariffCandidate, fxr *fxResolver) []candLine {
 	out := make([]candLine, 0, len(resolved))
 	for _, r := range resolved {
-		// The worker's filters are untrusted: a row for another modal
-		// must never price into this quote (architecture rule 6).
-		if r.ChargeCategory != chcat || r.Modal != in.Modal {
+		// The worker's filters are untrusted: a row for another modal,
+		// route or equipment must never price into this quote (rule 6).
+		if r.ChargeCategory != chcat || !tariffApplies(r, in) {
 			continue
 		}
 		c := toTariffCand(r, cat)
@@ -76,12 +76,11 @@ func toTariffCand(r TariffCandidate, cat Category) candLine {
 
 // offerCandsFor collects a usable offer's charges of one category into
 // the matching group pool; offer charges are always carrier-charged.
+// offerCharges already drops pre-carriage codes before they reach a
+// pool (spec §3 FCA note).
 func offerCandsFor(chcat ChargeCategory, cat Category, o *CarrierOffer, in Input, fxr *fxResolver) []candLine {
 	out := make([]candLine, 0, len(o.Charges))
-	for _, ch := range o.Charges {
-		if ch.Category != chcat || !equipmentMatches(ch.EquipmentOrUnit, in.EquipmentOrUnit) {
-			continue
-		}
+	for _, ch := range offerCharges(o, chcat, in.EquipmentOrUnit) {
 		c := toOfferCand(ch, cat, o)
 		if !priceCand(&c, fxr) {
 			continue
@@ -105,18 +104,21 @@ func toOfferCand(ch OfferCharge, cat Category, o *CarrierOffer) candLine {
 }
 
 // equipmentMatches is the offer-charge equipment rule: an empty
-// equipment on the charge covers any requested unit.
+// equipment on the charge covers any requested unit; otherwise the
+// codes compare normalized like LOCODEs — padding and case are noise.
 func equipmentMatches(chargeEquipment, requested string) bool {
-	return chargeEquipment == "" || strings.EqualFold(chargeEquipment, requested)
+	return chargeEquipment == "" ||
+		strings.EqualFold(strings.TrimSpace(chargeEquipment), strings.TrimSpace(requested))
 }
 
 // fixedFeeCands collects org fixed fees scoped to a group (spec §4 step
 // 5/7). Fixed fees are org rules, not competing candidates: each emits
-// its own line.
+// its own line. Pre-carriage codes are out of MVP and drop here; the
+// audit warning is emitted once up front in preCarriageSkips.
 func fixedFeeCands(cat Category, fees []FixedFee, fxr *fxResolver) []candLine {
 	out := make([]candLine, 0, len(fees))
 	for _, f := range fees {
-		if f.Category != cat {
+		if f.Category != cat || isPreCarriage(f.ChargeCode) {
 			continue
 		}
 		c := toFixedFeeCand(f)
@@ -144,10 +146,157 @@ func toFixedFeeCand(f FixedFee) candLine {
 }
 
 // isPreCarriage detects out-of-MVP inland/pre-carriage charge codes,
-// skipped with a warning (spec §3 FCA note).
+// skipped with a warning (spec §3 FCA note). INLAND must be a whole
+// code token — MAINLAND_FEE is not a pre-carriage charge.
 func isPreCarriage(code string) bool {
 	up := strings.ToUpper(code)
-	return strings.Contains(up, "INLAND") || strings.Contains(up, "PRE_CARRIAGE") || strings.Contains(up, "PRE-CARRIAGE")
+	if strings.Contains(up, "PRE_CARRIAGE") || strings.Contains(up, "PRE-CARRIAGE") {
+		return true
+	}
+	for _, tok := range strings.FieldsFunc(up, isCodeSep) {
+		if tok == "INLAND" {
+			return true
+		}
+	}
+	return false
+}
+
+// isCodeSep separates charge-code tokens: codes in the feed use '_',
+// '-' or ' ' as word boundaries.
+func isCodeSep(r rune) bool { return r == '_' || r == '-' || r == ' ' }
+
+// buildTerminal prices TERMINAL_STORAGE_THC for imports: the CIF base
+// (converted at the customs rate) selects the destination fee band, and
+// scoped fixed fees add on (spec §4 steps 5-6). needsDeclared marks the
+// matrix rows where no freight is payable — the CIF family and
+// requested DAP/DPU — so the band can only be sized from the
+// seller-paid declared freight.
+func (a *assembly) buildTerminal(g *groups, freight []candLine) {
+	if !g.terminal {
+		return
+	}
+	a.emitBand(freight, !g.freight)
+	a.emitPassFees(CategoryTerminalStorage)
+}
+
+// emitBand prices the matched fee band on the CIF base; a base that
+// cannot be computed has already raised its own reason in cifBase. A
+// band matched but unpriceable is a MISSING_FX gap (already recorded by
+// the resolver) — MISSING_TERMINAL_BAND fires only on a true no-match.
+func (a *assembly) emitBand(freight []candLine, needsDeclared bool) {
+	base, declared, ok := a.cifBase(freight, needsDeclared)
+	if !ok {
+		return
+	}
+	c, outcome := bandCand(a.in, base, a.fxr)
+	if outcome == bandNoMatch {
+		a.reason(ReasonMissingTerminalBand)
+		return
+	}
+	a.assume(AssumptionStorageFirstPeriodOnly)
+	if outcome == bandUnpriced {
+		return
+	}
+	if declared {
+		c.flags = append(c.flags, FlagDeclaredBasis)
+	}
+	a.emitPass(c)
+}
+
+// cifBase computes (cargo + freight + insurance) converted per
+// component at the customs rate (spec §4 step 6, §6). declared reports
+// whether declared freight fed the base (DECLARED_BASIS flag); a stale
+// customs rate still applies but warns — no line carries the flag.
+func (a *assembly) cifBase(freight []candLine, needsDeclared bool) (decimal.Decimal, bool, bool) {
+	if !a.cifInputsPresent(needsDeclared) {
+		return decimal.Zero, false, false
+	}
+	c := &cifAcc{fxr: a.fxr}
+	if !c.add(a.in.CargoValue, a.in.CargoCurrency) ||
+		!c.addFreight(a.in, freight) ||
+		!c.addDeclared(a.in.DeclaredInsurance) {
+		a.reason(ReasonMissingCustomsFX)
+		return decimal.Zero, false, false
+	}
+	if c.stale {
+		a.warn("CUSTOMS_FX_STALE")
+	}
+	return roundMoney(c.total), c.declared, true
+}
+
+// cifInputsPresent checks the inputs the CIF base needs before any
+// conversion: a cargo value always, and — when no freight is payable
+// (the CIF family and requested DAP/DPU) — the seller-paid declared
+// freight. A nil declared freight is absent input, never a silent
+// zero; a zero-valued Money stays a known zero (PR15). Each absent
+// input records its reason.
+func (a *assembly) cifInputsPresent(needsDeclared bool) bool {
+	ok := true
+	if a.in.CargoValue.IsZero() {
+		a.reason(ReasonMissingCargoValue)
+		ok = false
+	}
+	if needsDeclared && a.in.DeclaredFreight == nil {
+		a.reason(ReasonMissingDeclaredFreight)
+		ok = false
+	}
+	return ok
+}
+
+// cifAcc accumulates the CIF base in BRL, converting each component at
+// the customs rate; declared records DECLARED_BASIS provenance and
+// stale remembers whether any applied customs rate was STALE_FX.
+type cifAcc struct {
+	fxr      *fxResolver
+	total    decimal.Decimal
+	declared bool
+	stale    bool
+}
+
+func (c *cifAcc) add(amount decimal.Decimal, ccy string) bool {
+	// A known zero contributes nothing and resolves no rate — otherwise
+	// a zero declared in a rate-less currency raises a spurious
+	// MISSING_CUSTOMS_FX (PR15 review).
+	if amount.IsZero() {
+		return true
+	}
+	rate, flags, ok := c.fxr.customs(ccy)
+	if !ok {
+		return false
+	}
+	for _, f := range flags {
+		if f == FlagStaleFX {
+			c.stale = true
+		}
+	}
+	c.total = c.total.Add(amount.Mul(rate))
+	return true
+}
+
+func (c *cifAcc) addDeclared(m *Money) bool {
+	if m == nil {
+		return true
+	}
+	return c.add(m.Amount, m.Currency)
+}
+
+// addFreight adds the freight component of the CIF base: payable
+// freight net when owed and priced, else the declared freight (RFC-001
+// §5). A declared component sets the DECLARED_BASIS flag.
+func (c *cifAcc) addFreight(in Input, freight []candLine) bool {
+	for _, l := range freight {
+		if !c.add(l.net, l.ccy) {
+			return false
+		}
+	}
+	if len(freight) > 0 {
+		return true
+	}
+	if !c.addDeclared(in.DeclaredFreight) {
+		return false
+	}
+	c.declared = in.DeclaredFreight != nil
+	return true
 }
 
 // bandOutcome is the fee-band selection result. A band that matched the

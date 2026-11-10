@@ -153,6 +153,22 @@ func TestSelectFreight_NoCandidatesIsMissing(t *testing.T) {
 	}
 }
 
+// The freight collector applies the same fail-closed applicability
+// gate (PR15): a cheaper row on the wrong route must not win.
+func TestFreightTariffCands_RejectsMisplacedRows(t *testing.T) {
+	in := freightInput()
+	otherRoute := tariffRow(testUUID1, testUUID2, "MSC", ChargeOceanFreight, "OCEAN_FREIGHT", "USD", "400.0000")
+	otherRoute.DestLOCODE = "BRPAR"
+	wrongEquip := tariffRow(testUUID4, testUUID2, "MSC", ChargeOceanFreight, "OCEAN_FREIGHT", "USD", "300.0000")
+	wrongEquip.EquipmentOrUnit = "20DV"
+	right := tariffRow(testUUID3, testUUID2, "MSC", ChargeOceanFreight, "OCEAN_FREIGHT", "USD", "800.0000")
+	fxr := newFXResolver(in)
+	got := freightTariffCands(in, []TariffCandidate{otherRoute, wrongEquip, right}, fxr)
+	if len(got) != 1 || !got[0].net.Equal(d("1600")) {
+		t.Fatalf("only this route's row may price: %+v", got)
+	}
+}
+
 func TestSelectFreight_AIRCheapestBaseNetWins(t *testing.T) {
 	in := freightInput()
 	in.Modal = ModalAIR
@@ -282,4 +298,102 @@ func TestPrice_FreightDistinctCodesShareAggregateSell(t *testing.T) {
 	requireMoneyEq(t, "ISPS sell", freight[0].SellBRL, d("633.42"))
 	requireMoneyEq(t, "OCEAN sell", freight[1].SellBRL, d("12034.98"))
 	requireMoneyEq(t, "aggregate sell", sumSells(freight), d("12668.40"))
+}
+
+// A losing freight row's alternative sell is the whole-option total it
+// would produce — replacing its code's winner while the other codes
+// keep theirs — not the row priced standalone (spec §4 step 5, PR15).
+func TestPrice_FreightAlternativeIsWholeOptionSell(t *testing.T) {
+	in := fobTariffInput("950.0000")
+	in.Tariffs = append(in.Tariffs,
+		tariffRow(testUUID3, testUUID2, "MSC", ChargeOceanFreight, "ISPS", "USD", "50.0000"),
+		tariffRow(testUUID4, testUUID2, "MAERSK", ChargeOceanFreight, "OCEAN_FREIGHT", "USD", "700.0000"))
+	out := mustComplete(t, in)
+	// Winners: ISPS 50x2 and OCEAN 700x2 (MAERSK) -> 1500 USD net.
+	// The 950-row alternative = ISPS 100 + OCEAN 1900 -> 2000 USD.
+	alt := requireLine(t, out.Alternatives, CategoryIntlFreight, "OCEAN_FREIGHT")
+	requireMoneyEq(t, "alt cost stays the row's own", alt.CostBRL, d("10465.20")) // 1900 x 5.508
+	requireMoneyEq(t, "alt whole-option sell", alt.SellBRL, d("12668.40"))        // 2000 x 5.508 x 1.15
+}
+
+// An alternative is always priced against its OWN pool's per-code
+// winners: when a carrier offer wins, a losing tariff row still prices
+// as the whole TARIFF option — offer lines never mix into it (Q12
+// forbids the hybrid, PR15 review).
+func TestPrice_FreightAlternativeUsesOwnPoolBaseline(t *testing.T) {
+	in := fobTariffInput("950.0000")
+	in.CarrierOffer = testOffer(testUUID4, ts(2026, 11, 20, 0, 0), oceanCharge("2500.00", "40HC"))
+	in.Tariffs = append(in.Tariffs,
+		tariffRow(testUUID3, testUUID2, "MSC", ChargeOceanFreight, "ISPS", "USD", "50.0000"))
+	out := mustComplete(t, in)
+	// The offer wins. Every tariff row's alternative is the tariff
+	// pool's own option — OCEAN 950x2 + ISPS 50x2 -> 2000 USD.
+	ocean := requireLine(t, out.Alternatives, CategoryIntlFreight, "OCEAN_FREIGHT")
+	requireMoneyEq(t, "ocean alt cost stays the row's own", ocean.CostBRL, d("10465.20"))
+	requireMoneyEq(t, "ocean alt whole-option sell", ocean.SellBRL, d("12668.40"))
+	isps := requireLine(t, out.Alternatives, CategoryIntlFreight, "ISPS")
+	requireMoneyEq(t, "isps alt cost", isps.CostBRL, d("550.80"))
+	requireMoneyEq(t, "isps alt whole-option sell", isps.SellBRL, d("12668.40"))
+}
+
+// A bound alternative carries the floor's FX flags like the winners
+// do — here the floor resolves via the PTAX fallback (no carrier USD
+// rate), so FX_FALLBACK must reach the alternate too (PR15 review).
+func TestPrice_FreightAlternativeBoundFloorCarriesFXFlags(t *testing.T) {
+	in := fobFCLInput()
+	in.MinMarkupUSD = dp("5000.00") // 5000x2x5.406 = 54060 BRL floor.
+	in.FXRates = []FXRate{
+		{Source: FXSourceCarrier, Currency: "EUR", Date: testQuoteDate, Rate: d("5.900000")},
+		{Source: FXSourcePTAX, Currency: "USD", Date: testPrevBD, Rate: d("5.300000")},
+		{Source: FXSourceCustoms, Currency: "EUR", Date: testQuoteDate, Rate: d("6.000000")},
+		{Source: FXSourceCustoms, Currency: "USD", Date: testQuoteDate, Rate: d("5.350000")},
+	}
+	in.Tariffs = []TariffCandidate{
+		tariffRow(testUUID1, testUUID2, "MSC", ChargeOceanFreight, "OCEAN_FREIGHT", "EUR", "950.0000"),
+		tariffRow(testUUID3, testUUID2, "MAERSK", ChargeOceanFreight, "OCEAN_FREIGHT", "EUR", "700.0000"),
+		tariffRow(testUUID5, testUUID2, "HAPAG", ChargeSurcharge, "BAF", "USD", "120.0000"),
+		tariffRow(testUUID6, testUUID2, "AGENT", ChargeCustoms, "CUSTOMS_CLEARANCE", "BRL", "450.0000"),
+	}
+	in.Snapshots = []FeeBand{band("BRSSZ", "100000", "200000", 5, "1400.0000")}
+	out := mustComplete(t, in)
+	// Winner: 700x2 EUR x 6.018 (5.9 + 2% spread) = 8425.20; floor binds.
+	winner := requireLine(t, out.Lines, CategoryIntlFreight, "OCEAN_FREIGHT")
+	if !hasFlag(t, winner, FlagMinMarkupApplied) || !hasFlag(t, winner, FlagFXFallback) {
+		t.Fatalf("bound winner must carry the floor's FX flags: %+v", winner)
+	}
+	// The 950-row alternative: 1900x6.018 = 11434.20 + 54060 = 65494.20.
+	alt := requireLine(t, out.Alternatives, CategoryIntlFreight, "OCEAN_FREIGHT")
+	requireMoneyEq(t, "bound alt sell", alt.SellBRL, d("65494.20"))
+	if !hasFlag(t, alt, FlagMinMarkupApplied) || !hasFlag(t, alt, FlagFXFallback) {
+		t.Fatalf("bound alternative must carry the floor's FX flags: %+v", alt)
+	}
+}
+
+// Offer-charge equipment matching normalizes like LOCODEs: padding
+// and case are noise, an empty equipment on the charge stays generic.
+func TestOfferCharges_EquipmentNormalized(t *testing.T) {
+	o := testOffer(testUUID4, ts(2026, 11, 20, 0, 0), oceanCharge("900.00", " 40hc "))
+	if got := offerCharges(o, ChargeOceanFreight, "40HC"); len(got) != 1 {
+		t.Fatal("equipment match must normalize case and padding")
+	}
+}
+
+// An offer whose only origin charge is pre-carriage fails Q12 coverage
+// under EXW/FCA: inland codes cannot satisfy the origin group (PR15).
+func TestPrice_OfferOnlyPreCarriageOriginFailsCoverage(t *testing.T) {
+	in := strictCoverageInput() // EXW; tariffs cover every required group.
+	in.CarrierOffer = testOffer(testUUID4, ts(2026, 11, 20, 0, 0),
+		oceanCharge("2500.00", "40HC"),
+		offerCharge(ChargeOriginCharge, "INLAND", "300.00", "USD", "40HC"))
+	out := mustComplete(t, in)
+	if findLine(out.Lines, CategoryOriginCharges, "INLAND") != nil {
+		t.Fatal("pre-carriage must not satisfy coverage nor price")
+	}
+	if !slices.Contains(out.Warnings, "carrier offer ignored: does not cover every required carrier group") {
+		t.Fatalf("coverage must reject the offer: %v", out.Warnings)
+	}
+	freight := requireLine(t, out.Lines, CategoryIntlFreight, "OCEAN_FREIGHT")
+	if freight.SourceType != SourcePrivateTariff {
+		t.Fatal("the tariff path must price the rejected offer's route")
+	}
 }

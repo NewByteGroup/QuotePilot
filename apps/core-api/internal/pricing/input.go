@@ -3,6 +3,7 @@ package pricing
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -243,6 +244,21 @@ func (in Input) validateRequired() error {
 	}
 	if in.OriginLOCODE == "" || in.DestLOCODE == "" {
 		return errors.New("pricing: origin and dest locode required")
+	}
+	return in.validateEquipment()
+}
+
+// validateEquipment fails closed on an empty equipment/unit for the
+// priced modals: it is a required extraction field, and the tariff
+// applicability gate must never see an empty match key (spec §4 step 3
+// — no wildcard, so empty-vs-empty could otherwise pass). LCL exits on
+// the modal before equipment matters.
+func (in Input) validateEquipment() error {
+	if in.Modal != ModalFCL && in.Modal != ModalAIR {
+		return nil
+	}
+	if strings.TrimSpace(in.EquipmentOrUnit) == "" {
+		return fmt.Errorf("pricing: equipment or unit required for %s", in.Modal)
 	}
 	return nil
 }

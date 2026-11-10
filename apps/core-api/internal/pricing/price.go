@@ -15,6 +15,12 @@ import (
 // The clock is injected so the package never reads time itself
 // (architecture rule 5); every comparison today runs off the input's
 // QuoteDate/PricedAt, so the clock is only required to be non-nil.
+//
+// Example:
+//
+//	out, err := Price(input, func() time.Time { return pricedAt })
+//	// err != nil -> config bug; out.Status routes the RFQ to
+//	// COMPLETE or NEEDS_REVIEW with out.Reasons for the gaps.
 func Price(in Input, clock func() time.Time) (Output, error) {
 	if clock == nil {
 		return Output{}, errors.New("pricing: nil clock")
@@ -88,6 +94,7 @@ func priceImport(in Input, g *groups, out Output) Output {
 		a.assume(AssumptionOfferStrictCoverage)
 	}
 	a.offerWarnings(verdict)
+	a.preCarriageSkips(verdict, g)
 	freightWinners := a.buildFreight(g, resolved, verdict)
 	a.buildPassThroughGroups(g, resolved, verdict)
 	a.buildTerminal(g, freightWinners)
@@ -118,13 +125,60 @@ func (a *assembly) resolvedTariffs() []TariffCandidate {
 	resolved := resolveTariffs(a.in.Tariffs, a.in.QuoteDate, a.in.PricedAt)
 	kept := resolved[:0]
 	for _, r := range resolved {
-		if isPreCarriage(r.ChargeCode) {
-			a.warn("skipped out-of-MVP pre-carriage charge " + r.ChargeCode)
+		if a.skipPreCarriage(r.ChargeCode) {
 			continue
 		}
 		kept = append(kept, r)
 	}
 	return kept
+}
+
+// preCarriageSkips warns for the out-of-MVP inland/pre-carriage codes
+// the other candidate paths drop silently (spec §3 FCA note): every
+// charge of a usable offer and every org fixed fee scoped to an open
+// group. A rejected offer never reaches a pool — its offer-level
+// warning already says it was skipped — so only usable offers are
+// scanned; a fixed fee in a closed group was never a candidate, so its
+// skip must not warn.
+func (a *assembly) preCarriageSkips(v offerVerdict, g *groups) {
+	if v.usable != nil {
+		for _, ch := range v.usable.Charges {
+			a.skipPreCarriage(ch.Code)
+		}
+	}
+	for _, f := range a.in.FixedFees {
+		if groupOpen(g, f.Category) {
+			a.skipPreCarriage(f.ChargeCode)
+		}
+	}
+}
+
+// groupOpen reports whether a fixed-fee category's cost group is open
+// under the resolved matrix — the surcharge pool follows the freight
+// payer's incoterm like the SURCHARGE groupSpec does.
+func groupOpen(g *groups, cat Category) bool {
+	switch cat {
+	case CategoryIntlFreight, CategorySurcharge:
+		return g.freight
+	case CategoryOriginCharges:
+		return g.origin
+	case CategoryTerminalStorage:
+		return g.terminal
+	case CategoryCustomsDispatch:
+		return g.customs
+	}
+	return false
+}
+
+// skipPreCarriage reports and warns when a charge code is out-of-MVP
+// inland/pre-carriage — the shared guard for tariff rows, offer
+// charges and fixed fees.
+func (a *assembly) skipPreCarriage(code string) bool {
+	if !isPreCarriage(code) {
+		return false
+	}
+	a.warn("skipped out-of-MVP pre-carriage charge " + code)
+	return true
 }
 
 // offerWarnings records why a supplied offer was not used (or how it
@@ -156,7 +210,7 @@ func (a *assembly) buildFreight(g *groups, resolved []TariffCandidate, v offerVe
 		return nil
 	}
 	a.priceFreightWinners(res.winners)
-	a.priceAlternates(res.alternates)
+	a.priceAlternates(res)
 	// Fixed fees scoped to the freight group are pass-through charges
 	// (e.g. a booking fee) — never part of the markup aggregate.
 	a.emitPassFees(CategoryIntlFreight)
@@ -198,7 +252,10 @@ func freightMissingParam(m Modal) string {
 // lookup's flags (e.g. FX_FALLBACK) are returned so the freight lines
 // can carry them.
 func (a *assembly) freightFloorBRL() (decimal.Decimal, []string) {
-	if a.in.Modal != ModalFCL || a.in.MinMarkupUSD == nil {
+	// A nil or zero floor can never bind, so it resolves no USD rate —
+	// otherwise a BRL-freight quote without USD rates would report a
+	// spurious MISSING_FX:USD (PR15).
+	if a.in.Modal != ModalFCL || a.in.MinMarkupUSD == nil || a.in.MinMarkupUSD.IsZero() {
 		return decimal.Zero, nil
 	}
 	rate, flags, ok := a.fxr.resolve(true, "USD")
@@ -232,34 +289,68 @@ func (a *assembly) priceFreightWinners(winners []candLine) {
 	}
 }
 
-// freightSells prices the winners' aggregate: AIR marks up the summed
-// chargeable bases; FCL applies the §5 floor formula. Either way the
-// aggregate sell splits across lines by cent allocation (spec §7).
-func (a *assembly) freightSells(weights []decimal.Decimal, floor decimal.Decimal) ([]decimal.Decimal, bool) {
+// freightAggregateSell is the group-level sell for one freight option
+// before any per-line cent allocation: AIR marks up the summed
+// chargeable bases, FCL applies the §5 floor formula.
+func (a *assembly) freightAggregateSell(netBRL, floor decimal.Decimal) (decimal.Decimal, bool) {
 	if a.in.Modal == ModalAIR {
-		return allocateCents(airFreightSell(sum(weights), a.in.MarkupRate), weights), false
+		return airFreightSell(netBRL, a.in.MarkupRate), false
 	}
-	total, bound := fclFreightSell(sum(weights), a.in.MarkupRate, floor)
+	return fclFreightSell(netBRL, a.in.MarkupRate, floor)
+}
+
+// freightSells prices the winners' aggregate and splits it across the
+// winning lines by cent allocation (spec §7).
+func (a *assembly) freightSells(weights []decimal.Decimal, floor decimal.Decimal) ([]decimal.Decimal, bool) {
+	total, bound := a.freightAggregateSell(sum(weights), floor)
 	return allocateCents(total, weights), bound
 }
 
-// priceAlternates prices each losing freight option as a complete line
-// for the audit view (Q5), with the same sell formula it would have had.
-func (a *assembly) priceAlternates(alts []candLine) {
-	floor, _ := a.freightFloorBRL()
-	for _, c := range alts {
-		var sell decimal.Decimal
-		if a.in.Modal == ModalAIR {
-			sell = airFreightSell(c.netBRL(), a.in.MarkupRate)
-		} else {
-			var bound bool
-			sell, bound = fclFreightSell(c.netBRL(), a.in.MarkupRate, floor)
-			if bound {
-				c.flags = append(c.flags, FlagMinMarkupApplied)
-			}
+// priceAlternates prices each losing freight row as a whole-option
+// alternative for the audit view (Q5): its SellBRL is the freight
+// aggregate the option would sell at if that row replaced the winner
+// of its own charge code inside its own source pool — a tariff row
+// within the tariff pool's per-code winners, an offer charge within
+// the offer's — never a hybrid of offer winners plus tariff rows,
+// which Q12 forbids. CostBRL stays the losing row's own net so the
+// audit still shows what the row itself costs.
+func (a *assembly) priceAlternates(res freightResult) {
+	floor, floorFlags := a.freightFloorBRL()
+	for _, c := range res.alternates {
+		sell, bound := a.freightAggregateSell(sum(alternateWeights(res.poolWinners(c.src), c)), floor)
+		if bound {
+			// Bound alternates carry the floor's FX flags like winners.
+			c.flags = append(c.flags, FlagMinMarkupApplied)
+			c.flags = append(c.flags, floorFlags...)
 		}
 		a.alts = append(a.alts, toLine(c, sell))
 	}
+}
+
+// poolWinners returns the per-code winners of one source pool — the
+// baseline a losing row's alternative is priced against, so a tariff
+// alternative never mixes offer lines into its option (Q12). Offer
+// charges only ever win or fail whole today, so res.winners is the
+// offer pool whenever an offer-sourced alternate exists.
+func (r freightResult) poolWinners(src SourceType) []candLine {
+	if src == SourcePrivateTariff {
+		return r.tariffWinners
+	}
+	return r.winners
+}
+
+// alternateWeights is the net-BRL weight set behind one losing row's
+// whole-option sell: the pool winners' nets without the row's own
+// charge code — the row replaces that code's coverage, a no-op when no
+// winner covers it — plus the losing row's own net.
+func alternateWeights(winners []candLine, alt candLine) []decimal.Decimal {
+	weights := make([]decimal.Decimal, 0, len(winners))
+	for _, w := range winners {
+		if w.code != alt.code {
+			weights = append(weights, w.netBRL())
+		}
+	}
+	return append(weights, alt.netBRL())
 }
 
 // groupSpec is one pass-through pool: the line category it feeds, the
@@ -315,113 +406,6 @@ func (a *assembly) missingGroup(cat Category, v offerVerdict) {
 	if cat == CategoryOriginCharges && (v.expired || v.incomplete) {
 		a.reason(ReasonNoUsableOffer)
 	}
-}
-
-// buildTerminal prices TERMINAL_STORAGE_THC for imports: the CIF base
-// (converted at the customs rate) selects the destination fee band, and
-// scoped fixed fees add on (spec §4 steps 5-6).
-func (a *assembly) buildTerminal(g *groups, freight []candLine) {
-	if !g.terminal {
-		return
-	}
-	a.emitBand(freight)
-	a.emitPassFees(CategoryTerminalStorage)
-}
-
-// emitBand prices the matched fee band on the CIF base; a base that
-// cannot be computed has already raised its own reason in cifBase. A
-// band matched but unpriceable is a MISSING_FX gap (already recorded by
-// the resolver) — MISSING_TERMINAL_BAND fires only on a true no-match.
-func (a *assembly) emitBand(freight []candLine) {
-	base, declared, ok := a.cifBase(freight)
-	if !ok {
-		return
-	}
-	c, outcome := bandCand(a.in, base, a.fxr)
-	if outcome == bandNoMatch {
-		a.reason(ReasonMissingTerminalBand)
-		return
-	}
-	a.assume(AssumptionStorageFirstPeriodOnly)
-	if outcome == bandUnpriced {
-		return
-	}
-	if declared {
-		c.flags = append(c.flags, FlagDeclaredBasis)
-	}
-	a.emitPass(c)
-}
-
-// cifBase computes (cargo + freight + insurance) converted per
-// component at the customs rate (spec §4 step 6, §6). declared reports
-// whether declared freight fed the base (DECLARED_BASIS flag); a stale
-// customs rate still applies but warns — no line carries the flag.
-func (a *assembly) cifBase(freight []candLine) (decimal.Decimal, bool, bool) {
-	if a.in.CargoValue.IsZero() {
-		a.reason(ReasonMissingCargoValue)
-		return decimal.Zero, false, false
-	}
-	c := &cifAcc{fxr: a.fxr}
-	if !c.add(a.in.CargoValue, a.in.CargoCurrency) ||
-		!c.addFreight(a.in, freight) ||
-		!c.addDeclared(a.in.DeclaredInsurance) {
-		a.reason(ReasonMissingCustomsFX)
-		return decimal.Zero, false, false
-	}
-	if c.stale {
-		a.warn("CUSTOMS_FX_STALE")
-	}
-	return roundMoney(c.total), c.declared, true
-}
-
-// cifAcc accumulates the CIF base in BRL, converting each component at
-// the customs rate; declared records DECLARED_BASIS provenance and
-// stale remembers whether any applied customs rate was STALE_FX.
-type cifAcc struct {
-	fxr      *fxResolver
-	total    decimal.Decimal
-	declared bool
-	stale    bool
-}
-
-func (c *cifAcc) add(amount decimal.Decimal, ccy string) bool {
-	rate, flags, ok := c.fxr.customs(ccy)
-	if !ok {
-		return false
-	}
-	for _, f := range flags {
-		if f == FlagStaleFX {
-			c.stale = true
-		}
-	}
-	c.total = c.total.Add(amount.Mul(rate))
-	return true
-}
-
-func (c *cifAcc) addDeclared(m *Money) bool {
-	if m == nil {
-		return true
-	}
-	return c.add(m.Amount, m.Currency)
-}
-
-// addFreight adds the freight component of the CIF base: payable
-// freight net when owed and priced, else the declared freight (RFC-001
-// §5). A declared component sets the DECLARED_BASIS flag.
-func (c *cifAcc) addFreight(in Input, freight []candLine) bool {
-	for _, l := range freight {
-		if !c.add(l.net, l.ccy) {
-			return false
-		}
-	}
-	if len(freight) > 0 {
-		return true
-	}
-	if !c.addDeclared(in.DeclaredFreight) {
-		return false
-	}
-	c.declared = in.DeclaredFreight != nil
-	return true
 }
 
 // finishReasonsAndAssumptions folds FX gaps and rate-path usage into

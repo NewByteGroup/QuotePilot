@@ -96,3 +96,26 @@ func (r TariffCandidate) beats(other TariffCandidate) bool {
 	}
 	return r.ID.String() > other.ID.String()
 }
+
+// tariffApplies re-verifies the worker's dumb modal/route/equipment
+// filters on every resolved row (RFC-001 step 3; those filters are
+// untrusted, rule 6): the row must name this shipment's modal, origin
+// LOCODE, destination LOCODE and equipment. The spec defines no
+// wildcard convention for tariff rows, so a field must equal the
+// shipment's — an empty field on either side never matches, not even
+// empty-vs-empty (fail-closed, unlike offer charges where an empty
+// equipment is documented as generic). Codes compare normalized so
+// case and padding are noise.
+func tariffApplies(r TariffCandidate, in Input) bool {
+	if r.Modal != in.Modal {
+		return false
+	}
+	if normalizeLocode(r.OriginLOCODE) != normalizeLocode(in.OriginLOCODE) {
+		return false
+	}
+	if normalizeLocode(r.DestLOCODE) != normalizeLocode(in.DestLOCODE) {
+		return false
+	}
+	row, req := normalizeLocode(r.EquipmentOrUnit), normalizeLocode(in.EquipmentOrUnit)
+	return row != "" && req != "" && row == req
+}
