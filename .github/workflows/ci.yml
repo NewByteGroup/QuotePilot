@@ -372,6 +372,12 @@ jobs:
             echo "stub: no Go toolchain yet — check activates when apps/core-api/go.mod lands"
             exit 0
           fi
+          # POSTGRES_DSN unset would skip every DB test and pass green anyway
+          # (RequirePostgres skips); fail loudly instead.
+          if [ -z "${POSTGRES_DSN:-}" ]; then
+            echo "error: POSTGRES_DSN is not set — refusing to pass on skipped tests"
+            exit 1
+          fi
           cd apps/core-api && go test -count=1 ./...
 
   contracts-drift:
