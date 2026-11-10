@@ -1,6 +1,6 @@
 # ADR-005: Authentication, tenant resolution, the platform (pre-tenant) path and the 1-click approval token
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-08
 - **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
 - **Related:** ADR-001 (boundary rules), ADR-002 (`InTenantTx`), ADR-003 (roles: `qp_migrator`, `qp_app`, `qp_admin`), ADR-004 (River jobs), RFC-002 (email pipeline), RFC-003 (connectors)
@@ -45,17 +45,19 @@ Initial set (names are the contract, signatures are fixed in the migration):
 
 | Function | Used by | Returns |
 |---|---|---|
-| `platform_find_user_by_email(email)` | login | `user_id` or null |
-| `platform_create_login_token(user_id, token_hash, expires_at)`, `platform_consume_login_token(token_hash)` | login | the consume call is one atomic `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now() RETURNING user_id` |
-| `platform_create_session`, `platform_rotate_session`, `platform_revoke_session` | sessions | session ids and revocation outcome |
-| `platform_list_memberships(user_id)` | Organization Switcher | `organization_id`, `name`, `slug`, `role` |
-| `platform_get_membership(user_id, organization_id)` | every authenticated request | `role` or null |
-| `platform_resolve_inbound_alias(alias)` | inbound webhook | `organization_id` or null |
-| `platform_register_waiter(connector_id, organization_id, rfq_id)` | pricing, inside a tenant tx | nothing; see section 6 |
+| `find_user_by_email(email)` | login | `user_id` or null |
+| `create_login_token(user_id, token_hash, expires_at)`, `consume_login_token(token_hash)` | login | the consume call is one atomic `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now() RETURNING user_id` |
+| `create_session`, `rotate_session`, `revoke_session` | sessions | session ids and revocation outcome |
+| `list_memberships_for_email(email)` | Organization Switcher | `organization_id`, `name`, `slug`, `role` |
+| `get_membership(user_id, organization_id)` | every authenticated request | `role` or null |
+| `resolve_inbound_org(alias)` | inbound webhook | `organization_id` or null |
+| `register_waiter(connector_id, organization_id, rfq_id)` | pricing, inside a tenant tx | nothing; see section 6 |
 | `platform_take_waiters(connector_id)` | connector repair job | `organization_id`, `rfq_id` rows |
 | `platform_record_snapshot(...)` and the connector-status updates | connector jobs | nothing. Layer C tables (public data) are read-only for `qp_app`; writes go through these functions, granted to `qp_admin` only |
 
-`platform_register_waiter` checks that its `organization_id` argument equals `current_setting('app.current_organization_id', true)`, so a tenant transaction can register only itself.
+*Amended for data model v1.3 (Pedro, 2026-11-10): the function table is renamed to the shipped convention — tenant-facing functions granted to `qp_app` carry no prefix (`get_membership`, `resolve_inbound_org`, `list_memberships_for_email`), while the `platform_` prefix is reserved for the `qp_admin` surface. `list_memberships_for_email` takes the caller's email and returns the four-column switcher row; `register_waiter` runs inside a tenant transaction, so it is a `qp_app` function and drops the prefix. This supersedes the earlier all-`platform_` sketch.*
+
+`register_waiter` checks that its `organization_id` argument equals `current_setting('app.current_organization_id', true)`, so a tenant transaction can register only itself.
 
 ### 3. Login: magic link
 
@@ -80,7 +82,7 @@ Initial set (names are the contract, signatures are fixed in the migration):
 
 ### 5. Tenant resolution on API requests
 
-For each request: verify the JWT, read `X-Organization-Id`, call `platform_get_membership(user_id, organization_id)`, put the role on the request context, then `InTenantTx(organization_id, ...)`.
+For each request: verify the JWT, read `X-Organization-Id`, call `get_membership(user_id, organization_id)`, put the role on the request context, then `InTenantTx(organization_id, ...)`.
 
 - A user who is not a member, and an organization that does not exist, get the same response, so ids cannot be probed.
 - The lookup runs on every request (one indexed query) and is not cached in the MVP.
@@ -96,12 +98,12 @@ For each request: verify the JWT, read `X-Organization-Id`, call `platform_get_m
 
 When pricing cannot proceed because a public connector is unavailable (RFC-003), the RFQ should be reprocessed after the connector is repaired. Finding "all RFQs waiting for connector X" would normally need a cross-tenant read, which RLS correctly forbids.
 
-Decision: while still inside its own tenant transaction, pricing calls `platform_register_waiter(connector_id, organization_id, rfq_id)`. The row lives in a platform table holding **identifiers only**. When the connector is repaired, a platform job calls `platform_take_waiters(connector_id)` and enqueues **one River job per waiting RFQ**, each carrying its own `{organization_id, correlation_id, payload}` envelope with IDs only (ADR-004). No job ever loops across tenants. The registry reveals which tenant has something waiting, never its content.
+Decision: while still inside its own tenant transaction, pricing calls `register_waiter(connector_id, organization_id, rfq_id)`. The row lives in a platform table holding **identifiers only**. When the connector is repaired, a platform job calls `platform_take_waiters(connector_id)` and enqueues **one River job per waiting RFQ**, each carrying its own `{organization_id, correlation_id, payload}` envelope with IDs only (ADR-004). No job ever loops across tenants. The registry reveals which tenant has something waiting, never its content.
 
 ### 7. Inbound webhook
 
 1. Read the raw body and verify the Svix signature and timestamp before parsing anything. Reject on failure.
-2. For each recipient address in the event, normalise it (lower case, plus-tag removed) and call `platform_resolve_inbound_alias`.
+2. For each recipient address in the event, normalise it (lower case, plus-tag removed) and call `resolve_inbound_org`.
 3. Exactly one organization matches: continue. More than one distinct organization (a message addressed to two tenants): quarantine by id and do not guess. None: record the message id and a counter at platform level, store nothing tenant-scoped, and answer 2xx so the sender does not retry. Resend (Svix) retries **any** non-2xx — no 4xx/5xx distinction — eight times over ~27 hours (immediate, 5s, 5m, 30m, 2h, 5h, 10h, +10h), so an error response for a permanently undeliverable message would replay it for a day; the documented way to abort a delivery explicitly is the `webhook-delivery: abort-message` response header. Duplicates are normal under retries, which the `(organization_id, resend_message_id)` idempotent insert in step 4 already covers.
 4. In `InTenantTx(organization_id)`: insert the RFQ with `UNIQUE (organization_id, resend_message_id)` and enqueue the ingest job with `InsertTx` (ADR-004). A duplicate delivery inserts and enqueues nothing.
 5. The inbound alias is immutable in the MVP, so an old address cannot start resolving to a different tenant.

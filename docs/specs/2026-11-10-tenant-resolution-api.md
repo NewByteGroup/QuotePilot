@@ -1,9 +1,9 @@
 # Tech spec — tenant resolution and session API (`internal/platform`, `internal/auth`)
 
-- **Status:** Draft for implementation — **gated on ADR-005, which is still
-  Proposed**. Pedro's sign-off on the ADR and on the two SPEC DECISION
-  REQUIRED items (§3.3, §8.2) precedes PR A. Open items are flagged, never
-  silently decided.
+- **Status:** Approved for implementation — Pedro ratified ADR-005 and the
+  three spec decisions on 2026-11-10 (naming convention, §3.3 switcher
+  extension, §8.2 contract-first). Open items are flagged, never silently
+  decided.
 - **Date:** 2026-11-10
 - **Author:** Devin (for Pedro)
 - **Governs:** the `apps/core-api` request edge — migration 0003 (Layer A
@@ -106,11 +106,9 @@ ADR-005's `platform_*` entries that are genuinely `qp_admin` work —
 waiter registry and Layer C snapshot writes — keep their prefix when
 their own mission lands; they are out of scope here.
 
-> **SPEC DECISION REQUIRED (naming ratification):** amend ADR-005 §2's
-> table to the names above so the ADR, the lint allowlists and the
-> migrations cannot drift apart again. Until then this spec and ADR-005
-> disagree deliberately, and this spec wins because it follows the
-> *shipped* convention.
+> **DECIDED 2026-11-10 (Pedro):** ratified — ADR-005 §2's table is amended
+> to the names above so the ADR, the lint allowlists and the migrations
+> cannot drift apart again. This spec follows the *shipped* convention.
 
 ### 3.2 Tables
 
@@ -147,7 +145,7 @@ minimization until retention rules exist. Users are provisioned by
 seeding/`qp_migrator` during the pilot; there is no self-signup and
 `find_user_by_email` must stay the only email→id lookup.
 
-### 3.3 The org-switcher gap — SPEC DECISION REQUIRED
+### 3.3 The org-switcher gap — DECIDED 2026-11-10 (Pedro): extend
 
 ADR-005's `platform_list_memberships(user_id)` returned
 `organization_id, name, slug, role` for the Organization Switcher. The
@@ -404,17 +402,13 @@ make db-check-negative # mutation cases still trip the assertions
 
 ## 11. Open items (recorded, not decided here)
 
-- **ADR-005 remains Proposed** — Pedro's sign-off gates PR A; this spec
-  encodes §§1–5 and flags where it deliberately departs (§3.1 names,
-  §3.3 switcher, §8.2 codegen ordering).
-- **SPEC DECISION REQUIRED — org switcher:** extend
-  `list_memberships_for_email` (recommended, §3.3) or add
-  `list_memberships(user_id)`.
-- **SPEC DECISION REQUIRED — contract plumbing:** dedicated PR C0 for
-  OpenAPI + oapi-codegen (recommended) vs hand-rolled handlers this
-  slice (drift from ADR-002 Pedro must bless).
-- **Function naming convention ratification:** amend ADR-005 §2's table
-  to the unprefixed/`platform_` split migration 0002 shipped.
+- **ADR-005 is Accepted** — Pedro ratified it as governing on 2026-11-10;
+  this spec encodes §§1–5 with its three amendments recorded above (§3.1
+  names, §3.3 switcher extension, §8.2 contract-first ordering).
+- **DECIDED — org switcher:** extend `list_memberships_for_email` to the
+  four-column return (§3.3).
+- **DECIDED — contract plumbing:** dedicated PR C0 for OpenAPI +
+  oapi-codegen (ADR-002's generator).
 - **Role matrix confirmation** with Marcelo and the pilot companies —
   the ADR-005 §5 proposal stands unconfirmed.
 - **Shared registrable domain** between web and API — the SameSite=Lax +
