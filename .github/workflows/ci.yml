@@ -125,7 +125,9 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
-          cache: npm
+          # Cache only when the lockfile exists: package.json without
+          # package-lock.json would make setup-node fail before later steps run.
+          cache: ${{ hashFiles('apps/web/package-lock.json') != '' && 'npm' || '' }}
           cache-dependency-path: apps/web/package-lock.json
 
       - name: Web lint (eslint + prettier + tsc)
@@ -211,7 +213,9 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
-          cache: npm
+          # Cache only when the lockfile exists: package.json without
+          # package-lock.json would make setup-node fail before later steps run.
+          cache: ${{ hashFiles('apps/web/package-lock.json') != '' && 'npm' || '' }}
           cache-dependency-path: apps/web/package-lock.json
 
       - name: Web unit tests
@@ -273,6 +277,7 @@ jobs:
       # service env, so the literals are duplicated on purpose).
       PG_SUPER_DSN: postgresql://postgres:ci-pg-5c0ff3a1b7d24e98@localhost:5432/quotepilot
       QP_APP_DSN: postgresql://qp_app:ci-app-8e3a6b0f15d94c27@localhost:5432/quotepilot
+      MIGRATOR_DSN: postgresql://qp_migrator:ci-migrator-2f7b9d14c8a04e61@localhost:5432/quotepilot
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -331,6 +336,31 @@ jobs:
           go-version-file: apps/core-api/go.mod
           cache: true
           cache-dependency-path: apps/core-api/go.sum
+
+      - name: Set up Go (stable, for the goose fallback)
+        if: ${{ hashFiles('apps/core-api/db/migrations/*.sql') != '' && hashFiles('apps/core-api/go.mod') == '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 'stable'
+
+      # The suite's tests need the migrated schema, so migrations are applied
+      # to THIS job's service database first — the separate `migrations` job
+      # uses its own. Same mechanism choice as that job: cmd/migrate when it
+      # exists (covers River migrations too), goose CLI otherwise.
+      - name: Apply migrations as qp_migrator
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — suite runs against the role model only"
+            exit 0
+          fi
+          if [ -d apps/core-api/cmd/migrate ]; then
+            (cd apps/core-api && go run ./cmd/migrate)
+          else
+            go install github.com/pressly/goose/v3/cmd/goose@v3.24.3
+            "$(go env GOPATH)/bin/goose" -dir apps/core-api/db/migrations postgres "$MIGRATOR_DSN" up
+          fi
 
       # Full Go suite without -short: the RLS isolation suite and River job
       # tests run against the service DB as qp_app (ADR-008 layers 4 and 9).
@@ -507,6 +537,27 @@ jobs:
           done
           echo "migration sequence OK: ${nums[0]}..$((expected - 1))"
 
+      # Go backs either apply path: cmd/migrate (preferred, ADR-002) or the
+      # goose CLI fallback. Only needed once migration files exist.
+      - name: Set up Go
+        if: ${{ hashFiles('apps/core-api/db/migrations/*.sql') != '' && hashFiles('apps/core-api/go.mod') != '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/core-api/go.mod
+          cache: true
+          cache-dependency-path: apps/core-api/go.sum
+
+      - name: Set up Go (stable, for the goose fallback)
+        if: ${{ hashFiles('apps/core-api/db/migrations/*.sql') != '' && hashFiles('apps/core-api/go.mod') == '' }}
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 'stable'
+
+      # psql -f must not apply these files: goose markers are comments to psql,
+      # so it would run the Down section as well and revert the schema the next
+      # assertions are meant to inspect. cmd/migrate is the mechanism ADR-002
+      # names (it also runs River's migrations); the goose CLI covers the window
+      # before cmd/migrate lands.
       - name: Apply migrations from scratch as qp_migrator
         run: |
           shopt -s nullglob
@@ -515,10 +566,12 @@ jobs:
             echo "stub: no migrations yet — nothing to apply"
             exit 0
           fi
-          printf '%s\n' "${files[@]}" | sort -V | while IFS= read -r f; do
-            echo "== applying $f"
-            psql -X -v ON_ERROR_STOP=1 "$MIGRATOR_DSN" -f "$f"
-          done
+          if [ -d apps/core-api/cmd/migrate ]; then
+            (cd apps/core-api && go run ./cmd/migrate)
+          else
+            go install github.com/pressly/goose/v3/cmd/goose@v3.24.3
+            "$(go env GOPATH)/bin/goose" -dir apps/core-api/db/migrations postgres "$MIGRATOR_DSN" up
+          fi
 
       # Cheap text guard; the real RLS-presence proof is roles.sql [M] (re-run
       # below) and the ADR-008 schema lint once the Go suite lands.
@@ -633,7 +686,9 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
-          cache: npm
+          # Cache only when the lockfile exists: package.json without
+          # package-lock.json would make setup-node fail before later steps run.
+          cache: ${{ hashFiles('apps/web/package-lock.json') != '' && 'npm' || '' }}
           cache-dependency-path: apps/web/package-lock.json
 
       - name: npm audit (production dependencies only)
