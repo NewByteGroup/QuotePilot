@@ -34,6 +34,40 @@ func seedAuthUser(t *testing.T, email, fullName string) uuid.UUID {
 	return id
 }
 
+// familyAdvisoryKey resolves the pg_advisory_xact_lock key the session-family
+// mutators serialize on — the same hashtextextended expression the functions
+// use, so a test can hold or observe the real lock.
+func familyAdvisoryKey(t *testing.T, family uuid.UUID) int64 {
+	t.Helper()
+	var key int64
+	require.NoError(t, testenv.MigratorPool(t).QueryRow(context.Background(),
+		`SELECT hashtextextended($1::text, 0)`, family.String()).Scan(&key))
+	return key
+}
+
+// requireFamilyWaiter fails unless pg_locks observes a session WAITING on the
+// family advisory key — proof the subject reached the shared lock instead of
+// bypassing it. classid/objid are the int64 key's two 32-bit halves; they are
+// split in Go so SQL bitwise type inference stays out of the comparison. A
+// subject that finishes instead of blocking fails fast with its outcome.
+func requireFamilyWaiter[T any](t *testing.T, familyKey int64, done <-chan T, subject string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		select {
+		case out := <-done:
+			t.Fatalf("%s finished without blocking on the advisory: %+v", subject, out)
+		default:
+		}
+		var waiters int
+		err := testenv.MigratorPool(t).QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_locks
+			 WHERE locktype = 'advisory' AND NOT granted
+			   AND classid::bigint = $1 AND objid::bigint = $2`,
+			int64(uint64(familyKey)>>32), int64(uint32(familyKey))).Scan(&waiters)
+		return err == nil && waiters > 0
+	}, 5*time.Second, 10*time.Millisecond, "%s must wait on the family advisory lock", subject)
+}
+
 // TestSchemaEnforcementAuthLookup covers the three read-side functions:
 // find_user_by_email (normalization included), get_user_profile and
 // get_membership — plus the grant contract around them (spec section 9).
@@ -371,10 +405,7 @@ func TestSchemaEnforcementFamilyRevokeSerializes(t *testing.T) {
 		`SELECT app.create_session($1, $2, now() + interval '30 days')`,
 		userID.String(), gen0Hash).Scan(&gen0))
 	// gen0 roots its own family, so it is the family key.
-
-	var familyKey int64
-	require.NoError(t, migrator.QueryRow(ctx,
-		`SELECT hashtextextended($1::text, 0)`, gen0.String()).Scan(&familyKey))
+	familyKey := familyAdvisoryKey(t, gen0)
 
 	// The session-level advisory lock shares the lock space with the
 	// functions' pg_advisory_xact_lock: holding it here simulates a family
@@ -408,26 +439,7 @@ func TestSchemaEnforcementFamilyRevokeSerializes(t *testing.T) {
 	// Deterministic: the rotator is observed waiting on this family's
 	// advisory key in pg_locks before the test proceeds — it has resolved
 	// the family and is blocked exactly where the serialization point is.
-	// classid/objid are the two 32-bit halves of the int64 key; splitting
-	// them in Go keeps SQL bitwise type inference out of the picture.
-	keyHi := int64(uint64(familyKey) >> 32)
-	keyLo := int64(uint32(familyKey))
-	require.Eventually(t, func() bool {
-		select {
-		case out := <-done:
-			t.Fatalf("rotate_session finished without blocking on the advisory: %+v", out)
-		default:
-		}
-		var waiters int
-		if err := migrator.QueryRow(ctx,
-			`SELECT count(*) FROM pg_locks
-			 WHERE locktype = 'advisory' AND NOT granted
-			   AND classid::bigint = $1 AND objid::bigint = $2`,
-			keyHi, keyLo).Scan(&waiters); err != nil {
-			return false
-		}
-		return waiters > 0
-	}, 5*time.Second, 10*time.Millisecond, "rotate_session must wait on the family advisory lock")
+	requireFamilyWaiter(t, familyKey, done, "rotate_session")
 
 	select {
 	case out := <-done:
@@ -464,4 +476,78 @@ func TestSchemaEnforcementFamilyRevokeSerializes(t *testing.T) {
 	require.NoError(t, migrator.QueryRow(ctx,
 		`SELECT count(*) FROM app.auth_sessions WHERE refresh_token_hash = $1`, succHash).Scan(&succRows))
 	assert.Zero(t, succRows, "no successor may be born inside the kill window")
+}
+
+// TestSchemaEnforcementRevokerSerializes is the revoker-side half of the
+// shared-lock contract (Devin Review): revoke_session_family_by_hash must
+// wait on the same family advisory the rotator takes — if its lock
+// acquisition were dropped, a kill could run alongside a successor's birth
+// and this suite would stay green without this pin. The pattern mirrors
+// TestSchemaEnforcementFamilyRevokeSerializes: hold the session advisory,
+// observe the revoker waiting on it in pg_locks, release, and the kill
+// lands whole — true, every generation revoked, no deadlock or timeout.
+func TestSchemaEnforcementRevokerSerializes(t *testing.T) {
+	db := testenv.Open(t)
+	migrator := testenv.MigratorPool(t)
+	ctx := context.Background()
+
+	userID := seedAuthUser(t, "auth-rvkr-"+uuid.NewString()+"@test.dev", "Revoker User")
+	gen0Hash := "rh-" + uuid.NewString()
+	var gen0 uuid.UUID
+	require.NoError(t, db.Pool().QueryRow(ctx,
+		`SELECT app.create_session($1, $2, now() + interval '30 days')`,
+		userID.String(), gen0Hash).Scan(&gen0))
+	familyKey := familyAdvisoryKey(t, gen0)
+
+	holder, err := db.Pool().Acquire(ctx)
+	require.NoError(t, err)
+	defer holder.Release()
+	_, err = holder.Exec(ctx, `SELECT pg_advisory_lock($1)`, familyKey)
+	require.NoError(t, err)
+
+	type revokeOutcome struct {
+		killed bool
+		err    error
+	}
+	done := make(chan revokeOutcome, 1)
+	go func() {
+		revoker, err := db.Pool().Acquire(ctx)
+		if err != nil {
+			done <- revokeOutcome{err: err}
+			return
+		}
+		defer revoker.Release()
+		var killed bool
+		err = revoker.QueryRow(ctx,
+			`SELECT app.revoke_session_family_by_hash($1)`, gen0Hash).Scan(&killed)
+		done <- revokeOutcome{killed: killed, err: err}
+	}()
+
+	// The revoker must be observed WAITING on the family key — the whole
+	// point of the shared lock; a version that lost its PERFORM would sail
+	// through and kill the family while holding nothing.
+	requireFamilyWaiter(t, familyKey, done, "revoke_session_family_by_hash")
+
+	select {
+	case out := <-done:
+		t.Fatalf("revoke_session_family_by_hash must block on the family advisory, not finish early: %+v", out)
+	default:
+	}
+
+	_, err = holder.Exec(ctx, `SELECT pg_advisory_unlock($1)`, familyKey)
+	require.NoError(t, err)
+
+	select {
+	case out := <-done:
+		require.NoError(t, out.err)
+		assert.True(t, out.killed, "a family with a live generation must report true")
+	case <-time.After(5 * time.Second):
+		t.Fatal("revoke_session_family_by_hash did not finish after the advisory was released")
+	}
+
+	var liveRows int
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT count(*) FROM app.auth_sessions WHERE family_id = $1 AND revoked_at IS NULL`,
+		gen0.String()).Scan(&liveRows))
+	assert.Zero(t, liveRows, "every generation of the family must be revoked")
 }
