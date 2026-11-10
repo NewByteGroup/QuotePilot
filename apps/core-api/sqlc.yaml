@@ -1,0 +1,29 @@
+# sqlc codegen config (ADR-002 section 1). Generated code is committed; the CI
+# contracts-drift job regenerates and fails on any diff.
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "db/queries"
+    # Schemas are provisioned outside migrations (infra init script); the stub
+    # file gives sqlc's catalog the schema names without them being applied.
+    schema:
+      - "db/sqlc_schemas.sql"
+      - "db/migrations"
+    gen:
+      go:
+        package: "inboxdb"
+        out: "internal/inbox/inboxdb"
+        sql_package: "pgx/v5"
+        overrides:
+          # NUMERIC maps to decimal.Decimal — no float64 near money (AGENTS.md).
+          - db_type: "pg_catalog.numeric"
+            go_type: "github.com/shopspring/decimal.Decimal"
+          # pgvector lives in schema extensions (ADR-003 section 4); sqlc does
+          # not know the type, so map it explicitly or columns become any.
+          # `package` is required: the Go identifier (pgvector) differs from the
+          # last path segment (pgvector-go), which is not a valid identifier.
+          - db_type: "extensions.vector"
+            go_type:
+              import: "github.com/pgvector/pgvector-go"
+              package: "pgvector"
+              type: "Vector"
