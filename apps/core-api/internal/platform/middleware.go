@@ -2,7 +2,9 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 
@@ -10,7 +12,7 @@ import (
 )
 
 // accessCookie is the spec section 4 transport for the access JWT. The
-// refresh cookie (qp_refresh, SameSite=Strict, Path=/auth/refresh) is scoped
+// refresh cookie (qp_refresh, SameSite=Strict, Path=/auth) is scoped
 // to the session endpoints; the middleware chain never reads it.
 const accessCookie = "qp_access"
 
@@ -208,6 +210,27 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 	}
 }
 
+// CheckOrigin is the Origin/Sec-Fetch-Site check of ADR-005 section 4's CSRF
+// posture: the stdlib's CrossOriginProtection rejects non-safe cross-site
+// browser requests (Sec-Fetch-Site, then Origin-vs-Host). WebURL is added as
+// a trusted origin so the web app on its sibling host survives the Host
+// comparison; requests with neither header are treated as non-browser and
+// pass. Mount it ahead of Authenticate on state-changing routes.
+//
+//	mux.Handle("POST /quotes", platform.CheckOrigin(cfg)(chain(quotes)))
+func CheckOrigin(cfg *Config) func(http.Handler) http.Handler {
+	cop := http.NewCrossOriginProtection()
+	if err := cop.AddTrustedOrigin(cfg.WebURL); err != nil {
+		// A WEB_URL the CSRF layer cannot parse is a startup bug — better a
+		// loud crash than a silently weaker posture.
+		panic(fmt.Errorf("platform: check origin: %w", err))
+	}
+	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusForbidden, errForbidden)
+	}))
+	return cop.Handler
+}
+
 // writeError is the single failure writer every middleware rejection routes
 // through (spec section 7's uniform-failure contract): a fixed
 // {"error":"<code>"} body with a fixed content type. Callers pass only the
@@ -217,5 +240,10 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 func writeError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = io.WriteString(w, `{"error":"`+code+`"}`)
+	if _, err := io.WriteString(w, `{"error":"`+code+`"}`); err != nil {
+		// The wire contract cannot change mid-response; the only thing left
+		// is the diagnostic, so it is logged rather than discarded.
+		slog.Default().Warn("platform: error response write failed",
+			"status", status, "code", code, "error", err)
+	}
 }
