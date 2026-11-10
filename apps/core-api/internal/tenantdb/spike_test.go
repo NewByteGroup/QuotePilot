@@ -43,7 +43,7 @@ func TestSpikeRoleModel(t *testing.T) {
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = 'app'
-		  AND c.relname IN ('inbound_messages', 'private_tariff_embeddings')`)
+		  AND c.relname IN ('inbound_messages', 'private_tariffs')`)
 	require.NoError(t, err)
 	defer rows.Close()
 	for rows.Next() {
@@ -53,22 +53,24 @@ func TestSpikeRoleModel(t *testing.T) {
 		rlsFlags[name] = [2]bool{enabled, forced}
 	}
 	require.NoError(t, rows.Err())
-	for _, table := range []string{"inbound_messages", "private_tariff_embeddings"} {
+	for _, table := range []string{"inbound_messages", "private_tariffs"} {
 		flags, ok := rlsFlags[table]
 		require.True(t, ok, "table app.%s missing after migration", table)
 		assert.True(t, flags[0], "app.%s must ENABLE row level security", table)
 		assert.True(t, flags[1], "app.%s must FORCE row level security", table)
 	}
 
+	// The v1.3 canonical policy name is tenant_isolation_policy; migration 0002
+	// renamed the spike's tenant_isolation on inbound_messages to match.
 	var policies int
 	require.NoError(t, db.Pool().QueryRow(ctx, `
 		SELECT count(*) FROM pg_policy p
 		JOIN pg_class c ON c.oid = p.polrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE p.polname = 'tenant_isolation'
+		WHERE p.polname = 'tenant_isolation_policy'
 		  AND n.nspname = 'app'
-		  AND c.relname IN ('inbound_messages', 'private_tariff_embeddings')`).Scan(&policies))
-	assert.Equal(t, 2, policies, "both tenant tables need a tenant_isolation policy")
+		  AND c.relname IN ('inbound_messages', 'private_tariffs')`).Scan(&policies))
+	assert.Equal(t, 2, policies, "both tenant tables need a tenant_isolation_policy")
 }
 
 // TestSpikeIsolation is gate criterion 4. A max-1 pool guarantees org B reuses
@@ -93,24 +95,52 @@ func TestSpikeIsolation(t *testing.T) {
 	vec := make([]float32, 1024)
 	vec[0], vec[1] = 0.5, -0.25
 
-	// Org A writes an inbound message and an embedding on the pooled connection.
+	// Camada B tables now reference organizations, which qp_app cannot write
+	// (Layer A is REVOKE ALL); the seed goes through the migrator pool.
+	migrator := testenv.MigratorPool(t)
+	seedOrganization(t, ctx, migrator, orgA, "iso-org-a")
+	seedOrganization(t, ctx, migrator, orgB, "iso-org-b")
+
+	// Org A writes an inbound message and a tariff embedding on the pooled
+	// connection. private_tariffs needs a batch row for the FK (comment 11:
+	// the vector column moved here from the dropped private_tariff_embeddings).
 	require.NoError(t, db.InTenantTx(ctx, orgA, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO app.inbound_messages (organization_id, resend_message_id, subject) VALUES ($1, $2, $3)`,
 			orgA.String(), "iso-a-1", "org a"); err != nil {
 			return err
 		}
+		var batchA uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO app.private_tariff_batches (organization_id, source_type) VALUES ($1, 'CSV_UPLOAD') RETURNING id`,
+			orgA.String()).Scan(&batchA); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO app.private_tariff_embeddings (organization_id, embedding, embedding_model) VALUES ($1, $2, $3)`,
-			orgA.String(), pgvector.NewVector(vec), "test-model")
+			`INSERT INTO app.private_tariffs (organization_id, batch_id, carrier_or_agent, modal, origin_locode, dest_locode,
+				equipment_or_unit, charge_category, charge_code, currency, net_amount, valid_from, valid_until,
+				search_description, embedding, embedding_model)
+			VALUES ($1, $2, 'CARRIER_A', 'FCL', 'BRSSZ', 'CNSHA', '40HC', 'OCEAN_FREIGHT', 'OCEAN', 'USD', 1000.00,
+				'2026-01-01', '2026-12-31', 'FCL ocean freight BRSSZ-CNSHA', $3, 'test-model')`,
+			orgA.String(), batchA.String(), pgvector.NewVector(vec))
 		return err
 	}))
 
 	// Org B stores the IDENTICAL vector, reusing the same pooled connection.
 	require.NoError(t, db.InTenantTx(ctx, orgB, func(ctx context.Context, tx pgx.Tx) error {
+		var batchB uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO app.private_tariff_batches (organization_id, source_type) VALUES ($1, 'CSV_UPLOAD') RETURNING id`,
+			orgB.String()).Scan(&batchB); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO app.private_tariff_embeddings (organization_id, embedding, embedding_model) VALUES ($1, $2, $3)`,
-			orgB.String(), pgvector.NewVector(vec), "test-model")
+			`INSERT INTO app.private_tariffs (organization_id, batch_id, carrier_or_agent, modal, origin_locode, dest_locode,
+				equipment_or_unit, charge_category, charge_code, currency, net_amount, valid_from, valid_until,
+				search_description, embedding, embedding_model)
+			VALUES ($1, $2, 'CARRIER_A', 'FCL', 'BRSSZ', 'CNSHA', '40HC', 'OCEAN_FREIGHT', 'OCEAN', 'USD', 1000.00,
+				'2026-01-01', '2026-12-31', 'FCL ocean freight BRSSZ-CNSHA', $3, 'test-model')`,
+			orgB.String(), batchB.String(), pgvector.NewVector(vec))
 		return err
 	}))
 
@@ -124,7 +154,7 @@ func TestSpikeIsolation(t *testing.T) {
 
 		seen := map[string]int{}
 		// Deliberately no WHERE clause: RLS is the only filter under test.
-		rows, err := tx.Query(ctx, `SELECT organization_id::text FROM app.private_tariff_embeddings`)
+		rows, err := tx.Query(ctx, `SELECT organization_id::text FROM app.private_tariffs`)
 		require.NoError(t, err)
 		for rows.Next() {
 			var org string
@@ -150,11 +180,27 @@ func TestSpikeIsolation(t *testing.T) {
 	// error: NULLIF(current_setting(..., true), '')::uuid is NULL (rule 4).
 	var bare int
 	require.NoError(t, db.Pool().QueryRow(ctx,
-		`SELECT count(*) FROM app.private_tariff_embeddings`).Scan(&bare))
+		`SELECT count(*) FROM app.private_tariffs`).Scan(&bare))
 	assert.Equal(t, 0, bare, "no tenant context must yield zero rows")
 	require.NoError(t, db.Pool().QueryRow(ctx,
 		`SELECT count(*) FROM app.inbound_messages`).Scan(&bare))
 	assert.Equal(t, 0, bare, "no tenant context must yield zero rows")
+}
+
+// seedOrganization inserts the Layer A registry row as qp_migrator and
+// returns the effective slug: slug and inbound_email_alias are the unique
+// columns, so a per-run suffix keeps the suite idempotent against a
+// persistent dev database. Callers that exercise <slug>@in.* resolution
+// use the return.
+func seedOrganization(t *testing.T, ctx context.Context, pool *pgxpool.Pool, org uuid.UUID, base string) string {
+	t.Helper()
+	slug := base + "-" + org.String()[:8]
+	_, err := pool.Exec(ctx, `
+		INSERT INTO app.organizations (id, name, slug, inbound_email_alias, outbound_from_name, outbound_reply_to)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		org.String(), "Test "+slug, slug, slug+"@in.test", "Test "+slug, "ops@"+slug+".test")
+	require.NoError(t, err)
+	return slug
 }
 
 // TestSpikeNestedTxRejected guards ADR-002 section 3 rule 5: InTenantTx inside

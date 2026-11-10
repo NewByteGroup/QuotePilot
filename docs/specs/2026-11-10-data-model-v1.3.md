@@ -81,9 +81,10 @@ grant DML).
 
 ## 4. Camada B — tenant tables (RLS enforced)
 
-Every table: `organization_id uuid NOT NULL REFERENCES organizations(id)`,
-a composite index starting with `organization_id`, `ENABLE` + `FORCE` RLS,
-and the shared policy:
+Every table: `organization_id uuid NOT NULL REFERENCES organizations(id)
+ON DELETE CASCADE` (spec §5.2 invariant — deleting a company deletes its
+tenant data, matching the audit-trail decision), a composite index starting
+with `organization_id`, `ENABLE` + `FORCE` RLS, and the shared policy:
 
 ```sql
 CREATE POLICY tenant_isolation_policy ON <table>
@@ -160,7 +161,9 @@ Per-company sequential `quote_number` without `MAX()+1` (comment 13):
 DEFAULT 1. Allocation happens inside `InTenantTx` via
 `INSERT ... ON CONFLICT (organization_id) DO UPDATE SET next_seq =
 org_quote_counters.next_seq + 1 RETURNING next_seq` — the row lock
-serializes allocation per tenant.
+serializes allocation per tenant. Each new quote **version** burns a fresh
+sequential `quote_number` from this counter; numbers are never reused, so a
+superseded version keeps the number it was sent under.
 
 ### `quotes`
 
@@ -178,8 +181,10 @@ Spec §5.2.6 plus:
 - `UNIQUE (organization_id, quote_number)` and
   `UNIQUE (organization_id, rfq_id, version)`
 - **immutability**: trigger `block_approved_quote_mutation` raises on
-  UPDATE/DELETE when `OLD.status = 'APPROVED_SENT'`; corrections are new
-  versions (rule 9)
+  UPDATE/DELETE when `OLD.status = 'APPROVED_SENT'` — with one exception:
+  `status → 'SUPERSEDED'` alone is the only permitted mutation on a sent
+  quote, retiring it when the corrected version is issued. Every other
+  column change and every DELETE still raises (rule 9)
 - schema comment on `final_price_brl`: rounding rule — sell lines are
   rounded per line and the price is the sum of rounded lines (RFC-001 §8)
 
@@ -195,9 +200,10 @@ Test invariant: `sum(sell_amount_brl) = quotes.final_price_brl` per quote.
 ### `tenant_audit_logs`
 
 Spec §5.2.7. `REVOKE UPDATE, DELETE FROM qp_app` makes "immutable" real
-(comment 14). FK keeps `ON DELETE CASCADE` — decision: deleting a company
-deletes its audit trail; company deletion is a deliberate admin act and the
-alternative (dangling audits) is worse.
+(comment 14). Its `organization_id` FK follows the global `ON DELETE
+CASCADE` rule — decision: deleting a company deletes its audit trail;
+company deletion is a deliberate admin act and the alternative (dangling
+audits) is worse.
 
 ### `organization_connector_preferences`
 
@@ -219,7 +225,9 @@ Amanda (RFC-002).
 Unchanged — it is the webhook receipt table: the Svix-verified idempotent
 insert lands here, then the fetch job materializes `rfq_requests`
 (comment 4 flow). `resend_message_id` uniqueness in both places is
-intentional defense in depth.
+intentional defense in depth. It keeps its bare `organization_id` (no FK):
+adding `REFERENCES organizations` is deferred to the pipeline mission, which
+also decides what an unresolvable alias does to the receipt.
 
 ### dropped: `private_tariff_embeddings`
 
@@ -241,9 +249,11 @@ through `SECURITY DEFINER` functions owned by `qp_migrator` (comment 15).
   (comment 15 — big payloads live in storage, not Postgres)
 
 Platform write functions (EXECUTE → `qp_app`): `platform_insert_public_snapshot`,
-`platform_update_connector_status`, `platform_insert_healing_session`.
-Workers running as `qp_app` can therefore publish snapshots without ever
-holding table-level write grants.
+`platform_update_connector_status`, `platform_insert_healing_session`,
+`platform_update_healing_session` (reports session progress and stamps
+`resolved_at` on MERGED/FAILED — without it a session could never leave
+OPEN). Workers running as `qp_app` can therefore publish snapshots without
+ever holding table-level write grants.
 
 ## 6. Enum types (`CREATE TYPE` in `app`)
 
@@ -272,8 +282,10 @@ grouping).
    any `app` table has an `organization_id` column but lacks ENABLE+FORCE
    RLS or a tenant policy — with an explicit allowlist for
    `organization_memberships` (platform-path table, comment 9). Also asserts
-   Camada C tables grant only SELECT to `qp_app`, and
-   `private_tariffs`/`tenant_audit_logs` lack UPDATE/DELETE for `qp_app`.
+   Camada C tables grant only SELECT to `qp_app`,
+   `private_tariffs`/`tenant_audit_logs` lack UPDATE/DELETE for `qp_app`,
+   and `app.goose_db_version` lacks INSERT/UPDATE/DELETE (the migration
+   revokes the DML qp_app inherited via migrator default privileges).
 2. **Isolation suite** keeps running; the identical-vectors test moves from
    the dropped `private_tariff_embeddings` to `private_tariffs.embedding`.
 3. Quote immutability trigger and append-only revokes each get a test
@@ -300,6 +312,16 @@ grouping).
 
 ## 9. Open items (recorded, not blocking)
 
+- Cross-tenant FK integrity: bare `REFERENCES` FKs allow a tenant row to
+  point at another org's parent (e.g. a quote whose rfq_id belongs to org
+  B). Composite `(organization_id, ref_id)` FKs are deferred — accepted risk
+  for the MVP because the application layer always writes inside the
+  correct tenant context; RLS would hide the linked row anyway.
+- `users` FKs are NO ACTION: once a user is referenced (memberships,
+  tariffs `uploaded_by`, quotes `approved_by_user_id`, audit actor),
+  deleting that user fails — deliberate audit preservation.
+- `app.goose_db_version` is now revoked from `qp_app` writes (pre-existing
+  spike hole closed in this migration).
 - ADR-005 remains Proposed: only the two lookup functions are committed
   now; auth/session functions arrive with the auth mission.
 - `suppression_list` semantics vs Resend account-level suppression — Amanda

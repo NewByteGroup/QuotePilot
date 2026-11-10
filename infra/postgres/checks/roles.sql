@@ -435,6 +435,11 @@ BEGIN
 END $$;
 
 -- (M) FORCE RLS on every table in app with an organization_id column.
+-- Allowlist (spec 2026-11-10-data-model-v1.3 section 3, ADR-005 section 1):
+-- organization_memberships is a Layer A platform table read before a tenant
+-- context exists, so it is function-gated instead of RLS-protected. The same
+-- list lives in tenantdb.assertRLSForced and schema_lint_test.go — a new
+-- entry must land in all three on purpose.
 DO $$
 DECLARE bad text;
 BEGIN
@@ -442,7 +447,8 @@ BEGIN
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = 'app' AND c.relkind IN ('r','p')
     AND EXISTS (SELECT 1 FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attname = 'organization_id' AND t.attnum > 0 AND NOT t.attisdropped)
-    AND NOT (c.relrowsecurity AND c.relforcerowsecurity);
+    AND NOT (c.relrowsecurity AND c.relforcerowsecurity)
+    AND c.relname::text <> ALL (ARRAY['organization_memberships']);
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[M] tables with organization_id need ENABLE and FORCE ROW LEVEL SECURITY; offending: %', bad;
   END IF;

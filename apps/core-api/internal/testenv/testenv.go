@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/migrate"
@@ -70,4 +71,22 @@ func Open(t *testing.T) *tenantdb.DB {
 	require.NoError(t, err)
 	t.Cleanup(db.Close)
 	return db
+}
+
+// MigratorPool opens a pool on MIGRATOR_DSN with migrations applied and the
+// project types registered; it closes at test cleanup. Use it for catalog
+// reads and for seeding Layer A rows (organizations, users, memberships) that
+// qp_app must not write directly — REVOKE ALL on Layer A is the spec's point,
+// so tests that need those rows go through the owner.
+//
+//	pool := testenv.MigratorPool(t)
+func MigratorPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	EnsureMigrated(t)
+	dsn := os.Getenv("MIGRATOR_DSN")
+	require.NotEmpty(t, dsn, "MIGRATOR_DSN is not set")
+	pool, err := tenantdb.OpenPool(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
 }
