@@ -24,6 +24,10 @@ type FakeMailSender struct {
 var _ MailSender = (*FakeMailSender)(nil)
 
 // SendMagicLink records the pair; it never fails.
+//
+//	fake := &platform.FakeMailSender{}
+//	_ = fake.SendMagicLink(ctx, to, url)
+//	assert.Len(t, fake.Sends, 1)
 func (f *FakeMailSender) SendMagicLink(_ context.Context, to, url string) error {
 	f.Sends = append(f.Sends, MagicSend{To: to, URL: url})
 	return nil

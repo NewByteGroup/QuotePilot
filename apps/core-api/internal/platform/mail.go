@@ -61,6 +61,8 @@ func NewResendMailSender(apiKey, from string) *ResendMailSender {
 
 // SendMagicLink posts one sign-in email. A non-2xx answer is an error
 // carrying the status — never the API key or the tokened URL.
+//
+//	err := sender.SendMagicLink(ctx, user.Email, loginURL)
 func (s *ResendMailSender) SendMagicLink(ctx context.Context, to, url string) error {
 	req, err := s.newRequest(ctx, to, url)
 	if err != nil {
@@ -104,5 +106,5 @@ func (s *ResendMailSender) newRequest(ctx context.Context, to, url string) (*htt
 // (WebURL + a base64url token), so it is HTML-safe without escaping.
 func magicLinkHTML(url string) string {
 	return `<p>Sign in to QuotePilot: <a href="` + url + `">` + url + `</a></p>` +
-		`<p>The link works once and expires in 15 minutes.</p>`
+		`<p>The link works once and expires shortly.</p>`
 }

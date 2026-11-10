@@ -60,6 +60,8 @@ func NewLimiter(capacity int, per time.Duration, now func() time.Time) *Limiter 
 // Allow spends one token for key: true while the bucket can pay for one,
 // false once it is drained. A denied call consumes nothing — it only
 // observes (and banks the elapsed refill).
+//
+//	if !limiter.Allow(clientIP) { /* 429 */ }
 func (l *Limiter) Allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
