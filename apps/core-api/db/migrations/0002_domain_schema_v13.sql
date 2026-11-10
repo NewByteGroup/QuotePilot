@@ -314,7 +314,9 @@ CREATE POLICY tenant_isolation_policy ON app.rfq_requests
 CREATE TABLE app.rfq_attachments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES app.organizations (id) ON DELETE CASCADE,
-    rfq_id uuid NOT NULL REFERENCES app.rfq_requests (id),
+    -- Attachment rows are meaningless without their RFQ; cascade lets
+    -- platform_delete_organization reach the whole subtree (spec section 4).
+    rfq_id uuid NOT NULL REFERENCES app.rfq_requests (id) ON DELETE CASCADE,
     storage_key text NOT NULL,
     filename text NOT NULL,
     mime_type text,
@@ -341,7 +343,7 @@ CREATE POLICY tenant_isolation_policy ON app.rfq_attachments
 CREATE TABLE app.carrier_offers (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES app.organizations (id) ON DELETE CASCADE,
-    rfq_id uuid NOT NULL REFERENCES app.rfq_requests (id),
+    rfq_id uuid NOT NULL REFERENCES app.rfq_requests (id) ON DELETE CASCADE,
     carrier text NOT NULL,
     offer_reference text,
     offer_payload_json jsonb NOT NULL,
@@ -390,7 +392,7 @@ CREATE POLICY tenant_isolation_policy ON app.org_quote_counters
 CREATE TABLE app.quotes (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES app.organizations (id) ON DELETE CASCADE,
-    rfq_id uuid NOT NULL REFERENCES app.rfq_requests (id),
+    rfq_id uuid NOT NULL REFERENCES app.rfq_requests (id) ON DELETE CASCADE,
     -- Formatted '{slug}-{year}-{seq:04d}' (e.g. COMEXA-2026-0042), sequential
     -- per company off org_quote_counters.next_seq (spec 5.2.6, comment 13).
     quote_number text NOT NULL,
@@ -442,7 +444,7 @@ CREATE POLICY tenant_isolation_policy ON app.quotes
 CREATE TABLE app.quote_line_items (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id uuid NOT NULL REFERENCES app.organizations (id) ON DELETE CASCADE,
-    quote_id uuid NOT NULL REFERENCES app.quotes (id),
+    quote_id uuid NOT NULL REFERENCES app.quotes (id) ON DELETE CASCADE,
     sort_order integer NOT NULL DEFAULT 0,
     category app.quote_line_category NOT NULL,
     description text NOT NULL DEFAULT '',
@@ -546,9 +548,29 @@ CREATE POLICY tenant_isolation_policy ON app.suppression_list
 -- the canonical policy rename, and the folded embeddings table.
 -- =========================================================================
 
--- Append-only revokes (comment 11 / comment 14): SELECT and INSERT stay.
+-- Append-only revokes (comments 11 and 14, RFC-002): SELECT and INSERT stay.
+-- carrier_offers joins the set — a pinned offer is an audit record; a fresh
+-- fetch is a new row, never an edit in place.
 -- +goose StatementBegin
-REVOKE UPDATE, DELETE ON app.private_tariffs, app.tenant_audit_logs FROM qp_app;
+REVOKE UPDATE, DELETE ON app.private_tariffs, app.tenant_audit_logs, app.carrier_offers FROM qp_app;
+-- +goose StatementEnd
+
+-- Batches are audit records too: PENDING_REVIEW -> ACTIVE goes through UPDATE
+-- (enforce_batch_activation below), but a batch row is never deleted — a bad
+-- batch is superseded by a new one, so DELETE is revoked outright.
+-- +goose StatementBegin
+REVOKE DELETE ON app.private_tariff_batches FROM qp_app;
+-- +goose StatementEnd
+
+-- inbound_messages predates Layer A (0001 could not reference a table that
+-- did not exist yet). It is a tenant row like every other Camada B table, so
+-- it gets the same org FK — and the cascade lets platform_delete_organization
+-- reach it. On a database that already ran 0001 with data, rows whose
+-- organization_id matches no organization must be cleaned before this applies.
+-- +goose StatementBegin
+ALTER TABLE app.inbound_messages
+    ADD CONSTRAINT inbound_messages_organization_id_fkey
+    FOREIGN KEY (organization_id) REFERENCES app.organizations (id) ON DELETE CASCADE;
 -- +goose StatementEnd
 
 -- Pre-existing spike hole closed here: goose_db_version is created by goose
@@ -582,7 +604,10 @@ DROP TABLE app.private_tariff_embeddings;
 
 -- resolve_inbound_org: normalize the Resend `to` address (lower case, plus-tag
 -- removed — ADR-005 section 7), match inbound_email_alias, then the
--- <slug>@in.% fallback. Returns NULL when nothing matches.
+-- <slug>@in.quotepilot.app fallback. The exact-alias match stays unrestricted:
+-- the alias IS the org's ownership declaration (it is set per org at
+-- onboarding). The slug fallback is pinned to the canonical inbound domain so
+-- a lookalike host (in.evil.test) can never resolve a tenant by slug.
 -- +goose StatementBegin
 CREATE FUNCTION app.resolve_inbound_org(recipient text) RETURNS uuid
     LANGUAGE plpgsql
@@ -618,7 +643,7 @@ BEGIN
     SELECT o.id INTO org_id
     FROM app.organizations AS o
     WHERE o.slug = local_part
-      AND domain_part LIKE 'in.%';
+      AND domain_part = 'in.quotepilot.app';
     RETURN org_id;
 END;
 $fn$;
@@ -826,6 +851,40 @@ REVOKE EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing
 GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;
 -- +goose StatementEnd
 
+-- platform_delete_organization: controlled tenant teardown (spec section 4).
+-- The ONLY delete path for an organization — qp_app holds no privilege on
+-- Layer A and nothing else can reach the registry. Two transaction-local GUCs
+-- make the cascade work under the role model:
+--   app.current_organization_id — the function runs as qp_migrator, which is
+--     NOBYPASSRLS and subject to FORCE RLS like everyone; without a tenant
+--     context the USING clause hides every tenant row from the cascaded
+--     deletes and the org row could not be removed (verified in the lint
+--     suite: an unscoped migrator sees zero tenant rows).
+--   app.tenant_teardown — tells block_approved_quote_mutation and
+--     block_sent_quote_line_mutation this is the deliberate teardown path, so
+--     the sent-quote immutability rules do not block the cascade.
+-- set_config(..., true) is transaction-local, so neither flag can leak into
+-- the pooled session the call rode in on.
+-- +goose StatementBegin
+CREATE FUNCTION app.platform_delete_organization(p_org_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = app
+AS $fn$
+BEGIN
+    PERFORM set_config('app.current_organization_id', p_org_id::text, true);
+    PERFORM set_config('app.tenant_teardown', 'on', true);
+    DELETE FROM app.organizations AS o WHERE o.id = p_org_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'platform_delete_organization: unknown organization %', p_org_id;
+    END IF;
+END;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION app.platform_delete_organization(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;
+-- +goose StatementEnd
+
 -- =========================================================================
 -- 7. Immutability triggers (comments 13 and 15, rule 9).
 -- Plain (non-DEFINER) trigger functions: raising needs no privilege. The
@@ -849,34 +908,119 @@ CREATE FUNCTION app.block_approved_quote_mutation() RETURNS trigger
     LANGUAGE plpgsql
 AS $fn$
 BEGIN
-    -- INSERT is not covered: a quote can be born APPROVED_SENT and the
-    -- trigger (UPDATE OR DELETE only) lets it through on purpose — the state
-    -- machine reaches the status only via the approval endpoint anyway.
-    IF OLD.status <> 'APPROVED_SENT' THEN
-        -- A BEFORE UPDATE trigger stores the row it returns, so RETURN OLD
-        -- here would silently discard every allowed update. DELETE ignores
-        -- NEW.
+    -- Teardown first: platform_delete_organization is the only writer of this
+    -- GUC (transaction-local, inside its SECURITY DEFINER body), and the
+    -- cascade must not be stopped by immutability.
+    IF current_setting('app.tenant_teardown', true) = 'on' THEN
         IF TG_OP = 'DELETE' THEN
             RETURN OLD;
         END IF;
         RETURN NEW;
     END IF;
-    -- On APPROVED_SENT the only permitted mutation is status -> SUPERSEDED,
+    -- DRAFT rows stay fully editable. INSERT is not covered at all: a quote
+    -- can be born APPROVED_SENT and the trigger (UPDATE OR DELETE only) lets
+    -- it through on purpose — the state machine reaches the status only via
+    -- the approval endpoint anyway. DELETE ignores NEW and UPDATE stores the
+    -- row it returns, so the allowed path must return the right record.
+    IF OLD.status NOT IN ('APPROVED_SENT', 'SUPERSEDED') THEN
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END IF;
+    -- The only permitted mutation on a sent quote is status -> SUPERSEDED,
     -- alone: a corrected quote arrives as the next version and this row is
     -- retired to supersede it (rule 9). The jsonb comparison requires every
     -- other column to be identical, so no field edit rides along.
     IF TG_OP = 'UPDATE'
+       AND OLD.status = 'APPROVED_SENT'
        AND NEW.status = 'SUPERSEDED'
        AND (to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status') THEN
         RETURN NEW;
     END IF;
-    RAISE EXCEPTION 'quote % is APPROVED_SENT: % is not allowed; create a new quote version (rule 9)', OLD.id, TG_OP;
+    RAISE EXCEPTION 'quote % is %: % is not allowed; create a new quote version (rule 9)', OLD.id, OLD.status, TG_OP;
 END;
 $fn$;
 
 CREATE TRIGGER quotes_approved_immutable
     BEFORE UPDATE OR DELETE ON app.quotes
     FOR EACH ROW EXECUTE FUNCTION app.block_approved_quote_mutation();
+
+-- block_sent_quote_line_mutation: a sent (or retired) quote's lines are as
+-- immutable as the header — the quote must be reproducible exactly as sent
+-- (rule 9). Guarded by the same teardown flag.
+CREATE FUNCTION app.block_sent_quote_line_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    parent_status app.quote_status;
+BEGIN
+    IF current_setting('app.tenant_teardown', true) = 'on' THEN
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END IF;
+    -- NEW is unassigned on DELETE, OLD on INSERT; coalesce picks the live one.
+    SELECT q.status INTO parent_status
+    FROM app.quotes AS q
+    WHERE q.id = coalesce(NEW.quote_id, OLD.quote_id);
+    IF parent_status IN ('APPROVED_SENT', 'SUPERSEDED') THEN
+        RAISE EXCEPTION 'quote % is %: line % is not allowed (rule 9)',
+            coalesce(NEW.quote_id, OLD.quote_id), parent_status, TG_OP;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        -- A NULL parent means the cascade already removed it — the delete is
+        -- legitimate teardown of a DRAFT subtree, not a mutation.
+        RETURN OLD;
+    END IF;
+    -- On INSERT/UPDATE a missing parent under RLS means a cross-tenant
+    -- quote_id: the row must not attach to a quote the tenant cannot see.
+    IF parent_status IS NULL THEN
+        RAISE EXCEPTION 'quote % is not visible to this tenant: % refused',
+            coalesce(NEW.quote_id, OLD.quote_id), TG_OP;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+
+CREATE TRIGGER quote_line_items_sent_immutable
+    BEFORE INSERT OR UPDATE OR DELETE ON app.quote_line_items
+    FOR EACH ROW EXECUTE FUNCTION app.block_sent_quote_line_mutation();
+
+-- enforce_batch_activation: a batch lands PENDING_REVIEW, activation is the
+-- single one-way transition, and ACTIVE is terminal (rule 9 — quotes may
+-- already pin the batch's tariffs). activated_at is stamped once by this
+-- trigger; writing it in any other UPDATE raises.
+CREATE FUNCTION app.enforce_batch_activation() RETURNS trigger
+    LANGUAGE plpgsql
+AS $fn$
+BEGIN
+    IF OLD.status = 'ACTIVE' THEN
+        RAISE EXCEPTION 'batch % is ACTIVE: UPDATE is not allowed; corrections are new batches', OLD.id;
+    END IF;
+    -- OLD is PENDING_REVIEW (the only other enum value). A PENDING_REVIEW ->
+    -- PENDING_REVIEW edit stays allowed but may not touch the stamp.
+    IF NEW.status = 'PENDING_REVIEW' THEN
+        IF NEW.activated_at IS DISTINCT FROM OLD.activated_at THEN
+            RAISE EXCEPTION 'activated_at is stamped by the PENDING_REVIEW -> ACTIVE transition only';
+        END IF;
+        RETURN NEW;
+    END IF;
+    -- PENDING_REVIEW -> ACTIVE: keep a stamp the caller pre-set inside this
+    -- same transition, otherwise stamp now; a stamp that already exists can
+    -- never be rewritten.
+    IF OLD.activated_at IS NOT NULL AND NEW.activated_at IS DISTINCT FROM OLD.activated_at THEN
+        RAISE EXCEPTION 'activated_at is immutable once stamped';
+    END IF;
+    NEW.activated_at := coalesce(NEW.activated_at, OLD.activated_at, now());
+    RETURN NEW;
+END;
+$fn$;
+
+CREATE TRIGGER private_tariff_batches_activation
+    BEFORE UPDATE ON app.private_tariff_batches
+    FOR EACH ROW EXECUTE FUNCTION app.enforce_batch_activation();
 -- +goose StatementEnd
 
 -- Rounding rule (RFC-001 sections 6 and 8): sell lines are rounded half-up per
@@ -895,13 +1039,18 @@ COMMENT ON COLUMN app.quotes.final_price_brl IS
 -- policy rename reverted, then the enum types.
 -- =========================================================================
 -- +goose StatementBegin
+DROP TRIGGER private_tariff_batches_activation ON app.private_tariff_batches;
+DROP TRIGGER quote_line_items_sent_immutable ON app.quote_line_items;
 DROP TRIGGER quotes_approved_immutable ON app.quotes;
 DROP TRIGGER public_snapshots_immutable ON app.public_snapshots;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
+DROP FUNCTION app.enforce_batch_activation();
+DROP FUNCTION app.block_sent_quote_line_mutation();
 DROP FUNCTION app.block_approved_quote_mutation();
 DROP FUNCTION app.block_snapshot_mutation();
+DROP FUNCTION app.platform_delete_organization(uuid);
 DROP FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text);
 DROP FUNCTION app.platform_insert_healing_session(text, uuid, text, text, text, text);
 DROP FUNCTION app.platform_update_connector_status(text, app.connector_status, numeric);
@@ -909,6 +1058,12 @@ DROP FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, 
 DROP FUNCTION app.get_current_organization();
 DROP FUNCTION app.list_memberships_for_email(text);
 DROP FUNCTION app.resolve_inbound_org(text);
+-- +goose StatementEnd
+
+-- Dropped before the tables: the FK references app.organizations, and
+-- restoring the 0001 shape means inbound_messages must lose it explicitly.
+-- +goose StatementBegin
+ALTER TABLE app.inbound_messages DROP CONSTRAINT inbound_messages_organization_id_fkey;
 -- +goose StatementEnd
 
 -- +goose StatementBegin
@@ -950,6 +1105,7 @@ CREATE POLICY tenant_isolation ON app.private_tariff_embeddings
     WITH CHECK (organization_id = NULLIF(current_setting('app.current_organization_id', true), '')::uuid);
 -- +goose StatementEnd
 
+-- Back to the 0001 policy name (the canonical rename above is reverted).
 -- +goose StatementBegin
 ALTER POLICY tenant_isolation_policy ON app.inbound_messages RENAME TO tenant_isolation;
 -- +goose StatementEnd

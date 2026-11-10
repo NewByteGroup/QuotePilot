@@ -35,6 +35,9 @@ func TestSpikeInTenantTxSqlcDecimal(t *testing.T) {
 	db := testenv.Open(t)
 	ctx := context.Background()
 	org := uuid.New()
+	// inbound_messages.organization_id is a real FK since 0002: the org must
+	// exist (seeded owner-side; qp_app cannot write Layer A).
+	testenv.SeedOrganization(t, org, "inbox-decimal")
 	amount := decimal.RequireFromString("1234.56")
 
 	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
@@ -82,6 +85,7 @@ func TestSpikeWebhook(t *testing.T) {
 	defer srv.Close()
 
 	org := uuid.New()
+	testenv.SeedOrganization(t, org, "inbox-webhook")
 	payload, err := json.Marshal(map[string]any{
 		"organization_id":    org.String(),
 		"resend_message_id":  "resend-spike-1",

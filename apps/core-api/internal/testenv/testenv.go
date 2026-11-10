@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
@@ -89,4 +90,24 @@ func MigratorPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// SeedOrganization inserts the Layer A registry row as qp_migrator and returns
+// the effective slug: slug and inbound_email_alias are the unique columns, so
+// a per-run suffix keeps the suite idempotent against a persistent dev
+// database. Every tenant-row insert now satisfies the organizations FK, so
+// tests must seed the org before writing Camada B rows under it. Callers that
+// exercise <slug>@in.quotepilot.app resolution use the return.
+//
+//	slug := testenv.SeedOrganization(t, org, "my-test")
+func SeedOrganization(t *testing.T, org uuid.UUID, base string) string {
+	t.Helper()
+	pool := MigratorPool(t)
+	slug := base + "-" + org.String()[:8]
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO app.organizations (id, name, slug, inbound_email_alias, outbound_from_name, outbound_reply_to)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		org.String(), "Test "+slug, slug, slug+"@in.test", "Test "+slug, "ops@"+slug+".test")
+	require.NoError(t, err)
+	return slug
 }

@@ -96,10 +96,10 @@ func TestSpikeIsolation(t *testing.T) {
 	vec[0], vec[1] = 0.5, -0.25
 
 	// Camada B tables now reference organizations, which qp_app cannot write
-	// (Layer A is REVOKE ALL); the seed goes through the migrator pool.
-	migrator := testenv.MigratorPool(t)
-	seedOrganization(t, ctx, migrator, orgA, "iso-org-a")
-	seedOrganization(t, ctx, migrator, orgB, "iso-org-b")
+	// (Layer A is REVOKE ALL); the seed goes through the migrator pool inside
+	// testenv.SeedOrganization.
+	testenv.SeedOrganization(t, orgA, "iso-org-a")
+	testenv.SeedOrganization(t, orgB, "iso-org-b")
 
 	// Org A writes an inbound message and a tariff embedding on the pooled
 	// connection. private_tariffs needs a batch row for the FK (comment 11:
@@ -187,22 +187,6 @@ func TestSpikeIsolation(t *testing.T) {
 	assert.Equal(t, 0, bare, "no tenant context must yield zero rows")
 }
 
-// seedOrganization inserts the Layer A registry row as qp_migrator and
-// returns the effective slug: slug and inbound_email_alias are the unique
-// columns, so a per-run suffix keeps the suite idempotent against a
-// persistent dev database. Callers that exercise <slug>@in.* resolution
-// use the return.
-func seedOrganization(t *testing.T, ctx context.Context, pool *pgxpool.Pool, org uuid.UUID, base string) string {
-	t.Helper()
-	slug := base + "-" + org.String()[:8]
-	_, err := pool.Exec(ctx, `
-		INSERT INTO app.organizations (id, name, slug, inbound_email_alias, outbound_from_name, outbound_reply_to)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		org.String(), "Test "+slug, slug, slug+"@in.test", "Test "+slug, "ops@"+slug+".test")
-	require.NoError(t, err)
-	return slug
-}
-
 // TestSpikeNestedTxRejected guards ADR-002 section 3 rule 5: InTenantTx inside
 // fn is a programming error, not silently allowed.
 func TestSpikeNestedTxRejected(t *testing.T) {
@@ -231,6 +215,9 @@ func TestSpikeNilOrgRejected(t *testing.T) {
 func TestSpikeReadTxReadOnly(t *testing.T) {
 	db := testenv.Open(t)
 	org := uuid.New()
+	// Seeded so the attempted write below can fail only on the read-only tx,
+	// never on the organizations FK.
+	testenv.SeedOrganization(t, org, "readtx-org")
 	err := db.InTenantReadTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		var timeout string
 		require.NoError(t, tx.QueryRow(ctx,
@@ -248,4 +235,86 @@ func TestSpikeReadTxReadOnly(t *testing.T) {
 		return err
 	})
 	assert.Error(t, err, "INSERT inside a read-only tenant tx must fail")
+}
+
+// ---------------------------------------------------------------------------
+// Shared Camada B test fixtures, used by schema_enforcement_test.go. Every
+// helper takes an open tenant tx (or a *tenantdb.DB) and writes as qp_app —
+// the org row itself comes from testenv.SeedOrganization because Layer A is
+// REVOKE ALL (seed it first, once per org).
+// ---------------------------------------------------------------------------
+
+// mustExec runs stmt inside an open tenant tx and fails on any error.
+func mustExec(t *testing.T, ctx context.Context, tx pgx.Tx, stmt string, args ...any) {
+	t.Helper()
+	_, err := tx.Exec(ctx, stmt, args...)
+	require.NoError(t, err)
+}
+
+// denyTx runs stmt in its own tenant tx and asserts it errors with want; a
+// denied write aborts the transaction, so each attempt needs a fresh tx.
+func denyTx(t *testing.T, db *tenantdb.DB, org uuid.UUID, stmt, want string, args ...any) {
+	t.Helper()
+	err := db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, stmt, args...)
+		return err
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), want)
+}
+
+// seedRFQ / seedQuote / seedQuoteLine insert Camada B rows inside an open
+// tenant tx; approveQuote takes the allowed DRAFT -> APPROVED_SENT path.
+func seedRFQ(t *testing.T, ctx context.Context, tx pgx.Tx, org uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.rfq_requests (organization_id, resend_message_id, customer_email)
+		 VALUES ($1, $2, 'cust@example.test') RETURNING id`,
+		org.String(), "rfq-"+uuid.NewString()).Scan(&id))
+	return id
+}
+
+func seedQuote(t *testing.T, ctx context.Context, tx pgx.Tx, org, rfq uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.quotes (organization_id, rfq_id, quote_number, total_cost_brl, target_margin, final_price_brl, overall_confidence)
+		 VALUES ($1, $2, $3, 1000.00, 0.1800, 1180.00, 1.0000) RETURNING id`,
+		org.String(), rfq.String(), "Q-"+uuid.NewString()[:8]).Scan(&id))
+	return id
+}
+
+func seedQuoteLine(t *testing.T, ctx context.Context, tx pgx.Tx, org, quote uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.quote_line_items (organization_id, quote_id, category, source_type,
+			original_currency, original_amount, fx_rate_used, cost_amount_brl, sell_amount_brl, line_confidence)
+		 VALUES ($1, $2, 'INTL_FREIGHT', 'MANUAL_OVERRIDE', 'USD', 100.00, 5.200000, 520.00, 600.00, 1.0000)
+		 RETURNING id`,
+		org.String(), quote.String()).Scan(&id))
+	return id
+}
+
+func approveQuote(t *testing.T, ctx context.Context, tx pgx.Tx, quote uuid.UUID) {
+	t.Helper()
+	mustExec(t, ctx, tx, `UPDATE app.quotes SET status = 'APPROVED_SENT' WHERE id = $1`, quote.String())
+}
+
+// seedBatchTariff inserts one PENDING_REVIEW batch plus one tariff row inside
+// an open tenant tx and returns both ids.
+func seedBatchTariff(t *testing.T, ctx context.Context, tx pgx.Tx, org uuid.UUID) (batch, tariff uuid.UUID) {
+	t.Helper()
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.private_tariff_batches (organization_id, source_type) VALUES ($1, 'CSV_UPLOAD') RETURNING id`,
+		org.String()).Scan(&batch))
+	require.NoError(t, tx.QueryRow(ctx, `
+		INSERT INTO app.private_tariffs (organization_id, batch_id, carrier_or_agent, modal,
+			origin_locode, dest_locode, equipment_or_unit, charge_category, charge_code, currency, net_amount,
+			valid_from, valid_until, search_description)
+		VALUES ($1, $2, 'CARRIER_A', 'FCL', 'BRSSZ', 'CNSHA', '40HC', 'OCEAN_FREIGHT', 'OCEAN', 'USD',
+			1000.00, '2026-01-01', '2026-12-31', 'FCL ocean freight BRSSZ-CNSHA') RETURNING id`,
+		org.String(), batch.String()).Scan(&tariff))
+	return batch, tariff
 }

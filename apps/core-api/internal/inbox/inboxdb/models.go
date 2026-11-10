@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	pgvector "github.com/pgvector/pgvector-go"
 	"github.com/shopspring/decimal"
 )
 
@@ -590,7 +591,7 @@ type AppCarrierOffer struct {
 	OrganizationID   pgtype.UUID
 	RfqID            pgtype.UUID
 	Carrier          string
-	OfferReference   pgtype.Text
+	OfferReference   *string
 	OfferPayloadJson []byte
 	FetchedAt        pgtype.Timestamptz
 	ExpiresAt        pgtype.Timestamptz
@@ -603,7 +604,7 @@ type AppConnector struct {
 	DisplayName     string
 	TargetUrl       string
 	Status          AppConnectorStatus
-	ConfidenceScore pgtype.Numeric
+	ConfidenceScore *decimal.Decimal
 	LastScrapedAt   pgtype.Timestamptz
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
@@ -614,12 +615,12 @@ type AppHealingSession struct {
 	ConnectorID              pgtype.UUID
 	Status                   AppHealingStatus
 	FailingSnapshotID        pgtype.UUID
-	FailingPayloadHash       pgtype.Text
-	FailingPayloadStorageKey pgtype.Text
-	DevinSessionID           pgtype.Text
-	DevinSessionUrl          pgtype.Text
-	GithubPrUrl              pgtype.Text
-	PytestPassed             pgtype.Bool
+	FailingPayloadHash       *string
+	FailingPayloadStorageKey *string
+	DevinSessionID           *string
+	DevinSessionUrl          *string
+	GithubPrUrl              *string
+	PytestPassed             *bool
 	CreatedAt                pgtype.Timestamptz
 	ResolvedAt               pgtype.Timestamptz
 }
@@ -642,7 +643,7 @@ type AppOrganization struct {
 	ID                pgtype.UUID
 	Name              string
 	Slug              string
-	Cnpj              pgtype.Text
+	Cnpj              *string
 	InboundEmailAlias string
 	OutboundFromName  string
 	OutboundReplyTo   string
@@ -673,13 +674,13 @@ type AppPricingRule struct {
 	Modal                AppPricingModal
 	DefaultTargetMargin  decimal.Decimal
 	FxSafetySpread       decimal.Decimal
-	AutoApproveThreshold pgtype.Numeric
+	AutoApproveThreshold *decimal.Decimal
 	FixedFeesJson        []byte
 	QuoteValidityDays    int32
-	OriginLocode         pgtype.Text
-	DestLocode           pgtype.Text
-	RouteTargetMargin    pgtype.Numeric
-	MinMarkupUsd         pgtype.Numeric
+	OriginLocode         *string
+	DestLocode           *string
+	RouteTargetMargin    *decimal.Decimal
+	MinMarkupUsd         *decimal.Decimal
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
 }
@@ -697,14 +698,14 @@ type AppPrivateTariff struct {
 	ChargeCode        string
 	Currency          string
 	NetAmount         decimal.Decimal
-	MinAmount         pgtype.Numeric
-	FreeTimeDays      pgtype.Int4
-	TransitTimeDays   pgtype.Int4
+	MinAmount         *decimal.Decimal
+	FreeTimeDays      *int32
+	TransitTimeDays   *int32
 	ValidFrom         pgtype.Date
 	ValidUntil        pgtype.Date
 	SearchDescription string
-	Embedding         interface{}
-	EmbeddingModel    pgtype.Text
+	Embedding         *pgvector.Vector
+	EmbeddingModel    *string
 	IsRemoved         bool
 	CreatedAt         pgtype.Timestamptz
 }
@@ -713,7 +714,7 @@ type AppPrivateTariffBatch struct {
 	ID             pgtype.UUID
 	OrganizationID pgtype.UUID
 	SourceType     AppTariffSourceType
-	SourceFilename pgtype.Text
+	SourceFilename *string
 	UploadedBy     pgtype.UUID
 	Status         AppBatchStatus
 	ActivatedAt    pgtype.Timestamptz
@@ -724,11 +725,11 @@ type AppPublicSnapshot struct {
 	ID                 pgtype.UUID
 	ConnectorID        pgtype.UUID
 	ParserVersion      string
-	RawMarkdownHash    pgtype.Text
+	RawMarkdownHash    *string
 	ExtractedRatesJson []byte
-	SourceUrl          pgtype.Text
-	StorageKey         pgtype.Text
-	ConfidenceScore    pgtype.Numeric
+	SourceUrl          *string
+	StorageKey         *string
+	ConfidenceScore    *decimal.Decimal
 	CheckResultsJson   []byte
 	ScrapedAt          pgtype.Timestamptz
 	CreatedAt          pgtype.Timestamptz
@@ -743,9 +744,9 @@ type AppQuote struct {
 	Status         AppQuoteStatus
 	QuoteDate      pgtype.Date
 	PricedAt       pgtype.Timestamptz
-	InputsHash     pgtype.Text
+	InputsHash     *string
 	CarrierOfferID pgtype.UUID
-	CargoCifBrl    pgtype.Numeric
+	CargoCifBrl    *decimal.Decimal
 	TotalCostBrl   decimal.Decimal
 	TargetMargin   decimal.Decimal
 	// Sum of the rounded line sell amounts (half-up per line; RFC-001 section 8). Invariant under test: sum(quote_line_items.sell_amount_brl) = final_price_brl.
@@ -753,11 +754,11 @@ type AppQuote struct {
 	FxRatesAppliedJson    []byte
 	OverallConfidence     decimal.Decimal
 	PricingResultJson     []byte
-	PdfStorageKey         pgtype.Text
+	PdfStorageKey         *string
 	ApprovedAt            pgtype.Timestamptz
 	ApprovedByUserID      pgtype.UUID
-	ApprovedVia           pgtype.Text
-	SentOutboundMessageID pgtype.Text
+	ApprovedVia           *string
+	SentOutboundMessageID *string
 	CreatedAt             pgtype.Timestamptz
 	UpdatedAt             pgtype.Timestamptz
 }
@@ -789,9 +790,9 @@ type AppRfqAttachment struct {
 	RfqID          pgtype.UUID
 	StorageKey     string
 	Filename       string
-	MimeType       pgtype.Text
-	ParsedMarkdown pgtype.Text
-	SizeBytes      pgtype.Int8
+	MimeType       *string
+	ParsedMarkdown *string
+	SizeBytes      *int64
 	CreatedAt      pgtype.Timestamptz
 }
 
@@ -801,17 +802,17 @@ type AppRfqRequest struct {
 	Kind                 AppRfqKind
 	Status               AppRfqStatus
 	ResendMessageID      string
-	RfcMessageID         pgtype.Text
+	RfcMessageID         *string
 	ThreadHeadersJson    []byte
 	CustomerEmail        string
-	CustomerName         pgtype.Text
+	CustomerName         *string
 	Subject              string
 	ReceivedAt           pgtype.Timestamptz
-	RawTextBody          pgtype.Text
-	RawHtmlBody          pgtype.Text
+	RawTextBody          *string
+	RawHtmlBody          *string
 	ExtractedPayloadJson []byte
-	ExtractionConfidence pgtype.Numeric
-	FailureReason        pgtype.Text
+	ExtractionConfidence *decimal.Decimal
+	FailureReason        *string
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
 }
@@ -820,7 +821,7 @@ type AppSuppressionList struct {
 	ID             pgtype.UUID
 	OrganizationID pgtype.UUID
 	Email          string
-	Reason         pgtype.Text
+	Reason         *string
 	CreatedAt      pgtype.Timestamptz
 }
 
@@ -829,7 +830,7 @@ type AppTenantAuditLog struct {
 	OrganizationID pgtype.UUID
 	ActorUserID    pgtype.UUID
 	Action         string
-	EntityType     pgtype.Text
+	EntityType     *string
 	EntityID       pgtype.UUID
 	MetadataJson   []byte
 	CreatedAt      pgtype.Timestamptz
@@ -838,8 +839,8 @@ type AppTenantAuditLog struct {
 type AppUser struct {
 	ID                     pgtype.UUID
 	Email                  string
-	FullName               pgtype.Text
-	PasswordHashOrMagicSub pgtype.Text
+	FullName               *string
+	PasswordHashOrMagicSub *string
 	IsPlatformAdmin        bool
 	CreatedAt              pgtype.Timestamptz
 }

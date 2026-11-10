@@ -64,9 +64,12 @@ FK→users · `role` `app.membership_role` NOT NULL ·
 
 ### Platform functions (SECURITY DEFINER, EXECUTE → `qp_app`)
 
-- `app.resolve_inbound_org(recipient text) returns uuid` — resolve the
-  Resend `to` address to an organization via `inbound_email_alias`, then
-  `<slug>@in.%` fallback. Runs before any tenant context exists (comment 4).
+- `app.resolve_inbound_org(recipient text) returns uuid` (STABLE) — resolve
+  the Resend `to` address to an organization via `inbound_email_alias`
+  (exact match, any domain: the alias is the ownership declaration), then a
+  `<slug>@in.quotepilot.app` fallback **pinned to our domain** — an
+  arbitrary `slug@in.other-domain.test` must not resolve. Runs before any
+  tenant context exists (comment 4).
 - `app.list_memberships_for_email(email text) returns table(organization_id uuid, role app.membership_role)` —
   post-login org picker, without exposing the full registry.
 - `app.get_current_organization() returns organizations` — tenant-scoped
@@ -92,6 +95,13 @@ CREATE POLICY tenant_isolation_policy ON <table>
   WITH CHECK (organization_id = NULLIF(current_setting('app.current_organization_id', true), '')::uuid);
 ```
 
+Internal parent FKs also cascade where the child is meaningless without the
+parent (`quotes.rfq_id`, `carrier_offers.rfq_id`, `rfq_attachments.rfq_id`,
+`quote_line_items.quote_id`) — this is what lets
+`platform_delete_organization` reach the whole tenant subtree in one
+delete. Pin FKs (`private_tariff_id`, `public_snapshot_id`,
+`carrier_offer_id`, `batch_id`) stay plain `REFERENCES`.
+
 ### `pricing_rules`
 
 Spec §5.2.3 plus: `min_markup_usd numeric(14,2)` (FCL per-container floor,
@@ -108,7 +118,10 @@ so one rule per (org, modal, route-or-global). `modal` uses
 
 Spec §5.2.4 plus `status app.batch_status NOT NULL DEFAULT 'PENDING_REVIEW'`
 ('PENDING_REVIEW','ACTIVE') and `activated_at timestamptz` — written once at
-activation (RFC-002 step 3).
+activation (RFC-002 step 3). Trigger `enforce_batch_activation`: the only
+allowed transition is PENDING_REVIEW→ACTIVE, `activated_at` is stamped at
+activation and can never be rewritten, ACTIVE batches are immutable, and
+`REVOKE DELETE` keeps batch history intact.
 
 ### `private_tariffs`
 
@@ -152,7 +165,9 @@ persisted before pricing so a quote is reproducible (rule 9, plan doc):
 `carrier` text NOT NULL · `offer_reference` text · `offer_payload_json`
 jsonb NOT NULL (validated offer: legs, equipment prices, validity) ·
 `fetched_at` timestamptz NOT NULL · `expires_at` timestamptz.
-Index `(organization_id, rfq_id)`.
+Index `(organization_id, rfq_id)`. **Append-only** (`REVOKE UPDATE, DELETE`)
+— a pinned offer must stay byte-identical for quote replay; corrections are
+new offers.
 
 ### `org_quote_counters`
 
@@ -180,11 +195,13 @@ Spec §5.2.6 plus:
   price was computed from (v1.3)
 - `UNIQUE (organization_id, quote_number)` and
   `UNIQUE (organization_id, rfq_id, version)`
-- **immutability**: trigger `block_approved_quote_mutation` raises on
-  UPDATE/DELETE when `OLD.status = 'APPROVED_SENT'` — with one exception:
-  `status → 'SUPERSEDED'` alone is the only permitted mutation on a sent
-  quote, retiring it when the corrected version is issued. Every other
-  column change and every DELETE still raises (rule 9)
+- **immutability**: trigger `block_approved_quote_mutation` — the single
+  permitted mutation on an `APPROVED_SENT` row is `status → 'SUPERSEDED'`
+  alone (a jsonb row diff proves no other column changed), retiring it when
+  the corrected version is issued. `SUPERSEDED` rows are then fully frozen;
+  every other update and every delete on either terminal status raises
+  (rule 9). The only bypass is the transaction-local
+  `app.tenant_teardown` flag set by `platform_delete_organization`
 - schema comment on `final_price_brl`: rounding rule — sell lines are
   rounded per line and the price is the sum of rounded lines (RFC-001 §8)
 
@@ -196,6 +213,10 @@ pin alongside `private_tariff_id` and `public_snapshot_id`) and
 `MIN_MARKUP_APPLIED`, RFC-001 §9). `category` adds `'CARRIER_OFFER'` to
 `source_type` so Hapag-offer lines are distinguishable from private tariffs.
 Test invariant: `sum(sell_amount_brl) = quotes.final_price_brl` per quote.
+Mirror trigger `block_sent_quote_line_mutation` raises on
+INSERT/UPDATE/DELETE while the parent quote is `APPROVED_SENT` or
+`SUPERSEDED` (same teardown exemption) — a sent quote's breakdown cannot
+diverge from its recorded header.
 
 ### `tenant_audit_logs`
 
@@ -222,12 +243,11 @@ Amanda (RFC-002).
 
 ### `inbound_messages` (kept from the spike)
 
-Unchanged — it is the webhook receipt table: the Svix-verified idempotent
-insert lands here, then the fetch job materializes `rfq_requests`
-(comment 4 flow). `resend_message_id` uniqueness in both places is
-intentional defense in depth. It keeps its bare `organization_id` (no FK):
-adding `REFERENCES organizations` is deferred to the pipeline mission, which
-also decides what an unresolvable alias does to the receipt.
+Kept from the spike as the webhook receipt table (comment 4 flow) and now
+gains `REFERENCES organizations(id) ON DELETE CASCADE` — teardown would
+otherwise orphan receipts, and `organization_id` was already NOT NULL so
+valid flows are unchanged. `resend_message_id` uniqueness in both tables is
+intentional defense in depth.
 
 ### dropped: `private_tariff_embeddings`
 
@@ -254,6 +274,13 @@ Platform write functions (EXECUTE → `qp_app`): `platform_insert_public_snapsho
 `resolved_at` on MERGED/FAILED — without it a session could never leave
 OPEN). Workers running as `qp_app` can therefore publish snapshots without
 ever holding table-level write grants.
+
+`platform_delete_organization(org_id)` is the **only** tenant-teardown
+path: it sets the transaction-local `app.tenant_teardown` flag (which the
+two immutability triggers honor), pins the tenant context, and deletes the
+organization row; cascades remove every Camada B row, membership and
+`inbound_messages` receipt. Ordinary `qp_app` deletes on sent quotes or
+lines still raise.
 
 ## 6. Enum types (`CREATE TYPE` in `app`)
 
