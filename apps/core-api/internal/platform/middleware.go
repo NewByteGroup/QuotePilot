@@ -234,11 +234,15 @@ func CheckOrigin(cfg *Config) func(http.Handler) http.Handler {
 
 // trustedOrigin reduces WebURL — a base URL that may carry a path — to the
 // scheme://host[:port] origin AddTrustedOrigin accepts. An unparseable or
-// non-http(s) WebURL is a startup bug and panics.
+// non-http(s) WebURL is a startup bug and panics with the offending value,
+// the expected shape, and the parser's diagnostic.
 func trustedOrigin(webURL string) string {
 	u, err := url.Parse(webURL)
-	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-		panic(fmt.Errorf("platform: trusted origin: bad WEB_URL %q", webURL))
+	if err != nil {
+		panic(fmt.Errorf("platform: trusted origin: WEB_URL %q is not a valid URL (expected scheme://host[:port]): %w", webURL, err))
+	}
+	if u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		panic(fmt.Errorf("platform: trusted origin: WEB_URL %q must be an http(s) URL with a host (expected scheme://host[:port])", webURL))
 	}
 	return u.Scheme + "://" + u.Host
 }
