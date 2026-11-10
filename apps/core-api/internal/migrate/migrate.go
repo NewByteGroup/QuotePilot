@@ -60,7 +60,7 @@ func runGoose(ctx context.Context, dsn string) error {
 	if err != nil {
 		return fmt.Errorf("migrate: open sql db: %w", err)
 	}
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 	if err := goose.UpContext(ctx, sqlDB, "."); err != nil {
 		return fmt.Errorf("migrate: goose up: %w", err)
 	}
