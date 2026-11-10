@@ -125,7 +125,7 @@ Raw emails contain personal data (names, addresses) and commercial secrets. Prop
 | 5 | Per-tenant sender allow-list | Pilot companies | Open (no allow-list) |
 | 6 | Retention period and deletion process | Pilot companies | 12 months |
 | 7 | Virus scanning | Pedro | Not in the MVP |
-| 8 | Resend retry behaviour for non-2xx responses | Pedro | Verify before relying on it (ADR-005) |
+| 8 | ~~Resend retry behaviour for non-2xx responses~~ | Pedro | Resolved in ADR-005: any non-2xx retries 8× over ~27h; `webhook-delivery: abort-message` aborts; answer 2xx for orphans |
 | 9 | Who may activate a tariff batch: `ADMIN`/`OWNER` only (matches the ADR-005 matrix) or `PRICING_ANALYST` too? | Pedro and Marcelo | `ADMIN`/`OWNER` only (proposed) |
 
 ## 9. Impact
