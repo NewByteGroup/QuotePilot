@@ -9,7 +9,7 @@ test:
 # tests refuse -short skips and need both DSNs in the environment).
 integration-test:
 	go run ./cmd/migrate
-	go test -count=1 ./...
+	go test -count=1 -race ./...
 
 # Regenerates internal/inbox/inboxdb from db/queries + db/migrations. Output is
 # committed; never edit generated files (CI contracts-drift checks the diff).

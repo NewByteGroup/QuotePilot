@@ -70,29 +70,26 @@ func (d *DB) tenantTx(
 	if err != nil {
 		return fmt.Errorf("tenantdb: begin: %w", err)
 	}
-	defer rollbackOnPanic(tx, ctx)
-	if err := applyTenantContext(ctx, tx, org, statementTimeout); err != nil {
+	// Unconditional rollback: covers panic AND runtime.Goexit (recover()==nil on
+	// Goexit, so a recover-only defer would leak the tx on a pooled connection).
+	// After a successful Commit this is ErrTxClosed and ignored. The rollback
+	// uses a cancel-free context so a dead caller context cannot abort it.
+	defer func() {
 		_ = tx.Rollback(context.WithoutCancel(ctx))
+		if p := recover(); p != nil {
+			panic(p)
+		}
+	}()
+	if err := applyTenantContext(ctx, tx, org, statementTimeout); err != nil {
 		return err
 	}
 	if err := fn(ctx, tx); err != nil {
-		_ = tx.Rollback(context.WithoutCancel(ctx))
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("tenantdb: commit: %w", err)
 	}
 	return nil
-}
-
-// rollbackOnPanic rolls back and re-panics (ADR-002 section 3 rule 3). The
-// rollback uses a cancel-free context: a dead caller context would otherwise
-// abort the rollback itself and leak the transaction.
-func rollbackOnPanic(tx pgx.Tx, ctx context.Context) {
-	if p := recover(); p != nil {
-		_ = tx.Rollback(context.WithoutCancel(ctx))
-		panic(p)
-	}
 }
 
 // applyTenantContext sets the RLS tenant context as the first statement. The
