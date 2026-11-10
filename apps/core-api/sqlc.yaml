@@ -14,10 +14,19 @@ sql:
         package: "inboxdb"
         out: "internal/inbox/inboxdb"
         sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
         overrides:
           # NUMERIC maps to decimal.Decimal — no float64 near money (AGENTS.md).
           - db_type: "pg_catalog.numeric"
             go_type: "github.com/shopspring/decimal.Decimal"
+          # Nullable NUMERIC gets the pointer form of the same override, so
+          # optional money columns stay decimal too (e.g. MinAmount).
+          - db_type: "pg_catalog.numeric"
+            nullable: true
+            go_type:
+              import: "github.com/shopspring/decimal"
+              type: "Decimal"
+              pointer: true
           # pgvector lives in schema extensions (ADR-003 section 4); sqlc does
           # not know the type, so map it explicitly or columns become any.
           # `package` is required: the Go identifier (pgvector) differs from the
@@ -27,3 +36,10 @@ sql:
               import: "github.com/pgvector/pgvector-go"
               package: "pgvector"
               type: "Vector"
+          - db_type: "extensions.vector"
+            nullable: true
+            go_type:
+              import: "github.com/pgvector/pgvector-go"
+              package: "pgvector"
+              type: "Vector"
+              pointer: true

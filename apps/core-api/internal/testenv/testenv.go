@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/migrate"
@@ -36,6 +38,23 @@ func RequirePostgres(t *testing.T) string {
 	dsn := os.Getenv("POSTGRES_DSN")
 	if dsn == "" {
 		t.Skip("skipping: POSTGRES_DSN is not set")
+	}
+	return dsn
+}
+
+// RequireAdmin skips t under -short or without QP_ADMIN_DSN and returns the
+// qp_admin DSN. The platform path (platform_* functions, teardown) runs as
+// qp_admin — qp_app cannot EXECUTE those functions at all (spec section 5).
+//
+//	dsn := testenv.RequireAdmin(t)
+func RequireAdmin(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping real-Postgres test under -short")
+	}
+	dsn := os.Getenv("QP_ADMIN_DSN")
+	if dsn == "" {
+		t.Skip("skipping: QP_ADMIN_DSN is not set")
 	}
 	return dsn
 }
@@ -70,4 +89,59 @@ func Open(t *testing.T) *tenantdb.DB {
 	require.NoError(t, err)
 	t.Cleanup(db.Close)
 	return db
+}
+
+// AdminDB returns a tenantdb.DB on the qp_admin DSN with migrations applied —
+// the platform path's InTenantTx (teardown must run scoped to the org being
+// deleted). qp_admin passes the same ADR-002 section 4 startup assertions as
+// qp_app (not privileged, owns nothing, RLS enforced). The pool closes at test
+// cleanup.
+//
+//	admin := testenv.AdminDB(t)
+func AdminDB(t *testing.T) *tenantdb.DB {
+	t.Helper()
+	dsn := RequireAdmin(t)
+	EnsureMigrated(t)
+	db, err := tenantdb.Open(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(db.Close)
+	return db
+}
+
+// MigratorPool opens a pool on MIGRATOR_DSN with migrations applied and the
+// project types registered; it closes at test cleanup. Use it for catalog
+// reads and for seeding Layer A rows (organizations, users, memberships) that
+// qp_app must not write directly — REVOKE ALL on Layer A is the spec's point,
+// so tests that need those rows go through the owner.
+//
+//	pool := testenv.MigratorPool(t)
+func MigratorPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	EnsureMigrated(t)
+	dsn := os.Getenv("MIGRATOR_DSN")
+	require.NotEmpty(t, dsn, "MIGRATOR_DSN is not set")
+	pool, err := tenantdb.OpenPool(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// SeedOrganization inserts the Layer A registry row as qp_migrator and returns
+// the effective slug: slug and inbound_email_alias are the unique columns, so
+// a per-run suffix keeps the suite idempotent against a persistent dev
+// database. Every tenant-row insert now satisfies the organizations FK, so
+// tests must seed the org before writing Camada B rows under it. Callers that
+// exercise <slug>@in.quotepilot.app resolution use the return.
+//
+//	slug := testenv.SeedOrganization(t, org, "my-test")
+func SeedOrganization(t *testing.T, org uuid.UUID, base string) string {
+	t.Helper()
+	pool := MigratorPool(t)
+	slug := base + "-" + org.String()[:8]
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO app.organizations (id, name, slug, inbound_email_alias, outbound_from_name, outbound_reply_to)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		org.String(), "Test "+slug, slug, slug+"@in.test", "Test "+slug, "ops@"+slug+".test")
+	require.NoError(t, err)
+	return slug
 }

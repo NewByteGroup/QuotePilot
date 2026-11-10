@@ -13,7 +13,7 @@ DO $$
 DECLARE bad text;
 BEGIN
   SELECT string_agg(x.name, ', ') INTO bad
-  FROM (VALUES ('qp_app'),('qp_migrator'),('anon'),('authenticated'),('service_role')) AS x(name)
+  FROM (VALUES ('qp_app'),('qp_migrator'),('qp_admin'),('anon'),('authenticated'),('service_role')) AS x(name)
   WHERE NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = x.name);
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[1] missing roles: %; init script did not run (see infra/README.md, make db-reset)', bad;
@@ -44,7 +44,7 @@ BEGIN
       CASE WHEN p.rolcreaterole THEN 'CREATEROLE' END,
       CASE WHEN p.rolreplication THEN 'REPLICATION' END,
       CASE WHEN NOT p.rolcanlogin THEN 'NOLOGIN' END) || ']', ', ') INTO bad
-  FROM (VALUES ('qp_app'),('qp_migrator')) AS x(name)
+  FROM (VALUES ('qp_app'),('qp_migrator'),('qp_admin')) AS x(name)
   JOIN pg_roles p ON p.rolname = x.name
   WHERE p.rolsuper OR p.rolbypassrls OR p.rolcreatedb OR p.rolcreaterole OR p.rolreplication OR NOT p.rolcanlogin;
   IF bad IS NOT NULL THEN
@@ -73,13 +73,22 @@ BEGIN
     RAISE EXCEPTION '[B2] qp_migrator must be a member of no role; member of: %', bad;
   END IF;
 
+  -- B4 mirrors B1/B2 for qp_admin (platform path, init section 2): memberships
+  -- would let SET ROLE bridge the definer-context check the teardown flag needs.
+  SELECT string_agg(pg_get_userbyid(m.roleid), ', ') INTO bad
+  FROM pg_auth_members m
+  WHERE m.member = (SELECT oid FROM pg_roles WHERE rolname = 'qp_admin');
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '[B4] qp_admin must be a member of no role; member of: %', bad;
+  END IF;
+
   -- On hosted Supabase the platform role postgres is expected to be a member of qp_migrator;
   -- B3 must then be relaxed with an allowlist (to be tracked in ADR-007, not yet written). Strict for now.
   SELECT string_agg(pg_get_userbyid(m.member) || ' in ' || pg_get_userbyid(m.roleid), ', ') INTO bad
   FROM pg_auth_members m
-  WHERE m.roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('qp_app','qp_migrator'));
+  WHERE m.roleid IN (SELECT oid FROM pg_roles WHERE rolname IN ('qp_app','qp_migrator','qp_admin'));
   IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '[B3] nobody may be a member of qp_app or qp_migrator; offending: %', bad;
+    RAISE EXCEPTION '[B3] nobody may be a member of qp_app, qp_migrator or qp_admin; offending: %', bad;
   END IF;
 END $$;
 
@@ -88,7 +97,7 @@ DO $$
 DECLARE bad text;
 BEGIN
   SELECT string_agg(x.name, ', ') INTO bad
-  FROM (VALUES ('qp_app'),('qp_migrator')) AS x(name)
+  FROM (VALUES ('qp_app'),('qp_migrator'),('qp_admin')) AS x(name)
   WHERE NOT EXISTS (
     SELECT 1 FROM pg_db_role_setting s CROSS JOIN LATERAL unnest(s.setconfig) AS c
     WHERE s.setrole = (SELECT oid FROM pg_roles WHERE rolname = x.name)
@@ -100,7 +109,7 @@ BEGIN
 
   SELECT string_agg(pg_get_userbyid(s.setrole) || ' (' || c || ')', ', ') INTO bad
   FROM pg_db_role_setting s CROSS JOIN LATERAL unnest(s.setconfig) AS c
-  WHERE s.setrole IN (SELECT oid FROM pg_roles WHERE rolname IN ('qp_app','qp_migrator'))
+  WHERE s.setrole IN (SELECT oid FROM pg_roles WHERE rolname IN ('qp_app','qp_migrator','qp_admin'))
     AND s.setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))
     AND c LIKE 'search_path=%' AND c IS DISTINCT FROM 'search_path=app, extensions';
   IF bad IS NOT NULL THEN
@@ -108,18 +117,19 @@ BEGIN
   END IF;
 END $$;
 
--- (D) qp_app owns nothing in this database (any schema), read from pg_shdepend (deptype 'o').
+-- (D) qp_app and qp_admin own nothing in this database (any schema), read from
+-- pg_shdepend (deptype 'o'). An owner bypasses FORCE RLS for its own objects.
 DO $$
 DECLARE bad text;
 BEGIN
-  SELECT string_agg(pg_describe_object(d.classid, d.objid, d.objsubid), ', ') INTO bad
+  SELECT string_agg(pg_get_userbyid(d.refobjid) || ' owns ' || pg_describe_object(d.classid, d.objid, d.objsubid), ', ') INTO bad
   FROM pg_shdepend d
   WHERE d.refclassid = 'pg_authid'::regclass
-    AND d.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'qp_app')
+    AND d.refobjid IN (SELECT oid FROM pg_roles WHERE rolname IN ('qp_app','qp_admin'))
     AND d.deptype = 'o'
     AND d.dbid = (SELECT oid FROM pg_database WHERE datname = current_database());
   IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '[D] qp_app must own no object in this database; offending: %', bad;
+    RAISE EXCEPTION '[D] qp_app and qp_admin must own no object in this database; offending: %', bad;
   END IF;
 END $$;
 
@@ -129,11 +139,11 @@ DO $$
 DECLARE bad text;
 BEGIN
   SELECT string_agg(r.name || ' CREATE on schema ' || s.name, ', ') INTO bad
-  FROM (VALUES ('qp_app'),('anon'),('authenticated'),('service_role')) AS r(name)
+  FROM (VALUES ('qp_app'),('qp_admin'),('anon'),('authenticated'),('service_role')) AS r(name)
   CROSS JOIN (VALUES ('app'),('river'),('extensions')) AS s(name)
   WHERE has_schema_privilege(r.name, s.name, 'CREATE');
   IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '[E1] no CREATE on app/river/extensions for qp_app, anon, authenticated, service_role; offending: %', bad;
+    RAISE EXCEPTION '[E1] no CREATE on app/river/extensions for qp_app, qp_admin, anon, authenticated, service_role; offending: %', bad;
   END IF;
 
   -- qp_migrator owns app and river but only uses extensions.
@@ -142,10 +152,10 @@ BEGIN
   END IF;
 
   SELECT string_agg(r.name, ', ') INTO bad
-  FROM (VALUES ('qp_app'),('qp_migrator'),('anon'),('authenticated'),('service_role')) AS r(name)
+  FROM (VALUES ('qp_app'),('qp_migrator'),('qp_admin'),('anon'),('authenticated'),('service_role')) AS r(name)
   WHERE has_database_privilege(r.name, current_database(), 'CREATE');
   IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '[E2] no database-level CREATE for qp_app, qp_migrator, anon, authenticated, service_role; offending: %', bad;
+    RAISE EXCEPTION '[E2] no database-level CREATE for qp_app, qp_migrator, qp_admin, anon, authenticated, service_role; offending: %', bad;
   END IF;
 END $$;
 
@@ -166,6 +176,19 @@ BEGIN
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[F2] qp_app and qp_migrator need USAGE on app, river, extensions; offending: %', bad;
   END IF;
+
+  -- qp_admin's surface is narrower still: USAGE on app and extensions (the
+  -- pgx driver resolves vector at connect time) — never river, the platform
+  -- path does not touch job tables.
+  SELECT string_agg('qp_admin lacks USAGE on ' || s.name, ', ') INTO bad
+  FROM (VALUES ('app'),('extensions')) AS s(name)
+  WHERE NOT has_schema_privilege('qp_admin', s.name, 'USAGE');
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION '[F3] qp_admin needs USAGE on app and extensions; offending: %', bad;
+  END IF;
+  IF has_schema_privilege('qp_admin', 'river', 'USAGE') THEN
+    RAISE EXCEPTION '[F3] qp_admin must not have USAGE on schema river';
+  END IF;
 END $$;
 
 -- (G) Database privileges: CONNECT true, TEMPORARY false.
@@ -173,10 +196,10 @@ DO $$
 DECLARE bad text;
 BEGIN
   SELECT string_agg(r.name || ' (connect=' || has_database_privilege(r.name, current_database(), 'CONNECT') || ', temp=' || has_database_privilege(r.name, current_database(), 'TEMPORARY') || ')', ', ') INTO bad
-  FROM (VALUES ('qp_app'),('qp_migrator')) AS r(name)
+  FROM (VALUES ('qp_app'),('qp_migrator'),('qp_admin')) AS r(name)
   WHERE NOT has_database_privilege(r.name, current_database(), 'CONNECT') OR has_database_privilege(r.name, current_database(), 'TEMPORARY');
   IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '[G] qp_app and qp_migrator need CONNECT = true and TEMPORARY = false; offending: %', bad;
+    RAISE EXCEPTION '[G] qp_app, qp_migrator and qp_admin need CONNECT = true and TEMPORARY = false; offending: %', bad;
   END IF;
 END $$;
 
@@ -233,7 +256,8 @@ BEGIN
 END $$;
 
 -- (I) Functions in app/river: the Supabase roles (and PUBLIC through them) cannot EXECUTE.
--- qp_app's own function access in app is not asserted: a migration may grant it on purpose.
+-- qp_app's own function access in app is not asserted here: a migration may grant it on
+-- purpose (the platform_* split between qp_app and qp_admin IS asserted by [N] below).
 DO $$
 DECLARE bad text;
 BEGIN
@@ -376,11 +400,11 @@ BEGIN
 END $$;
 
 -- (X) Allowlist: in schemas app and river the only grantees anywhere are the object owner,
--- qp_migrator and qp_app; PUBLIC never. Covers schema, relation (tables, sequences, views,
--- partitions), column and function ACLs, plus the default ACLs of ANY role for app/river and the
--- global qp_migrator rows. It runs after the denylist checks (F, H, I, K) so those keep their
--- more specific messages. On hosted Supabase a named exception list for platform roles is
--- expected later (ADR-007, to be written).
+-- qp_migrator, qp_app and qp_admin; PUBLIC never. Covers schema, relation (tables, sequences,
+-- views, partitions), column and function ACLs, plus the default ACLs of ANY role for
+-- app/river and the global qp_migrator rows. It runs after the denylist checks (F, H, I, K)
+-- so those keep their more specific messages. On hosted Supabase a named exception list for
+-- platform roles is expected later (ADR-007, to be written).
 DO $$
 DECLARE bad text;
 BEGIN
@@ -407,9 +431,9 @@ BEGIN
     WHERE n.nspname IN ('app','river')
        OR (d.defaclnamespace = 0 AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = 'qp_migrator'))
   ) AS o LEFT JOIN pg_roles g ON g.oid = o.grantee
-  WHERE o.grantee = 0 OR (o.grantee <> o.owner AND NOT (g.rolname = ANY (ARRAY['qp_migrator','qp_app'])));
+  WHERE o.grantee = 0 OR (o.grantee <> o.owner AND NOT (g.rolname = ANY (ARRAY['qp_migrator','qp_app','qp_admin'])));
   IF bad IS NOT NULL THEN
-    RAISE EXCEPTION '[X] in app/river only the owner, qp_migrator and qp_app may hold privileges, never PUBLIC; offending: %', bad;
+    RAISE EXCEPTION '[X] in app/river only the owner, qp_migrator, qp_app and qp_admin may hold privileges, never PUBLIC; offending: %', bad;
   END IF;
 END $$;
 
@@ -435,6 +459,11 @@ BEGIN
 END $$;
 
 -- (M) FORCE RLS on every table in app with an organization_id column.
+-- Allowlist (spec 2026-11-10-data-model-v1.3 section 3, ADR-005 section 1):
+-- organization_memberships is a Layer A platform table read before a tenant
+-- context exists, so it is function-gated instead of RLS-protected. The same
+-- list lives in tenantdb.assertRLSForced and schema_lint_test.go — a new
+-- entry must land in all three on purpose.
 DO $$
 DECLARE bad text;
 BEGIN
@@ -442,14 +471,19 @@ BEGIN
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE n.nspname = 'app' AND c.relkind IN ('r','p')
     AND EXISTS (SELECT 1 FROM pg_attribute t WHERE t.attrelid = c.oid AND t.attname = 'organization_id' AND t.attnum > 0 AND NOT t.attisdropped)
-    AND NOT (c.relrowsecurity AND c.relforcerowsecurity);
+    AND NOT (c.relrowsecurity AND c.relforcerowsecurity)
+    AND c.relname::text <> ALL (ARRAY['organization_memberships']);
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[M] tables with organization_id need ENABLE and FORCE ROW LEVEL SECURITY; offending: %', bad;
   END IF;
 END $$;
 
+-- (N) The qp_admin/qp_app function-EXECUTE surface moved to
+-- platform-functions.sql: it asserts the post-migration state, so CI runs it
+-- only after migrations exist (it is vacuous-true before them).
+
 -- Informational only (the assertions above are what gate).
-SELECT rolname, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolcanlogin FROM pg_roles WHERE rolname IN ('qp_app','qp_migrator') ORDER BY rolname;
+SELECT rolname, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole, rolcanlogin FROM pg_roles WHERE rolname IN ('qp_app','qp_migrator','qp_admin') ORDER BY rolname;
 SELECT e.extname, e.extversion, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname IN ('vector','pg_trgm') ORDER BY e.extname;
 
 SELECT 'roles.sql: all assertions passed' AS result;

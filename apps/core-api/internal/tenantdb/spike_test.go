@@ -43,7 +43,7 @@ func TestSpikeRoleModel(t *testing.T) {
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = 'app'
-		  AND c.relname IN ('inbound_messages', 'private_tariff_embeddings')`)
+		  AND c.relname IN ('inbound_messages', 'private_tariffs')`)
 	require.NoError(t, err)
 	defer rows.Close()
 	for rows.Next() {
@@ -53,22 +53,24 @@ func TestSpikeRoleModel(t *testing.T) {
 		rlsFlags[name] = [2]bool{enabled, forced}
 	}
 	require.NoError(t, rows.Err())
-	for _, table := range []string{"inbound_messages", "private_tariff_embeddings"} {
+	for _, table := range []string{"inbound_messages", "private_tariffs"} {
 		flags, ok := rlsFlags[table]
 		require.True(t, ok, "table app.%s missing after migration", table)
 		assert.True(t, flags[0], "app.%s must ENABLE row level security", table)
 		assert.True(t, flags[1], "app.%s must FORCE row level security", table)
 	}
 
+	// The v1.3 canonical policy name is tenant_isolation_policy; migration 0002
+	// renamed the spike's tenant_isolation on inbound_messages to match.
 	var policies int
 	require.NoError(t, db.Pool().QueryRow(ctx, `
 		SELECT count(*) FROM pg_policy p
 		JOIN pg_class c ON c.oid = p.polrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE p.polname = 'tenant_isolation'
+		WHERE p.polname = 'tenant_isolation_policy'
 		  AND n.nspname = 'app'
-		  AND c.relname IN ('inbound_messages', 'private_tariff_embeddings')`).Scan(&policies))
-	assert.Equal(t, 2, policies, "both tenant tables need a tenant_isolation policy")
+		  AND c.relname IN ('inbound_messages', 'private_tariffs')`).Scan(&policies))
+	assert.Equal(t, 2, policies, "both tenant tables need a tenant_isolation_policy")
 }
 
 // TestSpikeIsolation is gate criterion 4. A max-1 pool guarantees org B reuses
@@ -93,24 +95,52 @@ func TestSpikeIsolation(t *testing.T) {
 	vec := make([]float32, 1024)
 	vec[0], vec[1] = 0.5, -0.25
 
-	// Org A writes an inbound message and an embedding on the pooled connection.
+	// Camada B tables now reference organizations, which qp_app cannot write
+	// (Layer A is REVOKE ALL); the seed goes through the migrator pool inside
+	// testenv.SeedOrganization.
+	testenv.SeedOrganization(t, orgA, "iso-org-a")
+	testenv.SeedOrganization(t, orgB, "iso-org-b")
+
+	// Org A writes an inbound message and a tariff embedding on the pooled
+	// connection. private_tariffs needs a batch row for the FK (comment 11:
+	// the vector column moved here from the dropped private_tariff_embeddings).
 	require.NoError(t, db.InTenantTx(ctx, orgA, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO app.inbound_messages (organization_id, resend_message_id, subject) VALUES ($1, $2, $3)`,
 			orgA.String(), "iso-a-1", "org a"); err != nil {
 			return err
 		}
+		var batchA uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO app.private_tariff_batches (organization_id, source_type) VALUES ($1, 'CSV_UPLOAD') RETURNING id`,
+			orgA.String()).Scan(&batchA); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO app.private_tariff_embeddings (organization_id, embedding, embedding_model) VALUES ($1, $2, $3)`,
-			orgA.String(), pgvector.NewVector(vec), "test-model")
+			`INSERT INTO app.private_tariffs (organization_id, batch_id, carrier_or_agent, modal, origin_locode, dest_locode,
+				equipment_or_unit, charge_category, charge_code, currency, net_amount, valid_from, valid_until,
+				search_description, embedding, embedding_model)
+			VALUES ($1, $2, 'CARRIER_A', 'FCL', 'BRSSZ', 'CNSHA', '40HC', 'OCEAN_FREIGHT', 'OCEAN', 'USD', 1000.00,
+				'2026-01-01', '2026-12-31', 'FCL ocean freight BRSSZ-CNSHA', $3, 'test-model')`,
+			orgA.String(), batchA.String(), pgvector.NewVector(vec))
 		return err
 	}))
 
 	// Org B stores the IDENTICAL vector, reusing the same pooled connection.
 	require.NoError(t, db.InTenantTx(ctx, orgB, func(ctx context.Context, tx pgx.Tx) error {
+		var batchB uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO app.private_tariff_batches (organization_id, source_type) VALUES ($1, 'CSV_UPLOAD') RETURNING id`,
+			orgB.String()).Scan(&batchB); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO app.private_tariff_embeddings (organization_id, embedding, embedding_model) VALUES ($1, $2, $3)`,
-			orgB.String(), pgvector.NewVector(vec), "test-model")
+			`INSERT INTO app.private_tariffs (organization_id, batch_id, carrier_or_agent, modal, origin_locode, dest_locode,
+				equipment_or_unit, charge_category, charge_code, currency, net_amount, valid_from, valid_until,
+				search_description, embedding, embedding_model)
+			VALUES ($1, $2, 'CARRIER_A', 'FCL', 'BRSSZ', 'CNSHA', '40HC', 'OCEAN_FREIGHT', 'OCEAN', 'USD', 1000.00,
+				'2026-01-01', '2026-12-31', 'FCL ocean freight BRSSZ-CNSHA', $3, 'test-model')`,
+			orgB.String(), batchB.String(), pgvector.NewVector(vec))
 		return err
 	}))
 
@@ -124,7 +154,7 @@ func TestSpikeIsolation(t *testing.T) {
 
 		seen := map[string]int{}
 		// Deliberately no WHERE clause: RLS is the only filter under test.
-		rows, err := tx.Query(ctx, `SELECT organization_id::text FROM app.private_tariff_embeddings`)
+		rows, err := tx.Query(ctx, `SELECT organization_id::text FROM app.private_tariffs`)
 		require.NoError(t, err)
 		for rows.Next() {
 			var org string
@@ -150,7 +180,7 @@ func TestSpikeIsolation(t *testing.T) {
 	// error: NULLIF(current_setting(..., true), '')::uuid is NULL (rule 4).
 	var bare int
 	require.NoError(t, db.Pool().QueryRow(ctx,
-		`SELECT count(*) FROM app.private_tariff_embeddings`).Scan(&bare))
+		`SELECT count(*) FROM app.private_tariffs`).Scan(&bare))
 	assert.Equal(t, 0, bare, "no tenant context must yield zero rows")
 	require.NoError(t, db.Pool().QueryRow(ctx,
 		`SELECT count(*) FROM app.inbound_messages`).Scan(&bare))
@@ -185,6 +215,9 @@ func TestSpikeNilOrgRejected(t *testing.T) {
 func TestSpikeReadTxReadOnly(t *testing.T) {
 	db := testenv.Open(t)
 	org := uuid.New()
+	// Seeded so the attempted write below can fail only on the read-only tx,
+	// never on the organizations FK.
+	testenv.SeedOrganization(t, org, "readtx-org")
 	err := db.InTenantReadTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		var timeout string
 		require.NoError(t, tx.QueryRow(ctx,
@@ -202,4 +235,86 @@ func TestSpikeReadTxReadOnly(t *testing.T) {
 		return err
 	})
 	assert.Error(t, err, "INSERT inside a read-only tenant tx must fail")
+}
+
+// ---------------------------------------------------------------------------
+// Shared Camada B test fixtures, used by schema_enforcement_test.go. Every
+// helper takes an open tenant tx (or a *tenantdb.DB) and writes as qp_app —
+// the org row itself comes from testenv.SeedOrganization because Layer A is
+// REVOKE ALL (seed it first, once per org).
+// ---------------------------------------------------------------------------
+
+// mustExec runs stmt inside an open tenant tx and fails on any error.
+func mustExec(t *testing.T, ctx context.Context, tx pgx.Tx, stmt string, args ...any) {
+	t.Helper()
+	_, err := tx.Exec(ctx, stmt, args...)
+	require.NoError(t, err)
+}
+
+// denyTx runs stmt in its own tenant tx and asserts it errors with want; a
+// denied write aborts the transaction, so each attempt needs a fresh tx.
+func denyTx(t *testing.T, db *tenantdb.DB, org uuid.UUID, stmt, want string, args ...any) {
+	t.Helper()
+	err := db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, stmt, args...)
+		return err
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), want)
+}
+
+// seedRFQ / seedQuote / seedQuoteLine insert Camada B rows inside an open
+// tenant tx; approveQuote takes the allowed DRAFT -> APPROVED_SENT path.
+func seedRFQ(t *testing.T, ctx context.Context, tx pgx.Tx, org uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.rfq_requests (organization_id, resend_message_id, customer_email)
+		 VALUES ($1, $2, 'cust@example.test') RETURNING id`,
+		org.String(), "rfq-"+uuid.NewString()).Scan(&id))
+	return id
+}
+
+func seedQuote(t *testing.T, ctx context.Context, tx pgx.Tx, org, rfq uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.quotes (organization_id, rfq_id, quote_number, total_cost_brl, target_margin, final_price_brl, overall_confidence)
+		 VALUES ($1, $2, $3, 1000.00, 0.1800, 1180.00, 1.0000) RETURNING id`,
+		org.String(), rfq.String(), "Q-"+uuid.NewString()[:8]).Scan(&id))
+	return id
+}
+
+func seedQuoteLine(t *testing.T, ctx context.Context, tx pgx.Tx, org, quote uuid.UUID) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.quote_line_items (organization_id, quote_id, category, source_type,
+			original_currency, original_amount, fx_rate_used, cost_amount_brl, sell_amount_brl, line_confidence)
+		 VALUES ($1, $2, 'INTL_FREIGHT', 'MANUAL_OVERRIDE', 'USD', 100.00, 5.200000, 520.00, 600.00, 1.0000)
+		 RETURNING id`,
+		org.String(), quote.String()).Scan(&id))
+	return id
+}
+
+func approveQuote(t *testing.T, ctx context.Context, tx pgx.Tx, quote uuid.UUID) {
+	t.Helper()
+	mustExec(t, ctx, tx, `UPDATE app.quotes SET status = 'APPROVED_SENT' WHERE id = $1`, quote.String())
+}
+
+// seedBatchTariff inserts one PENDING_REVIEW batch plus one tariff row inside
+// an open tenant tx and returns both ids.
+func seedBatchTariff(t *testing.T, ctx context.Context, tx pgx.Tx, org uuid.UUID) (batch, tariff uuid.UUID) {
+	t.Helper()
+	require.NoError(t, tx.QueryRow(ctx,
+		`INSERT INTO app.private_tariff_batches (organization_id, source_type) VALUES ($1, 'CSV_UPLOAD') RETURNING id`,
+		org.String()).Scan(&batch))
+	require.NoError(t, tx.QueryRow(ctx, `
+		INSERT INTO app.private_tariffs (organization_id, batch_id, carrier_or_agent, modal,
+			origin_locode, dest_locode, equipment_or_unit, charge_category, charge_code, currency, net_amount,
+			valid_from, valid_until, search_description)
+		VALUES ($1, $2, 'CARRIER_A', 'FCL', 'BRSSZ', 'CNSHA', '40HC', 'OCEAN_FREIGHT', 'OCEAN', 'USD',
+			1000.00, '2026-01-01', '2026-12-31', 'FCL ocean freight BRSSZ-CNSHA') RETURNING id`,
+		org.String(), batch.String()).Scan(&tariff))
+	return batch, tariff
 }

@@ -24,10 +24,14 @@ db-reset:
 	$(MAKE) db-up
 
 # Runs infra/postgres/checks/roles.sql against the running db container (read-only assertions).
+# roles.sql gates the init-phase role model; platform-functions.sql asserts the
+# qp_admin/qp_app function-EXECUTE surface (vacuous-true before migrations,
+# real afterwards — safe to run in either phase).
 db-check:
 	docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < infra/postgres/checks/roles.sql
+	docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < infra/postgres/checks/platform-functions.sql
 
-# Proves each roles.sql assertion fails on a mutation; every mutation runs in a rolled-back transaction.
+# Proves each roles.sql/platform-functions.sql assertion fails on a mutation; every mutation runs in a rolled-back transaction.
 db-check-negative:
 	bash infra/postgres/checks/negative-tests.sh
 

@@ -260,6 +260,7 @@ jobs:
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
         ports:
           - 5432:5432
         # No /docker-entrypoint-initdb.d mount: service containers start before
@@ -277,6 +278,7 @@ jobs:
       # service env, so the literals are duplicated on purpose).
       PG_SUPER_DSN: postgresql://postgres:ci-pg-5c0ff3a1b7d24e98@localhost:5432/quotepilot
       QP_APP_DSN: postgresql://qp_app:ci-app-8e3a6b0f15d94c27@localhost:5432/quotepilot
+      QP_ADMIN_DSN: postgresql://qp_admin:ci-admin-23509f02e8c1a4f3@localhost:5432/quotepilot
       MIGRATOR_DSN: postgresql://qp_migrator:ci-migrator-2f7b9d14c8a04e61@localhost:5432/quotepilot
     steps:
       - name: Checkout
@@ -313,17 +315,23 @@ jobs:
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
           PGHOST: localhost
           PGPASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
         run: bash infra/postgres/init/01-roles-and-schemas.sh
 
       # roles.sql runs as the bootstrap superuser, exactly like `make db-check`.
+      # platform-functions.sql is skipped here on purpose: it asserts the
+      # post-migration EXECUTE surface and runs in the migrations job (its
+      # checks are vacuous-true before migrations exist anyway).
       - name: Role, schema, grant and extension assertions (roles.sql)
         run: psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
 
       # Proves every roles.sql assertion actually fails on a mutation; all
       # mutations run inside rolled-back transactions. QP_CHECK_DSN switches the
-      # script from `docker compose exec` (local) to a TCP DSN (CI).
+      # script from `docker compose exec` (local) to a TCP DSN (CI). Cases that
+      # mutate migration-created functions SKIP here and run for real in the
+      # migrations job's post-migrate negative step.
       - name: Negative tests (roles.sql assertions provably fail)
         env:
           QP_CHECK_DSN: ${{ env.PG_SUPER_DSN }}
@@ -372,12 +380,14 @@ jobs:
             echo "stub: no Go toolchain yet — check activates when apps/core-api/go.mod lands"
             exit 0
           fi
-          # POSTGRES_DSN unset would skip every DB test and pass green anyway
-          # (RequirePostgres skips); fail loudly instead.
-          if [ -z "${POSTGRES_DSN:-}" ]; then
-            echo "error: POSTGRES_DSN is not set — refusing to pass on skipped tests"
-            exit 1
-          fi
+          # Any unset DSN would silently skip DB tests (RequirePostgres and
+          # the v1-upgrade test skip); fail loudly instead.
+          for v in POSTGRES_DSN MIGRATOR_DSN PG_SUPER_DSN QP_ADMIN_DSN; do
+            if [ -z "${!v:-}" ]; then
+              echo "error: $v is not set — refusing to pass on skipped tests"
+              exit 1
+            fi
+          done
           cd apps/core-api && go test -count=1 ./...
 
   contracts-drift:
@@ -461,6 +471,7 @@ jobs:
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
         ports:
           - 5432:5432
         # Same as integration-test: no init-volume mount (service containers
@@ -499,14 +510,16 @@ jobs:
           echo "postgres did not become ready"
           exit 1
 
-      # Creates qp_migrator/qp_app and the app/river/extensions schemas —
-      # required before MIGRATOR_DSN can connect. Same step as integration-test.
+      # Creates qp_migrator/qp_app/qp_admin and the app/river/extensions
+      # schemas — required before MIGRATOR_DSN can connect. Same step as
+      # integration-test.
       - name: First-init script (roles, schemas, extensions)
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
           PGHOST: localhost
           PGPASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
         run: bash infra/postgres/init/01-roles-and-schemas.sh
@@ -581,6 +594,13 @@ jobs:
 
       # Cheap text guard; the real RLS-presence proof is roles.sql [M] (re-run
       # below) and the ADR-008 schema lint once the Go suite lands.
+      # DROP POLICY and NO FORCE are unconditional red flags. DISABLE is
+      # permitted only transaction-locally — e.g. the 0002 upgrade guard,
+      # which must relax RLS so the FK validation scan can see rows FORCE
+      # RLS hides from qp_migrator — and only when the SAME file re-enables
+      # and re-forces afterwards. The pairing check is mechanical;
+      # reviewers must still verify the disable lives inside one
+      # transaction with its restore.
       - name: Guard against dropped policies and weakened RLS
         run: |
           shopt -s nullglob
@@ -589,11 +609,21 @@ jobs:
             echo "stub: no migrations yet — nothing to guard"
             exit 0
           fi
-          if grep -niE 'DROP[[:space:]]+POLICY|DISABLE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|NO[[:space:]]+FORCE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY' "${files[@]}"; then
+          if grep -niE 'DROP[[:space:]]+POLICY|NO[[:space:]]+FORCE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY' "${files[@]}"; then
             echo "migrations: a migration drops a tenant policy or weakens RLS — forbidden (AGENTS.md rule 4, ADR-003)"
             exit 1
           fi
-          echo "no RLS-weakening statements found"
+          for f in "${files[@]}"; do
+            if ! awk 'BEGIN{IGNORECASE=1}
+                /DISABLE +ROW +LEVEL +SECURITY/ { disabled=NR }
+                disabled && /ENABLE +ROW +LEVEL +SECURITY/ { if (NR > disabled) enabled=1 }
+                disabled && /FORCE +ROW +LEVEL +SECURITY/  { if (NR > disabled) forced=1 }
+                END { exit (disabled && !(enabled && forced)) ? 1 : 0 }' "$f"; then
+              echo "migrations: $f disables RLS without re-enabling and re-forcing it in the same file — forbidden"
+              exit 1
+            fi
+          done
+          echo "no unpaired RLS-weakening statements found"
 
       # With real tables in place, roles.sql [M] proves every organization_id
       # table has ENABLE + FORCE RLS — the part grep cannot prove.
@@ -606,6 +636,24 @@ jobs:
             exit 0
           fi
           psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
+          # platform-functions.sql gates the qp_admin/qp_app EXECUTE surface —
+          # real only once the functions exist, so it lives here post-migrate.
+          psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/platform-functions.sql
+
+      # The function-denial cases SKIP pre-migration in the integration-test
+      # job (the platform_*/tenant functions do not exist yet); here they get
+      # their real proof on the migrated schema.
+      - name: Negative tests on the migrated schema
+        env:
+          QP_CHECK_DSN: ${{ env.PG_SUPER_DSN }}
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — nothing to re-check"
+            exit 0
+          fi
+          bash infra/postgres/checks/negative-tests.sh
 
   security:
     name: security

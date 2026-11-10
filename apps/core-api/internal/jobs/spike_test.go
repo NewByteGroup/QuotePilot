@@ -53,6 +53,10 @@ func TestSpikeRiverJobTenantContext(t *testing.T) {
 
 	orgA := uuid.New()
 	orgB := uuid.New()
+	// The worker writes inbound_messages under org A's tenant context; since
+	// 0002 that column is a real organizations FK, so the org rows must exist.
+	testenv.SeedOrganization(t, orgA, "jobs-org-a")
+	testenv.SeedOrganization(t, orgB, "jobs-org-b")
 
 	var logs lockedBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))

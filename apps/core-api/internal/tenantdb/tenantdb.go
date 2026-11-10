@@ -20,8 +20,10 @@ type DB struct {
 	pool *pgxpool.Pool
 }
 
-// Open connects as qp_app and refuses to return unless the ADR-002 section 4
-// startup assertions hold (role not privileged, owns nothing, RLS enforced).
+// Open connects and refuses to return unless the ADR-002 section 4 startup
+// assertions hold (role not privileged, owns nothing, RLS enforced). The DSN
+// names the role: qp_app on the tenant request path, qp_admin on the platform
+// path — the assertions are role-agnostic and qp_admin passes them too.
 //
 //	db, err := tenantdb.Open(ctx, os.Getenv("POSTGRES_DSN"))
 func Open(ctx context.Context, dsn string) (*DB, error) {
@@ -120,8 +122,17 @@ func assertOwnsNothing(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// platformRLSAllowlist names the Layer A tables that legitimately carry an
+// organization_id column without tenant RLS: they are read before a tenant
+// context exists and are reached only through SECURITY DEFINER functions
+// (spec 2026-11-10-data-model-v1.3 section 3, ADR-005 section 1, comment 9).
+// The same allowlist is enforced by roles.sql assertion [M] and by the
+// schema lint test — a new entry must land in all three on purpose.
+var platformRLSAllowlist = []string{"organization_memberships"}
+
 // assertRLSForced requires every app table carrying an organization_id column
-// to have RLS enabled AND forced (AGENTS.md rule 4).
+// to have RLS enabled AND forced (AGENTS.md rule 4), minus the explicit
+// Layer A allowlist above.
 func assertRLSForced(ctx context.Context, pool *pgxpool.Pool) error {
 	var joined string
 	err := pool.QueryRow(ctx, `
@@ -131,7 +142,8 @@ func assertRLSForced(ctx context.Context, pool *pgxpool.Pool) error {
 		  AND EXISTS (SELECT 1 FROM pg_attribute a
 		              WHERE a.attrelid = c.oid AND a.attname = 'organization_id'
 		                AND a.attnum > 0 AND NOT a.attisdropped)
-		  AND NOT (c.relrowsecurity AND c.relforcerowsecurity)`).Scan(&joined)
+		  AND NOT (c.relrowsecurity AND c.relforcerowsecurity)
+		  AND c.relname::text <> ALL($1::text[])`, platformRLSAllowlist).Scan(&joined)
 	if err != nil {
 		return fmt.Errorf("tenantdb: RLS enforcement check: %w", err)
 	}

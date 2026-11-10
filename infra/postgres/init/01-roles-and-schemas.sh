@@ -17,6 +17,7 @@ psql -v ON_ERROR_STOP=1 --single-transaction \
   --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'EOSQL'
 \getenv migrator_pw QP_MIGRATOR_PASSWORD
 \getenv app_pw QP_APP_PASSWORD
+\getenv admin_pw QP_ADMIN_PASSWORD
 
 -- 1. Supabase stand-ins. They mimic the Supabase-managed roles so the ADR-003
 -- section 2 grants check runs locally exactly as on hosted.
@@ -28,6 +29,14 @@ CREATE ROLE service_role NOLOGIN;
 -- 2. Application roles (ADR-003 section 1): neither owns tables nor bypasses RLS.
 CREATE ROLE qp_migrator LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'migrator_pw';
 CREATE ROLE qp_app LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'app_pw';
+-- qp_admin is the platform path's role (ADR-005): only it may EXECUTE the
+-- app.platform_* SECURITY DEFINER functions, including teardown. It gets NO
+-- table grants and NO default privileges — schema app stays closed and every
+-- function it calls carries an explicit GRANT in the migration (section 6
+-- model below). qp_app must never be able to delete a tenant: holding
+-- EXECUTE on platform_delete_organization made the exposed API role one
+-- in-function scope check away from wiping an org (Devin Review).
+CREATE ROLE qp_admin LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD :'admin_pw';
 
 -- 3. Database-level privileges.
 -- DEVIATION from ADR-003 sketch: PUBLIC has TEMPORARY by default, which lets
@@ -38,7 +47,7 @@ CREATE ROLE qp_app LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWOR
 -- CONNECT and TEMPORARY (NULL ACL), `template1` grants PUBLIC CONNECT only, and
 -- any per-test database created later must repeat the REVOKE.
 REVOKE TEMPORARY, CONNECT ON DATABASE :"dbname" FROM PUBLIC;
-GRANT CONNECT ON DATABASE :"dbname" TO qp_migrator, qp_app;
+GRANT CONNECT ON DATABASE :"dbname" TO qp_migrator, qp_app, qp_admin;
 
 -- 4. Extensions, created here as superuser (ADR-003 section 4: schema extensions).
 -- DEVIATION from ADR-003 sketch: ADR-003 section 4 does not say who creates
@@ -48,7 +57,9 @@ GRANT CONNECT ON DATABASE :"dbname" TO qp_migrator, qp_app;
 CREATE SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS vector SCHEMA extensions;
 CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA extensions;
-GRANT USAGE ON SCHEMA extensions TO qp_migrator, qp_app;
+-- qp_admin needs USAGE too: its search_path includes extensions and the pgx
+-- driver resolves the vector type at connect time (pgxvector.RegisterTypes).
+GRANT USAGE ON SCHEMA extensions TO qp_migrator, qp_app, qp_admin;
 
 -- 5. Schemas (ADR-003 section 1): owned by the migrator, closed to everyone else.
 CREATE SCHEMA app AUTHORIZATION qp_migrator;
@@ -58,6 +69,9 @@ REVOKE ALL ON SCHEMA river FROM PUBLIC;
 REVOKE ALL ON SCHEMA app, river FROM anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA app TO qp_app;
 GRANT USAGE ON SCHEMA river TO qp_app;
+-- qp_admin reaches schema app to EXECUTE its functions; river stays closed —
+-- the platform path never touches the job tables directly.
+GRANT USAGE ON SCHEMA app TO qp_admin;
 -- mimics hosted guard from ADR-003 section 2 (no-op locally, no default grant exists)
 ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator IN SCHEMA app REVOKE ALL ON TABLES FROM anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator IN SCHEMA app REVOKE ALL ON SEQUENCES FROM anon, authenticated, service_role;
@@ -97,4 +111,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator REVOKE EXECUTE ON FUNCTIONS FROM P
 -- `must be owner of index` log lines (Mission 3).
 ALTER ROLE qp_migrator SET search_path = app, extensions;
 ALTER ROLE qp_app SET search_path = app, extensions;
+ALTER ROLE qp_admin SET search_path = app, extensions;
 EOSQL
