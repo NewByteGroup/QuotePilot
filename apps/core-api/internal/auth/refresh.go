@@ -67,6 +67,16 @@ func (e *Endpoints) PostAuthRefresh(
 	if !ok {
 		return e.refreshUnauthenticated(), nil
 	}
+	return e.rotateGeneration(ctx, presented)
+}
+
+// rotateGeneration mints the successor opaque token and runs the store's
+// atomic exchange. A signing failure strands the client: the successor is
+// already committed, so replaying the presented generation is reuse and
+// kills the family — inert, never a leak (C2 review).
+func (e *Endpoints) rotateGeneration(
+	ctx context.Context, presented string,
+) (authapi.PostAuthRefreshResponseObject, error) {
 	successor, err := platform.NewOpaqueToken()
 	if err != nil {
 		return nil, fmt.Errorf("auth: mint refresh token: %w", err)

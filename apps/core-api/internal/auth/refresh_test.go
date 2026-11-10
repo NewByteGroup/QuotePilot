@@ -42,10 +42,14 @@ func requireClearedPair(t *testing.T, rec *httptest.ResponseRecorder) {
 	assert.Equal(t, "", access.Value)
 	assert.Equal(t, "/", access.Path)
 	assert.LessOrEqual(t, access.MaxAge, 0)
+	assert.True(t, access.HttpOnly)
+	assert.Equal(t, http.SameSiteLaxMode, access.SameSite)
 	refresh := findCookie(t, rec, "qp_refresh")
 	require.NotNil(t, refresh, "a rejection must expire the refresh cookie")
 	assert.Equal(t, "", refresh.Value)
 	assert.Equal(t, "/auth", refresh.Path)
+	assert.True(t, refresh.HttpOnly)
+	assert.Equal(t, http.SameSiteStrictMode, refresh.SameSite)
 	assert.LessOrEqual(t, refresh.MaxAge, 0)
 }
 
