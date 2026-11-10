@@ -321,12 +321,17 @@ jobs:
         run: bash infra/postgres/init/01-roles-and-schemas.sh
 
       # roles.sql runs as the bootstrap superuser, exactly like `make db-check`.
+      # platform-functions.sql is skipped here on purpose: it asserts the
+      # post-migration EXECUTE surface and runs in the migrations job (its
+      # checks are vacuous-true before migrations exist anyway).
       - name: Role, schema, grant and extension assertions (roles.sql)
         run: psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
 
       # Proves every roles.sql assertion actually fails on a mutation; all
       # mutations run inside rolled-back transactions. QP_CHECK_DSN switches the
-      # script from `docker compose exec` (local) to a TCP DSN (CI).
+      # script from `docker compose exec` (local) to a TCP DSN (CI). Cases that
+      # mutate migration-created functions SKIP here and run for real in the
+      # migrations job's post-migrate negative step.
       - name: Negative tests (roles.sql assertions provably fail)
         env:
           QP_CHECK_DSN: ${{ env.PG_SUPER_DSN }}
@@ -631,6 +636,9 @@ jobs:
             exit 0
           fi
           psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
+          # platform-functions.sql gates the qp_admin/qp_app EXECUTE surface —
+          # real only once the functions exist, so it lives here post-migrate.
+          psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/platform-functions.sql
 
       # The function-denial cases SKIP pre-migration in the integration-test
       # job (the platform_*/tenant functions do not exist yet); here they get

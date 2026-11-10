@@ -5,7 +5,7 @@ Local infrastructure: Docker Compose support files and database init scripts.
 ## What belongs here
 
 - `postgres/init/`: scripts run once on first volume init (roles, schemas).
-- `postgres/checks/`: plain SQL checks for roles, schemas, grants and extensions.
+- `postgres/checks/`: plain SQL checks — `roles.sql` for roles, schemas, grants and extensions (init-phase role model); `platform-functions.sql` for the qp_admin/qp_app function-EXECUTE surface (asserts the post-migration state, vacuous-true before migrations exist).
 - Other local-environment support files used by `docker-compose.yml`.
 
 ## What must never go here
@@ -17,8 +17,8 @@ Local infrastructure: Docker Compose support files and database init scripts.
 
 - `make db-up` (from the repo root): start Postgres 16 with pgvector. Needs `.env`.
 - `make db-reset`: destroy the local volume and re-run the init scripts.
-- Checks: `make db-check`, i.e. `docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/checks/roles.sql`. Each assertion raises an error naming the offenders.
-- `make db-check-negative`: applies deliberate mutations and expects `roles.sql` to fail on each. The negative tests wrap every mutation in a transaction that is never committed.
+- Checks: `make db-check` runs both check files the same way, e.g. `docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < infra/postgres/checks/roles.sql` (then `platform-functions.sql`). Each assertion raises an error naming the offenders.
+- `make db-check-negative`: applies deliberate mutations and expects the matching check file to fail on each — the script picks `roles.sql` or `platform-functions.sql` per case. Every mutation runs in a transaction that is never committed.
 
 ## Roles
 
@@ -29,7 +29,7 @@ the three tenant-facing functions only; `qp_admin` is the platform path (ADR-005
 role that may EXECUTE the `platform_*` SECURITY DEFINER functions, including
 `platform_delete_organization`. `qp_app` must never be able to delete a tenant, so the
 platform grants go to `qp_admin` exclusively; `qp_admin` itself holds no table or default
-privileges anywhere (roles.sql `[N]`).
+privileges anywhere (platform-functions.sql `[N]`).
 
 ## Gotcha: init runs once
 

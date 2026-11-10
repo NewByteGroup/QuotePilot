@@ -14,6 +14,7 @@ set -euo pipefail
 
 CHECKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROLES_SQL="$CHECKS_DIR/roles.sql"
+PLATFORM_SQL="$CHECKS_DIR/platform-functions.sql"
 cd "$CHECKS_DIR/../../.."  # repo root, where docker-compose.yml lives
 passed=0
 failed=0
@@ -37,20 +38,22 @@ run_psql_t() {
   fi
 }
 
-# case_raises FRAGMENT MUTATION_SQL: sets $out; returns 0 only if roles.sql raised FRAGMENT.
+# case_raises CHECK_FILE FRAGMENT MUTATION_SQL: sets $out; returns 0 only if
+# CHECK_FILE raised FRAGMENT. Function-privilege assertions live in
+# platform-functions.sql; everything else in roles.sql.
 case_raises() {
-  local fragment="$1" mutation="$2" rc=0 after
-  out="$({ printf 'BEGIN;\n%s\n\\warn QP_MUTATION_APPLIED\n' "$mutation"; cat "$ROLES_SQL"; printf '\nROLLBACK;\n'; } | run_psql 2>&1)" || rc=$?
+  local check_file="$1" fragment="$2" mutation="$3" rc=0 after
+  out="$({ printf 'BEGIN;\n%s\n\\warn QP_MUTATION_APPLIED\n' "$mutation"; cat "$check_file"; printf '\nROLLBACK;\n'; } | run_psql 2>&1)" || rc=$?
   CASE_RC=$rc
   [ "$rc" -ne 0 ] && [[ "$out" == *QP_MUTATION_APPLIED* ]] || return 1
   after="${out#*QP_MUTATION_APPLIED}"
   [[ "$after" == *"ERROR:  $fragment"* ]]
 }
 
-# run_case NAME EXPECTED_FRAGMENT MUTATION_SQL
-run_case() {
-  local name="$1" fragment="$2" mutation="$3" out CASE_RC=0
-  if case_raises "$fragment" "$mutation"; then
+# run_case_in CHECK_FILE NAME EXPECTED_FRAGMENT MUTATION_SQL
+run_case_in() {
+  local check_file="$1" name="$2" fragment="$3" mutation="$4" out CASE_RC=0
+  if case_raises "$check_file" "$fragment" "$mutation"; then
     echo "PASS  $name"; passed=$((passed + 1))
   else
     echo "FAIL  $name (exit=$CASE_RC, wanted non-zero and '$fragment' after the mutation)"
@@ -59,27 +62,32 @@ run_case() {
   fi
 }
 
-# run_case_if FUNC_SIG NAME EXPECTED_FRAGMENT MUTATION_SQL: like run_case, but
-# prints SKIP and counts neither pass nor fail when FUNC_SIG does not resolve.
-# The CI integration-test job runs this script BEFORE migrations, where the
-# platform_* and tenant-facing functions do not exist; the mutation would fail
-# with "function does not exist" before the marker, which the harness rightly
-# rejects as a FAIL. Those cases get their real proof post-migrate in the
-# migrations job.
+# run_case NAME EXPECTED_FRAGMENT MUTATION_SQL — against roles.sql.
+run_case() {
+  run_case_in "$ROLES_SQL" "$@"
+}
+
+# run_case_if CHECK_FILE FUNC_SIG NAME EXPECTED_FRAGMENT MUTATION_SQL: like
+# run_case_in, but prints SKIP and counts neither pass nor fail when FUNC_SIG
+# does not resolve. The CI integration-test job runs this script BEFORE
+# migrations, where the platform_* and tenant-facing functions do not exist;
+# the mutation would fail with "function does not exist" before the marker,
+# which the harness rightly rejects as a FAIL. Those cases get their real
+# proof post-migrate in the migrations job.
 run_case_if() {
-  local sig="$1" name="$2" found
-  shift 2
+  local check_file="$1" sig="$2" name="$3" found
+  shift 3
   found="$(printf "SELECT to_regprocedure('%s') IS NOT NULL;\n" "$sig" | run_psql_t)"
   if [ "$found" != "t" ]; then
     echo "SKIP  $name ($sig absent pre-migration)"; skipped=$((skipped + 1)); return 0
   fi
-  run_case "$name" "$@"
+  run_case_in "$check_file" "$name" "$@"
 }
 
 # run_selftest: the harness must REJECT an error raised by the mutation itself.
 run_selftest() {
   local out CASE_RC=0
-  if case_raises "[A] fake" "DO \$\$ BEGIN RAISE EXCEPTION '[A] fake'; END \$\$;"; then
+  if case_raises "$ROLES_SQL" "[A] fake" "DO \$\$ BEGIN RAISE EXCEPTION '[A] fake'; END \$\$;"; then
     echo "FAIL  selftest (harness accepted an error raised by the mutation)"
     failed=$((failed + 1)); failures+=("selftest")
   else
@@ -88,14 +96,18 @@ run_selftest() {
 }
 
 run_baseline() {
-  local out rc=0
-  out="$({ printf 'BEGIN;\n'; cat "$ROLES_SQL"; printf '\nROLLBACK;\n'; } | run_psql 2>&1)" || rc=$?
-  if [ "$rc" -eq 0 ] && [[ "$out" == *"all assertions passed"* ]]; then
-    echo "PASS  baseline (no mutation)"; passed=$((passed + 1))
-  else
-    echo "FAIL  baseline (exit=$rc)"; echo "$out" | sed 's/^/      /' | tail -n 8
-    failed=$((failed + 1)); failures+=("baseline")
-  fi
+  local f out rc name
+  for f in "$ROLES_SQL" "$PLATFORM_SQL"; do
+    rc=0
+    out="$({ printf 'BEGIN;\n'; cat "$f"; printf '\nROLLBACK;\n'; } | run_psql 2>&1)" || rc=$?
+    name="baseline ($(basename "$f"))"
+    if [ "$rc" -eq 0 ] && [[ "$out" == *"all assertions passed"* ]]; then
+      echo "PASS  $name"; passed=$((passed + 1))
+    else
+      echo "FAIL  $name (exit=$rc)"; echo "$out" | sed 's/^/      /' | tail -n 8
+      failed=$((failed + 1)); failures+=("$name")
+    fi
+  done
 }
 
 TBL='CREATE TABLE app.neg_t (id int, note text); ALTER TABLE app.neg_t OWNER TO qp_migrator;'
@@ -192,15 +204,18 @@ run_case "75 qp_admin USAGE on river"                "[F3]"  'GRANT USAGE ON SCH
 run_case "76 qp_admin CONNECT revoked"               "[G]"   "$DBCONN_ADMIN"
 run_case "77 qp_admin TEMPORARY on database"         "[G]"   "$DBTEMP_ADMIN"
 run_case "78 table owned by qp_admin"                "[D]"   'CREATE TABLE app.neg_t (id int); ALTER TABLE app.neg_t OWNER TO qp_admin;'
-run_case_if "app.platform_delete_organization(uuid)" "79 qp_app EXECUTE platform_delete_organization" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;'
-run_case_if "app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)" "80 qp_app EXECUTE platform_update_healing_session" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;'
-run_case_if "app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)" "81 qp_admin EXECUTE platform fn revoked"   "[N]"   'REVOKE EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) FROM qp_admin;'
-run_case_if "app.resolve_inbound_org(text)" "82 qp_admin EXECUTE tenant-facing fn"      "[N]"   'GRANT EXECUTE ON FUNCTION app.resolve_inbound_org(text) TO qp_admin;'
-run_case "83 table SELECT to qp_admin"               "[N]"   "$TBL GRANT SELECT ON app.neg_t TO qp_admin;"
-run_case "84 default EXECUTE in app to qp_admin"     "[N]"   "$ADP IN SCHEMA app GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
-run_case "85 column SELECT to qp_admin"              "[N]"   "$TBL GRANT SELECT (note) ON app.neg_t TO qp_admin;"
+# [N] assertions live in platform-functions.sql (the post-migration
+# function-privilege surface). Cases 79-82 also probe the function they mutate.
+run_case_if "$PLATFORM_SQL" "app.platform_delete_organization(uuid)" "79 qp_app EXECUTE platform_delete_organization" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;'
+run_case_if "$PLATFORM_SQL" "app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)" "80 qp_app EXECUTE platform_update_healing_session" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;'
+run_case_if "$PLATFORM_SQL" "app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)" "81 qp_admin EXECUTE platform fn revoked"   "[N]"   'REVOKE EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) FROM qp_admin;'
+run_case_if "$PLATFORM_SQL" "app.resolve_inbound_org(text)" "82 qp_admin EXECUTE tenant-facing fn"      "[N]"   'GRANT EXECUTE ON FUNCTION app.resolve_inbound_org(text) TO qp_admin;'
+run_case_in "$PLATFORM_SQL" "83 table SELECT to qp_admin"              "[N]"   "$TBL GRANT SELECT ON app.neg_t TO qp_admin;"
+run_case_in "$PLATFORM_SQL" "84 default EXECUTE in app to qp_admin"    "[N]"   "$ADP IN SCHEMA app GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
+run_case_in "$PLATFORM_SQL" "85 column SELECT to qp_admin"             "[N]"   "$TBL GRANT SELECT (note) ON app.neg_t TO qp_admin;"
+# 86 stays on roles.sql: [K1b] (global default ACLs) is a roles.sql assertion.
 run_case "86 global EXECUTE default to qp_admin"     "[K1b]" "$ADP GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
-run_case "87 river EXECUTE to qp_admin"              "[N]"   'CREATE FUNCTION river.neg_f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; REVOKE EXECUTE ON FUNCTION river.neg_f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION river.neg_f() TO qp_admin;'
+run_case_in "$PLATFORM_SQL" "87 river EXECUTE to qp_admin"             "[N]"   'CREATE FUNCTION river.neg_f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; REVOKE EXECUTE ON FUNCTION river.neg_f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION river.neg_f() TO qp_admin;'
 
 echo
 echo "negative tests: $passed passed, $failed failed, $skipped skipped"
