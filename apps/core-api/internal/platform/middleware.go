@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -21,6 +23,15 @@ const accessCookie = "qp_access"
 // Demanding a custom header — never a cookie or a query param — is part of
 // the CSRF posture: a cross-site form cannot set one (ADR-005 section 4).
 const orgHeader = "X-Organization-Id"
+
+// requestIDHeader carries the per-request correlation id in and out;
+// maxRequestIDLen bounds a client-supplied value — anything longer is
+// regenerated rather than truncated, so a shared prefix cannot alias two
+// requests into one log line.
+const (
+	requestIDHeader = "X-Request-Id"
+	maxRequestIDLen = 128
+)
 
 // Membership roles, verbatim from the app.membership_role enum (migration
 // 0002): GetMembership returns the enum text unchanged, so RequireRole
@@ -53,6 +64,20 @@ var (
 	orgCtxKey     = ctxKey{"org"}
 	roleCtxKey    = ctxKey{"role"}
 )
+
+// correlationKey is Correlation's context key: an unexported struct type
+// keyed by type identity alone, so code outside this package cannot plant
+// or overwrite the request id under it.
+type correlationKey struct{}
+
+// CorrelationID returns the request id Correlation stored on ctx; "" means
+// the middleware did not run — log it anyway rather than skip the line.
+//
+//	cid := platform.CorrelationID(r.Context())
+func CorrelationID(ctx context.Context) string {
+	id, _ := ctx.Value(correlationKey{}).(string)
+	return id
+}
 
 // UserID returns the sub claim Authenticate stored on ctx; ok=false means
 // the middleware did not run or the token failed to verify.
@@ -89,6 +114,37 @@ func OrgID(ctx context.Context) (uuid.UUID, bool) {
 func Role(ctx context.Context) (string, bool) {
 	role, ok := ctx.Value(roleCtxKey).(string)
 	return role, ok
+}
+
+// Correlation is the outermost layer: it plants one request id on the
+// context and echoes it on the response, so every diagnostic the request
+// emits — the membership and writeError warnings below — ties to one log
+// line. An inbound X-Request-Id is reused only when it is well-formed
+// (trims to non-empty, within maxRequestIDLen, free of control
+// characters); an absent or malformed one gets a fresh uuid, since echoing
+// an attacker-chosen string verbatim would let them smuggle log-forging
+// bytes into every line the request writes. CorrelationID is the read
+// side.
+//
+//	mux.Handle("GET /me", platform.Correlation(platform.Authenticate(cfg)(meHandler)))
+func Correlation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cid := inboundRequestID(r.Header.Get(requestIDHeader))
+		w.Header().Set(requestIDHeader, cid)
+		ctx := context.WithValue(r.Context(), correlationKey{}, cid)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// inboundRequestID returns a client-supplied id safe to reuse — non-empty
+// after trimming, inside the length cap, free of control characters — or
+// a fresh uuid for anything absent or malformed.
+func inboundRequestID(header string) string {
+	id := strings.TrimSpace(header)
+	if id == "" || len(id) > maxRequestIDLen || strings.IndexFunc(id, unicode.IsControl) >= 0 {
+		return uuid.NewString()
+	}
+	return id
 }
 
 // Authenticate requires a valid qp_access cookie and stores its sub/sid
@@ -180,6 +236,12 @@ func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.U
 func checkMembership(store *Store, w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) (uuid.UUID, string, bool) {
 	role, ok, err := store.GetMembership(r.Context(), userID, orgID)
 	if err != nil {
+		// The client sees the uniform 500 either way; the driver error
+		// itself must not vanish into it — log before writing. No user or
+		// tenant id rides along: the correlation id plus the wrapped error
+		// is enough to find the request in the logs.
+		slog.Default().WarnContext(r.Context(), "platform: membership lookup failed",
+			"correlation_id", CorrelationID(r.Context()), "error", err)
 		writeError(r.Context(), w, http.StatusInternalServerError, errInternal)
 		return uuid.Nil, "", false
 	}
@@ -258,10 +320,12 @@ func writeError(ctx context.Context, w http.ResponseWriter, status int, code str
 	w.WriteHeader(status)
 	if _, err := io.WriteString(w, `{"error":"`+code+`"}`); err != nil {
 		// The wire contract cannot change mid-response; the only thing left
-		// is the diagnostic, logged rather than discarded. WarnContext carries
-		// the request context so the correlation_id attribute the logging
-		// middleware plants is attached once that middleware lands.
+		// is the diagnostic, logged rather than discarded. correlation_id is
+		// passed explicitly — WarnContext does not turn ctx values into
+		// attributes. Rendering them (a global JSON handler) is cmd/server
+		// wiring, not this package's concern.
 		slog.Default().WarnContext(ctx, "platform: error response write failed",
+			"correlation_id", CorrelationID(ctx),
 			"status", status, "code", code, "error", err)
 	}
 }
