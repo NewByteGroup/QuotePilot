@@ -23,8 +23,10 @@ Postgres or object storage (ADR-001, ADR-003).
 
 Run from `apps/core-api`:
 
-- `make test`: unit tests (stub for now).
-- `make integration-test`: real-Postgres suite via `POSTGRES_DSN` (stub for now).
+- `make test`: unit tests (`go test -short ./...`; real-Postgres tests skip).
+- `make integration-test`: `go run ./cmd/migrate` then the full suite via `POSTGRES_DSN`.
+- `make generate`: `sqlc generate` (regenerates `internal/inbox/inboxdb`).
+- `make lint`: `gofmt -l` + `go vet` (+ `golangci-lint` when installed).
 
 The repo root `make test` runs all three apps.
 
