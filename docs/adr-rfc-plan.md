@@ -42,7 +42,7 @@ The planned import-and-export quote MVP covers FCL and AIR for costs payable by 
 | Export Incoterm allocation, fee basis, tariff availability and FX (RFC-001) | Quote only the requesting customer's payable costs; the existing import buyer-side matrix does not define export rules | Marcelo and pilot companies |
 | Hapag Stage 4A sequencing and offer validation (RFC-001) | Python connector in `ai-engine` under ADR-001; `core-api` validates and persists its untrusted output before deterministic pricing | Pedro and Marcelo |
 | LCL classification outside the v1.3 pricing MVP (ADR-006/RFC-004) | Approved classifier still has an LCL hint; no LCL quote may be priced in the MVP | Marcelo and Pedro |
-| PDF and email HTML renderer/template details (RFC-002) | Product spec v1.2 places rendering in `ai-engine`; Jinja2 and the PDF library still need the RFC-002 output-quality check | Amanda and Marcelo |
+| PDF and email HTML renderer/template details (RFC-002) | Rendering in `ai-engine/render` with Jinja2 + WeasyPrint is resolved; templates still need Marcelo and Amanda's detail work plus the RFC-002 output-quality check | Amanda and Marcelo |
 | Outbound sender identity (RFC-002) | Shared verified domain with the company as display name and `Reply-To` | Amanda and Marcelo |
 | Embedding evaluation (RFC-004) | ADR-006 approves `qwen/qwen3-embedding-8b` at 1024 dimensions; retrieval quality still needs evaluation | Pedro and Marcelo |
 | Consent to send tenant data to third-party APIs, including the decision-model vendor (RFC-004) | Unknown | Pilot companies |
