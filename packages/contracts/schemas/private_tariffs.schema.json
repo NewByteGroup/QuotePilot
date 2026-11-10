@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quotepilot.dev/contracts/private_tariffs.schema.json",
+  "title": "PrivateTariff",
+  "description": "One normalized private-tariff row as produced by the ai-engine tariff pipeline (ADR-006 section 3) for append-only insertion into app.private_tariffs by core-api. The natural key is (carrier_or_agent, modal, origin_locode, dest_locode, equipment_or_unit, charge_category, charge_code) per RFC-002 step 3; versioning (batch, is_removed) is applied by core-api and is not part of the wire shape.",
+  "type": "object",
+  "required": [
+    "carrier_or_agent",
+    "modal",
+    "charge_category",
+    "charge_code",
+    "origin_locode",
+    "dest_locode",
+    "equipment_or_unit",
+    "currency",
+    "net_amount",
+    "valid_from",
+    "valid_until",
+    "search_description"
+  ],
+  "properties": {
+    "carrier_or_agent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Carrier or agent issuing the rate, normalized (e.g. HAPAG, MAEU, or the origin-agent name as written by the tenant)."
+    },
+    "modal": { "$ref": "./common.schema.json#/$defs/FreightModal" },
+    "charge_category": {
+      "type": "string",
+      "enum": [
+        "OCEAN_FREIGHT",
+        "AIR_FREIGHT",
+        "SURCHARGE",
+        "ORIGIN_CHARGE",
+        "DESTINATION_CHARGE",
+        "TERMINAL",
+        "CUSTOMS",
+        "OTHER"
+      ],
+      "description": "Mirrors app.charge_category: the platform's coarse grouping. Only OCEAN_FREIGHT and the AIR_FREIGHT base are markup-eligible (RFC-001 v1.3); everything else passes through at cost."
+    },
+    "charge_code": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-text carrier-specific code (BAF, THC, FSC...). Deliberately not an enum: codes arrive from tariffs the platform does not control."
+    },
+    "origin_locode": { "$ref": "./common.schema.json#/$defs/Locode" },
+    "dest_locode": { "$ref": "./common.schema.json#/$defs/Locode" },
+    "equipment_or_unit": { "$ref": "./common.schema.json#/$defs/EquipmentOrUnit" },
+    "currency": { "$ref": "./common.schema.json#/$defs/Iso4217Currency" },
+    "net_amount": {
+      "$ref": "./common.schema.json#/$defs/DecimalString",
+      "description": "Net rate per unit (per container for FCL, per chargeable kg for AIR base freight, per unit otherwise). Never a JSON float."
+    },
+    "min_amount": {
+      "$ref": "./common.schema.json#/$defs/DecimalString",
+      "description": "Minimum charge applied instead of net_amount when the computed amount is lower (AIR: max(min_amount, chargeable_kg x net_amount))."
+    },
+    "valid_from": { "$ref": "./common.schema.json#/$defs/IsoDate" },
+    "valid_until": {
+      "$ref": "./common.schema.json#/$defs/IsoDate",
+      "description": "Inclusive. core-api enforces valid_from <= valid_until as a deterministic check."
+    },
+    "search_description": {
+      "type": "string",
+      "description": "Canonical service description embedded for retrieval ranking (codes filter first; vectors only rank valid rows)."
+    },
+    "embedding": { "$ref": "./common.schema.json#/$defs/Embedding" },
+    "embedding_model": { "type": "string" },
+    "source": {
+      "type": "object",
+      "description": "PROPOSED EXTENSION (not in ADR-006's field list): provenance of this row. Needed because the decided ingestion path is the agent/carrier website via Firecrawl, not sheet uploads; app.tariff_source_type ('CSV_UPLOAD','RESEND_INBOUND') has no web value yet.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["CSV_UPLOAD", "RESEND_INBOUND", "FIRECRAWL_PUBLIC", "MANUAL"],
+          "description": "Mirrors app.tariff_source_type plus proposed web values. FIRECRAWL_PUBLIC requires source.ref and source.snapshot_id."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Source locator: URL for FIRECRAWL_PUBLIC, filename for CSV_UPLOAD, resend_message_id for RESEND_INBOUND."
+        },
+        "snapshot_id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Pinned public_snapshot the row was extracted from; makes the tariff reproducible (rule 9)."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

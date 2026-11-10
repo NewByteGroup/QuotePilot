@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quotepilot.dev/contracts/extraction_result.schema.json",
+  "title": "ExtractionResult",
+  "description": "Output of the ai-engine Stage 3 extraction pipeline (ADR-006) returned to core-api. Per-field envelopes carry the model's value, evidence and audited confidence; core-api runs the deterministic checks of RFC-004 section 4 and computes each field's status. Untrusted input: validated again in core before anything is persisted.",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "classification",
+    "fields",
+    "reference_dataset_version",
+    "model_info"
+  ],
+  "properties": {
+    "contract_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Semver of this schema. Bumped on any contract change; recorded on the persisted extraction."
+    },
+    "classification": {
+      "type": "object",
+      "description": "Stage 2 output from the Jev decision model. Label plus per-label calibrated probabilities; thresholds that map probabilities to routing live as versioned code.",
+      "required": ["label", "probabilities"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "enum": ["RFQ", "TARIFF_UPDATE", "OTHER"],
+          "description": "Mirrors app.rfq_kind. OTHER is routed to status IGNORED."
+        },
+        "probabilities": {
+          "type": "object",
+          "required": ["RFQ", "TARIFF_UPDATE", "OTHER"],
+          "properties": {
+            "RFQ": { "type": "number", "minimum": 0, "maximum": 1 },
+            "TARIFF_UPDATE": { "type": "number", "minimum": 0, "maximum": 1 },
+            "OTHER": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "model": {
+          "type": "string",
+          "description": "Pinned classifier model id (e.g. typesafe/jev-1.14)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "fields": {
+      "type": "object",
+      "description": "One FieldValue envelope per extractable field. All fields optional: a missing key means the extractor found nothing, which core-api records as REQUIRED_FIELD_MISSING when the field is required.",
+      "properties": {
+        "incoterm": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Incoterm." },
+        "modal": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: FreightModal." },
+        "origin_locode": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Locode." },
+        "origin_text": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: raw place text as written (display + audit)." },
+        "dest_locode": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Locode." },
+        "dest_text": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: raw place text as written." },
+        "equipment_or_unit": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: EquipmentOrUnit." },
+        "quantity": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString; unit count for FCL equipment or handling units." },
+        "gross_weight_kg": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString in kilograms." },
+        "volume_m3": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString in cubic meters." },
+        "cargo_value_amount": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString; declared cargo value, base of the CIF customs value." },
+        "cargo_value_currency": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Iso4217Currency." },
+        "ncm": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: 8-digit NCM code (optional field; checked against the NCM reference table)." },
+        "ready_date": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: IsoDate; cargo-ready date (optional)." }
+      },
+      "additionalProperties": false
+    },
+    "search_description": {
+      "type": "string",
+      "description": "Canonical service description synthesized for tariff retrieval (embedded for ranking among already-valid rows; filtering is always on codes first — RFC-001 step 3)."
+    },
+    "embedding": { "$ref": "./common.schema.json#/$defs/Embedding" },
+    "embedding_model": {
+      "type": "string",
+      "description": "Pinned embedding model id (qwen/qwen3-embedding-8b in the MVP)."
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+          "code": { "$ref": "./common.schema.json#/$defs/ReasonCode" },
+          "field": { "type": "string", "description": "Field key inside `fields`, when the warning is field-scoped." },
+          "message": { "type": "string", "description": "Developer-facing note, never shown to customers unvalidated." }
+        },
+        "additionalProperties": false
+      }
+    },
+    "reference_dataset_version": {
+      "type": "string",
+      "description": "Version of the bundled reference dataset (UN/LOCODE, NCM, Incoterms) the extractor normalized against. core-api keeps the same version to avoid drift (RFC-004 section 4)."
+    },
+    "model_info": {
+      "type": "object",
+      "description": "Pinned model versions for audit and re-evaluation (RFC-004 section 6.3).",
+      "required": ["extractor_model", "auditor_model"],
+      "properties": {
+        "extractor_model": { "type": "string", "description": "e.g. anthropic/claude-haiku-5.5." },
+        "auditor_model": { "type": "string", "description": "e.g. perplexity/pplx-decider-v1.2." },
+        "prompt_pack_version": { "type": "string", "description": "Version of the extraction prompt pack, when prompts are versioned." },
+        "thresholds_version": { "type": "string", "description": "Version of the routing/status thresholds in force." }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

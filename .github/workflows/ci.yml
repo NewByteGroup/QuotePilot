@@ -149,8 +149,11 @@ jobs:
             exit 0
           fi
           # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3.
+          # packages/contracts also holds plain JSON Schema files; lint only
+          # files that actually declare an OpenAPI 3.x document.
           find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print0 \
-            | xargs -0 -n1 npx --yes @redocly/cli@2.76.0 lint
+            | xargs -0 grep -lEZ 'openapi"?\s*:\s*"?3\.' \
+            | xargs -0 -r -n1 npx --yes @redocly/cli@2.76.0 lint
 
   test:
     name: test
