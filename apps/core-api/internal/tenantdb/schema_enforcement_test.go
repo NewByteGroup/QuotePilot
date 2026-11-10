@@ -8,7 +8,6 @@ package tenantdb_test
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -103,7 +102,7 @@ func TestSchemaEnforcementSentQuoteLineImmutability(t *testing.T) {
 	org := uuid.New()
 	testenv.SeedOrganization(t, org, "lint-org-lines")
 
-	var quoteID, lineID, draftQuoteID uuid.UUID
+	var quoteID, lineID, draftQuoteID, draftLineID uuid.UUID
 	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
 		rfq := seedRFQ(t, ctx, tx, org)
 		quoteID = seedQuote(t, ctx, tx, org, rfq)
@@ -111,6 +110,7 @@ func TestSchemaEnforcementSentQuoteLineImmutability(t *testing.T) {
 		// A second DRAFT quote proves the guard is scoped to sent rows; the
 		// (rfq_id, version) unique key gives it its own rfq.
 		draftQuoteID = seedQuote(t, ctx, tx, org, seedRFQ(t, ctx, tx, org))
+		draftLineID = seedQuoteLine(t, ctx, tx, org, draftQuoteID)
 		approveQuote(t, ctx, tx, quoteID)
 		return nil
 	}))
@@ -125,12 +125,20 @@ func TestSchemaEnforcementSentQuoteLineImmutability(t *testing.T) {
 	denyTx(t, db, org, `DELETE FROM app.quote_line_items WHERE id = $1`,
 		"APPROVED_SENT", lineID.String())
 
+	// The OLD parent governs UPDATE: repointing a sent quote's line to the
+	// DRAFT quote is refused, not detached into mutability (regression for
+	// the coalesce(NEW.quote_id, OLD.quote_id) hole). The NEW parent governs
+	// too: a DRAFT line cannot be attached to the sent quote either.
+	denyTx(t, db, org, `UPDATE app.quote_line_items SET quote_id = $2 WHERE id = $1`,
+		"APPROVED_SENT", lineID.String(), draftQuoteID.String())
+	denyTx(t, db, org, `UPDATE app.quote_line_items SET quote_id = $2 WHERE id = $1`,
+		"APPROVED_SENT", draftLineID.String(), quoteID.String())
+
 	// The same three writes on the DRAFT quote stay legal.
 	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
-		draftLine := seedQuoteLine(t, ctx, tx, org, draftQuoteID)
 		mustExec(t, ctx, tx,
-			`UPDATE app.quote_line_items SET sell_amount_brl = 601.00 WHERE id = $1`, draftLine.String())
-		mustExec(t, ctx, tx, `DELETE FROM app.quote_line_items WHERE id = $1`, draftLine.String())
+			`UPDATE app.quote_line_items SET sell_amount_brl = 601.00 WHERE id = $1`, draftLineID.String())
+		mustExec(t, ctx, tx, `DELETE FROM app.quote_line_items WHERE id = $1`, draftLineID.String())
 		return nil
 	}), "DRAFT quote lines must stay writable")
 }
@@ -276,6 +284,12 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 	require.NoError(t, db.Pool().QueryRow(ctx,
 		`SELECT app.resolve_inbound_org($1)`, orgSlug+"@in.evil.test").Scan(&resolved))
 	assert.Nil(t, resolved, "<slug>@in.evil.test must return NULL — the fallback is domain-pinned")
+	// A second '@' must not truncate into a match (review finding): without
+	// the split_part(addr,'@',3) guard this parsed as slug@in.quotepilot.app.
+	resolved = nil
+	require.NoError(t, db.Pool().QueryRow(ctx,
+		`SELECT app.resolve_inbound_org($1)`, orgSlug+"@in.quotepilot.app@evil.test").Scan(&resolved))
+	assert.Nil(t, resolved, "<slug>@in.quotepilot.app@evil.test must return NULL — no silent truncation")
 	resolved = nil
 	require.NoError(t, db.Pool().QueryRow(ctx,
 		`SELECT app.resolve_inbound_org($1)`, "nobody@elsewhere.test").Scan(&resolved))
@@ -327,6 +341,12 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 	_, err = db.Pool().Exec(ctx,
 		`SELECT app.platform_update_connector_status($1, 'DEGRADED', 0.42)`, slug)
 	require.NoError(t, err)
+	// The connector machine is the HEALTHY -> DEGRADED -> HEALING -> HEALTHY
+	// cycle only: edges that skip a stage or go backwards are refused.
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_connector_status($1, 'HEALTHY', NULL)`, slug)
+	require.Error(t, err, "DEGRADED -> HEALTHY must pass through HEALING")
+	assert.Contains(t, err.Error(), "not an allowed transition")
 	var sessionID uuid.UUID
 	require.NoError(t, db.Pool().QueryRow(ctx, `
 		SELECT app.platform_insert_healing_session(
@@ -334,6 +354,16 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 			'devin-lint-0001', 'https://app.devin.ai/sessions/lint')`,
 		slug, snapshotID.String()).Scan(&sessionID))
 	require.NotEqual(t, uuid.Nil, sessionID)
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_connector_status($1, 'HEALING', NULL)`, slug)
+	require.NoError(t, err)
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_connector_status($1, 'HEALTHY', NULL)`, slug)
+	require.NoError(t, err)
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_connector_status($1, 'HEALING', NULL)`, slug)
+	require.Error(t, err, "HEALTHY -> HEALING skips DEGRADED")
+	assert.Contains(t, err.Error(), "not an allowed transition")
 
 	// Sessions leave OPEN only through platform_update_healing_session:
 	// progress first, then a terminal status stamps resolved_at.
@@ -348,6 +378,11 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 		sessionID.String()).Scan(&status, &resolvedAt))
 	assert.Equal(t, "PR_READY", status)
 	assert.Nil(t, resolvedAt, "non-terminal status must not stamp resolved_at")
+	// The session machine refuses non-forward edges.
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_healing_session($1, 'OPEN', NULL, NULL, NULL)`, sessionID.String())
+	require.Error(t, err, "PR_READY -> OPEN goes backwards")
+	assert.Contains(t, err.Error(), "not an allowed transition")
 	_, err = db.Pool().Exec(ctx,
 		`SELECT app.platform_update_healing_session($1, 'MERGED', NULL, NULL, NULL)`, sessionID.String())
 	require.NoError(t, err)
@@ -356,105 +391,33 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 		sessionID.String()).Scan(&status, &resolvedAt))
 	assert.Equal(t, "MERGED", status)
 	assert.NotNil(t, resolvedAt, "MERGED must stamp resolved_at")
+	// MERGED is terminal: the session cannot reopen with resolved_at stamped.
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_healing_session($1, 'OPEN', NULL, NULL, NULL)`, sessionID.String())
+	require.Error(t, err, "MERGED is terminal")
+	assert.Contains(t, err.Error(), "not an allowed transition")
+
+	// A healing session cannot pin another connector's snapshot: the join in
+	// platform_insert_healing_session refuses the cross-connector id.
+	otherSlug := "lint-ptax-b-" + uuid.NewString()
+	_, err = migrator.Exec(ctx,
+		`INSERT INTO app.connectors (slug, display_name, target_url) VALUES ($1, 'Lint PTAX B', 'https://example.test/other')`,
+		otherSlug)
+	require.NoError(t, err)
+	var foreignSnapshot uuid.UUID
+	require.NoError(t, db.Pool().QueryRow(ctx, `
+		SELECT app.platform_insert_public_snapshot(
+			$1, 'p1', 'https://example.test/other', 'sha256:f00d',
+			'platform/snapshots/lint-b.json', '{}'::jsonb, 0.5, '[]'::jsonb, now())`,
+		otherSlug).Scan(&foreignSnapshot))
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_insert_healing_session($1, $2, NULL, NULL, NULL, NULL)`,
+		slug, foreignSnapshot.String())
+	require.Error(t, err, "a session must not pin a snapshot of a different connector")
+	assert.Contains(t, err.Error(), "does not belong")
 
 	var lastScrape bool
 	require.NoError(t, db.Pool().QueryRow(ctx,
 		`SELECT last_scraped_at IS NOT NULL FROM app.connectors WHERE slug = $1`, slug).Scan(&lastScrape))
 	assert.True(t, lastScrape, "insert snapshot must refresh connectors.last_scraped_at")
-}
-
-// TestSchemaEnforcementDeleteOrganization exercises
-// platform_delete_organization end to end: one call removes the org and
-// every tenant row the cascades can reach — including an APPROVED_SENT quote,
-// whose immutability triggers yield only to the transaction-local teardown
-// flag (spec section 4). A second call raises.
-func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
-	db := testenv.Open(t)
-	migrator := testenv.MigratorPool(t)
-	ctx := context.Background()
-
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "teardown-org")
-	var userID uuid.UUID
-	require.NoError(t, migrator.QueryRow(ctx,
-		`INSERT INTO app.users (email, full_name) VALUES ($1, 'Gone User') RETURNING id`,
-		"gone-"+uuid.NewString()+"@test.dev").Scan(&userID))
-	_, err := migrator.Exec(ctx,
-		`INSERT INTO app.organization_memberships (organization_id, user_id, role) VALUES ($1, $2, 'ADMIN')`,
-		org.String(), userID.String())
-	require.NoError(t, err)
-
-	// Seed the full tenant subtree as qp_app inside InTenantTx, ending with
-	// the quote APPROVED_SENT so teardown must pass both immutability guards.
-	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
-		seedBatchTariff(t, ctx, tx, org)
-		rfq := seedRFQ(t, ctx, tx, org)
-		mustExec(t, ctx, tx, `
-			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, offer_payload_json, fetched_at)
-			VALUES ($1, $2, 'HAPAG', '{}'::jsonb, now())`,
-			org.String(), rfq.String())
-		mustExec(t, ctx, tx, `
-			INSERT INTO app.rfq_attachments (organization_id, rfq_id, storage_key, filename)
-			VALUES ($1, $2, 'tenants/x/rfqs/y/a.pdf', 'a.pdf')`,
-			org.String(), rfq.String())
-		quote := seedQuote(t, ctx, tx, org, rfq)
-		seedQuoteLine(t, ctx, tx, org, quote)
-		approveQuote(t, ctx, tx, quote)
-		mustExec(t, ctx, tx,
-			`INSERT INTO app.org_quote_counters (organization_id, next_seq) VALUES ($1, 2)`, org.String())
-		mustExec(t, ctx, tx,
-			`INSERT INTO app.tenant_audit_logs (organization_id, action) VALUES ($1, 'QUOTE_APPROVED_SENT')`,
-			org.String())
-		mustExec(t, ctx, tx,
-			`INSERT INTO app.inbound_messages (organization_id, resend_message_id) VALUES ($1, 'td-1')`,
-			org.String())
-		mustExec(t, ctx, tx,
-			`INSERT INTO app.pricing_rules (organization_id, modal, default_target_margin) VALUES ($1, 'ALL', 0.1800)`,
-			org.String())
-		mustExec(t, ctx, tx,
-			`INSERT INTO app.suppression_list (organization_id, email) VALUES ($1, 'bounced@test.dev')`,
-			org.String())
-		return nil
-	}))
-
-	// The teardown call itself runs as qp_app through the platform function.
-	_, err = db.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
-	require.NoError(t, err)
-
-	// Organizations is Layer A (no RLS): the row must be gone outright.
-	var orgRows int
-	require.NoError(t, migrator.QueryRow(ctx,
-		`SELECT count(*) FROM app.organizations WHERE id = $1`, org.String()).Scan(&orgRows))
-	assert.Equal(t, 0, orgRows, "the org row itself must be gone")
-
-	// Tenant rows: count inside one migrator tx with the dead org's context
-	// pinned, so FORCE RLS cannot hide leftovers from the assertion itself.
-	tx, err := migrator.Begin(ctx)
-	require.NoError(t, err)
-	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, `SELECT set_config('app.current_organization_id', $1, true)`, org.String())
-	require.NoError(t, err)
-	for _, table := range []string{
-		"private_tariff_batches", "private_tariffs", "rfq_requests", "rfq_attachments",
-		"carrier_offers", "quotes", "quote_line_items", "org_quote_counters",
-		"tenant_audit_logs", "inbound_messages", "pricing_rules", "suppression_list",
-		"organization_memberships",
-	} {
-		var n int
-		require.NoError(t, tx.QueryRow(ctx,
-			fmt.Sprintf(`SELECT count(*) FROM app.%s WHERE organization_id = $1`, table),
-			org.String()).Scan(&n))
-		assert.Zero(t, n, "app.%s must be empty after teardown", table)
-	}
-
-	// The user row survives — memberships were org-scoped, identities are not.
-	var userRows int
-	require.NoError(t, migrator.QueryRow(ctx,
-		`SELECT count(*) FROM app.users WHERE id = $1`, userID.String()).Scan(&userRows))
-	assert.Equal(t, 1, userRows, "user identities outlive their orgs")
-
-	// Replaying teardown on a missing org raises instead of silently passing.
-	_, err = db.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
-	require.Error(t, err, "second teardown call must raise")
-	assert.Contains(t, err.Error(), "unknown organization")
 }

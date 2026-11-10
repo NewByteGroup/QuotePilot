@@ -54,7 +54,13 @@ CREATE TABLE app.organizations (
     outbound_from_name text NOT NULL,
     outbound_reply_to text NOT NULL,
     branding_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    -- Slug and alias are resolved case-insensitively (resolve_inbound_org
+    -- lower()s the recipient), so a case-variant "duplicate" would be an
+    -- ambiguity the UNIQUE cannot see. Only lowercase may be stored; the
+    -- Down drops these with the table.
+    CHECK (slug = lower(slug)),
+    CHECK (inbound_email_alias = lower(inbound_email_alias))
 );
 
 CREATE TABLE app.users (
@@ -63,7 +69,10 @@ CREATE TABLE app.users (
     full_name text,
     password_hash_or_magic_sub text,
     is_platform_admin boolean NOT NULL DEFAULT false,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    -- list_memberships_for_email compares lower(email): an uppercase variant
+    -- could shadow another account's lowercase address.
+    CHECK (email = lower(email))
 );
 
 -- Carries organization_id but is Layer A: queried before tenant context exists
@@ -630,6 +639,13 @@ BEGIN
     IF local_part = '' OR domain_part = '' THEN
         RETURN NULL;
     END IF;
+    -- A second '@' makes the recipient malformed; without this, split_part
+    -- truncates silently and 'victim@in.quotepilot.app@evil.test' resolves as
+    -- 'victim@in.quotepilot.app'. Refused before either lookup so the
+    -- reconstructed local@domain can never alias- or slug-match a victim org.
+    IF split_part(addr, '@', 3) <> '' THEN
+        RETURN NULL;
+    END IF;
     local_part := split_part(local_part, '+', 1);
     addr := local_part || '@' || domain_part;
 
@@ -756,15 +772,29 @@ CREATE FUNCTION app.platform_update_connector_status(
     SECURITY DEFINER
     SET search_path = app
 AS $fn$
+DECLARE
+    v_current app.connector_status;
 BEGIN
+    SELECT c.status INTO v_current
+    FROM app.connectors AS c
+    WHERE c.slug = p_connector_slug;
+    IF v_current IS NULL THEN
+        RAISE EXCEPTION 'platform_update_connector_status: unknown connector slug %', p_connector_slug;
+    END IF;
+    -- One-way cycle only: HEALTHY -> DEGRADED -> HEALING -> HEALTHY. Any
+    -- other edge (skipping a stage, going backwards, same-status) is refused
+    -- so a connector cannot leave DEGRADED without a healing pass.
+    IF NOT ((v_current = 'HEALTHY'  AND p_status = 'DEGRADED')
+         OR (v_current = 'DEGRADED' AND p_status = 'HEALING')
+         OR (v_current = 'HEALING'  AND p_status = 'HEALTHY')) THEN
+        RAISE EXCEPTION 'platform_update_connector_status: % -> % is not an allowed transition', v_current, p_status;
+    END IF;
+
     UPDATE app.connectors AS c
     SET status = p_status,
         confidence_score = coalesce(p_confidence_score, c.confidence_score),
         updated_at = now()
     WHERE c.slug = p_connector_slug;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'platform_update_connector_status: unknown connector slug %', p_connector_slug;
-    END IF;
 END;
 $fn$;
 
@@ -795,6 +825,18 @@ BEGIN
     SELECT c.id INTO v_connector_id FROM app.connectors AS c WHERE c.slug = p_connector_slug;
     IF v_connector_id IS NULL THEN
         RAISE EXCEPTION 'platform_insert_healing_session: unknown connector slug %', p_connector_slug;
+    END IF;
+
+    -- The pinned failing snapshot must belong to the connector being healed:
+    -- healing_sessions has no composite FK, so without this join the session
+    -- could pin another connector's snapshot (review finding).
+    IF p_failing_snapshot_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1
+        FROM app.public_snapshots AS s
+        WHERE s.id = p_failing_snapshot_id
+          AND s.connector_id = v_connector_id
+    ) THEN
+        RAISE EXCEPTION 'platform_insert_healing_session: snapshot % does not belong to connector %', p_failing_snapshot_id, p_connector_slug;
     END IF;
 
     INSERT INTO app.healing_sessions AS h (
@@ -830,7 +872,23 @@ CREATE FUNCTION app.platform_update_healing_session(
     SECURITY DEFINER
     SET search_path = app
 AS $fn$
+DECLARE
+    v_current app.healing_status;
 BEGIN
+    SELECT h.status INTO v_current
+    FROM app.healing_sessions AS h
+    WHERE h.id = p_session_id;
+    IF v_current IS NULL THEN
+        RAISE EXCEPTION 'platform_update_healing_session: unknown session %', p_session_id;
+    END IF;
+    -- OPEN -> PR_READY -> MERGED|FAILED (OPEN may resolve directly); MERGED
+    -- and FAILED are terminal. The map is what keeps a resolved session from
+    -- reopening with resolved_at still stamped (review finding).
+    IF NOT ((v_current = 'OPEN'     AND p_status IN ('PR_READY', 'MERGED', 'FAILED'))
+         OR (v_current = 'PR_READY' AND p_status IN ('MERGED', 'FAILED'))) THEN
+        RAISE EXCEPTION 'platform_update_healing_session: % -> % is not an allowed transition', v_current, p_status;
+    END IF;
+
     UPDATE app.healing_sessions AS h
     SET status = p_status,
         github_pr_url = coalesce(p_github_pr_url, h.github_pr_url),
@@ -841,9 +899,6 @@ BEGIN
             ELSE h.resolved_at
         END
     WHERE h.id = p_session_id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'platform_update_healing_session: unknown session %', p_session_id;
-    END IF;
 END;
 $fn$;
 
@@ -862,7 +917,12 @@ GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_
 --     suite: an unscoped migrator sees zero tenant rows).
 --   app.tenant_teardown — tells block_approved_quote_mutation and
 --     block_sent_quote_line_mutation this is the deliberate teardown path, so
---     the sent-quote immutability rules do not block the cascade.
+--     the sent-quote immutability rules do not block the cascade. The flag
+--     alone is forgeable (any role can set_config), so both triggers also
+--     require current_user <> session_user — true only inside a SECURITY
+--     DEFINER body like this one, where the effective user is qp_migrator.
+--     qp_app holds no role memberships (init section 2, roles.sql [B1]), so
+--     SET ROLE cannot fake the difference either.
 -- set_config(..., true) is transaction-local, so neither flag can leak into
 -- the pooled session the call rode in on.
 -- +goose StatementBegin
@@ -908,10 +968,15 @@ CREATE FUNCTION app.block_approved_quote_mutation() RETURNS trigger
     LANGUAGE plpgsql
 AS $fn$
 BEGIN
-    -- Teardown first: platform_delete_organization is the only writer of this
-    -- GUC (transaction-local, inside its SECURITY DEFINER body), and the
-    -- cascade must not be stopped by immutability.
-    IF current_setting('app.tenant_teardown', true) = 'on' THEN
+    -- Teardown first, but the flag alone is forgeable: qp_app can run
+    -- set_config('app.tenant_teardown', 'on', true) in its own transaction.
+    -- The bypass therefore also requires current_user <> session_user, which
+    -- holds only while executing inside a SECURITY DEFINER function
+    -- (platform_delete_organization, owned by qp_migrator). A direct qp_app
+    -- write has current_user = session_user = qp_app and can satisfy neither
+    -- side of the difference.
+    IF current_setting('app.tenant_teardown', true) = 'on'
+       AND current_user <> session_user THEN
         IF TG_OP = 'DELETE' THEN
             RETURN OLD;
         END IF;
@@ -953,32 +1018,51 @@ CREATE FUNCTION app.block_sent_quote_line_mutation() RETURNS trigger
     LANGUAGE plpgsql
 AS $fn$
 DECLARE
-    parent_status app.quote_status;
+    old_parent_status app.quote_status;
+    new_parent_status app.quote_status;
 BEGIN
-    IF current_setting('app.tenant_teardown', true) = 'on' THEN
+    -- Same teardown contract as block_approved_quote_mutation: the flag must
+    -- ride inside a SECURITY DEFINER context (current_user <> session_user)
+    -- or qp_app could forge it with a bare set_config.
+    IF current_setting('app.tenant_teardown', true) = 'on'
+       AND current_user <> session_user THEN
         IF TG_OP = 'DELETE' THEN
             RETURN OLD;
         END IF;
         RETURN NEW;
     END IF;
-    -- NEW is unassigned on DELETE, OLD on INSERT; coalesce picks the live one.
-    SELECT q.status INTO parent_status
+    -- UPDATE/DELETE is governed by the OLD parent: a sent (or retired)
+    -- quote's lines can never leave it. Checking coalesce(NEW, OLD) here
+    -- would let UPDATE repoint a sent quote's line to a DRAFT parent and
+    -- detach it into mutability (review finding).
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        SELECT q.status INTO old_parent_status
+        FROM app.quotes AS q
+        WHERE q.id = OLD.quote_id;
+        IF old_parent_status IN ('APPROVED_SENT', 'SUPERSEDED') THEN
+            RAISE EXCEPTION 'quote % is %: line % is not allowed (rule 9)',
+                OLD.quote_id, old_parent_status, TG_OP;
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+            -- A NULL parent means the cascade already removed it — the
+            -- delete is legitimate teardown of a DRAFT subtree, not a
+            -- mutation.
+            RETURN OLD;
+        END IF;
+    END IF;
+    -- INSERT/UPDATE is governed by the NEW parent: a line can neither attach
+    -- to a sent quote nor to one the tenant cannot see (a missing row under
+    -- RLS means a cross-tenant quote_id).
+    SELECT q.status INTO new_parent_status
     FROM app.quotes AS q
-    WHERE q.id = coalesce(NEW.quote_id, OLD.quote_id);
-    IF parent_status IN ('APPROVED_SENT', 'SUPERSEDED') THEN
+    WHERE q.id = NEW.quote_id;
+    IF new_parent_status IN ('APPROVED_SENT', 'SUPERSEDED') THEN
         RAISE EXCEPTION 'quote % is %: line % is not allowed (rule 9)',
-            coalesce(NEW.quote_id, OLD.quote_id), parent_status, TG_OP;
+            NEW.quote_id, new_parent_status, TG_OP;
     END IF;
-    IF TG_OP = 'DELETE' THEN
-        -- A NULL parent means the cascade already removed it — the delete is
-        -- legitimate teardown of a DRAFT subtree, not a mutation.
-        RETURN OLD;
-    END IF;
-    -- On INSERT/UPDATE a missing parent under RLS means a cross-tenant
-    -- quote_id: the row must not attach to a quote the tenant cannot see.
-    IF parent_status IS NULL THEN
+    IF new_parent_status IS NULL THEN
         RAISE EXCEPTION 'quote % is not visible to this tenant: % refused',
-            coalesce(NEW.quote_id, OLD.quote_id), TG_OP;
+            NEW.quote_id, TG_OP;
     END IF;
     RETURN NEW;
 END;

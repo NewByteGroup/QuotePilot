@@ -11,6 +11,7 @@ package tenantdb_test
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -243,4 +244,60 @@ func TestSchemaLintGrants(t *testing.T) {
 			`SELECT has_function_privilege('public', $1, 'EXECUTE')`, fn).Scan(&publicExec))
 		assert.False(t, publicExec, "PUBLIC must not EXECUTE %s", fn)
 	}
+
+	// The EXECUTE surface is a catalog diff like platformTablesNoRLS: the set
+	// of app functions qp_app can EXECUTE must equal the allowlist exactly —
+	// a migration that grants EXECUTE on a trigger/helper, or adds a platform
+	// entry point without listing it, fails here. Signatures go through
+	// regprocedure on this same session so both sides share one rendering:
+	// the allowlist uses aliases (timestamptz, app.connector_status) that the
+	// catalog renders canonically (timestamp with time zone, connector_status).
+	wantFns := make([]string, 0, len(platformFunctions))
+	for _, fn := range platformFunctions {
+		var canon string
+		require.NoError(t, migrator.QueryRow(ctx,
+			`SELECT $1::regprocedure::text`, fn).Scan(&canon))
+		wantFns = append(wantFns, canon)
+	}
+	sort.Strings(wantFns)
+
+	var executable []string
+	rows, err := migrator.Query(ctx, `
+		SELECT p.oid::regprocedure::text
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'app'
+		  AND has_function_privilege('qp_app', p.oid, 'EXECUTE')
+		ORDER BY 1`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		executable = append(executable, name)
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, wantFns, executable,
+		"qp_app EXECUTE surface must equal the platform-function allowlist")
+
+	// SECURITY DEFINER is the dangerous property (the body runs as
+	// qp_migrator): its set must equal the same allowlist — no new definer may
+	// appear unlisted, and no allowlisted function may lose the flag silently.
+	var definers []string
+	rows, err = migrator.Query(ctx, `
+		SELECT p.oid::regprocedure::text
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'app' AND p.prosecdef
+		ORDER BY 1`)
+	require.NoError(t, err)
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		definers = append(definers, name)
+	}
+	require.NoError(t, rows.Err())
+	rows.Close()
+	assert.Equal(t, wantFns, definers,
+		"SECURITY DEFINER functions in app must equal the platform-function allowlist")
 }

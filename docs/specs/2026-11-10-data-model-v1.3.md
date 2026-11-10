@@ -42,9 +42,9 @@ migration grants explicitly (ADR-005 platform path, comment 6).
 |---|---|---|
 | `id` | `uuid` PK | `gen_random_uuid()` |
 | `name` | `text` NOT NULL | |
-| `slug` | `text` UNIQUE NOT NULL | used in `<slug>@in.quotepilot.app` |
+| `slug` | `text` UNIQUE NOT NULL | used in `<slug>@in.quotepilot.app`; `CHECK (slug = lower(slug))` |
 | `cnpj` | `varchar(14)` UNIQUE NULL | optional at onboarding |
-| `inbound_email_alias` | `text` UNIQUE NOT NULL | Resend Inbound address |
+| `inbound_email_alias` | `text` UNIQUE NOT NULL | Resend Inbound address; `CHECK (inbound_email_alias = lower(inbound_email_alias))` |
 | `outbound_from_name` | `text` NOT NULL | |
 | `outbound_reply_to` | `text` NOT NULL | |
 | `branding_json` | `jsonb` NOT NULL | colors, logo, legal footer |
@@ -55,6 +55,10 @@ migration grants explicitly (ADR-005 platform path, comment 6).
 `id` uuid PK · `email` text UNIQUE NOT NULL · `full_name` text ·
 `password_hash_or_magic_sub` text · `is_platform_admin` boolean NOT NULL
 DEFAULT false · `created_at` timestamptz NOT NULL DEFAULT now().
+`CHECK (email = lower(email))`. The lowercase CHECKs exist because the
+resolvers compare on `lower(...)` while the UNIQUEs are case-sensitive —
+a case-variant "duplicate" would be an ambiguity the constraint cannot
+see (mail misrouting / membership shadowing).
 
 ### `organization_memberships`
 
@@ -68,8 +72,11 @@ FK→users · `role` `app.membership_role` NOT NULL ·
   the Resend `to` address to an organization via `inbound_email_alias`
   (exact match, any domain: the alias is the ownership declaration), then a
   `<slug>@in.quotepilot.app` fallback **pinned to our domain** — an
-  arbitrary `slug@in.other-domain.test` must not resolve. Runs before any
-  tenant context exists (comment 4).
+  arbitrary `slug@in.other-domain.test` must not resolve. Malformed
+  recipients are refused before either lookup: empty local or domain part,
+  and any second `@` (otherwise `split_part` truncates
+  `victim@in.quotepilot.app@evil.test` into a resolving address). Runs
+  before any tenant context exists (comment 4).
 - `app.list_memberships_for_email(email text) returns table(organization_id uuid, role app.membership_role)` —
   post-login org picker, without exposing the full registry.
 - `app.get_current_organization() returns organizations` — tenant-scoped
@@ -200,8 +207,11 @@ Spec §5.2.6 plus:
   alone (a jsonb row diff proves no other column changed), retiring it when
   the corrected version is issued. `SUPERSEDED` rows are then fully frozen;
   every other update and every delete on either terminal status raises
-  (rule 9). The only bypass is the transaction-local
-  `app.tenant_teardown` flag set by `platform_delete_organization`
+  (rule 9). The only bypass requires **both** the transaction-local
+  `app.tenant_teardown` flag **and** `current_user <> session_user` — the
+  flag alone is a forgeable GUC, but `qp_app` cannot manufacture a SECURITY
+  DEFINER context (no CREATE on `app`), so only the controlled teardown
+  path satisfies the pair
 - schema comment on `final_price_brl`: rounding rule — sell lines are
   rounded per line and the price is the sum of rounded lines (RFC-001 §8)
 
@@ -216,7 +226,11 @@ Test invariant: `sum(sell_amount_brl) = quotes.final_price_brl` per quote.
 Mirror trigger `block_sent_quote_line_mutation` raises on
 INSERT/UPDATE/DELETE while the parent quote is `APPROVED_SENT` or
 `SUPERSEDED` (same teardown exemption) — a sent quote's breakdown cannot
-diverge from its recorded header.
+diverge from its recorded header. UPDATE/DELETE is governed by the **OLD**
+parent and INSERT/UPDATE also by the **NEW** parent: without the OLD check,
+repointing `quote_id` to a DRAFT would detach a sent quote's line into
+mutability; without the NEW check, a line could attach to a sent quote or
+to one invisible under RLS.
 
 ### `tenant_audit_logs`
 
@@ -270,17 +284,29 @@ through `SECURITY DEFINER` functions owned by `qp_migrator` (comment 15).
 
 Platform write functions (EXECUTE → `qp_app`): `platform_insert_public_snapshot`,
 `platform_update_connector_status`, `platform_insert_healing_session`,
-`platform_update_healing_session` (reports session progress and stamps
-`resolved_at` on MERGED/FAILED — without it a session could never leave
-OPEN). Workers running as `qp_app` can therefore publish snapshots without
-ever holding table-level write grants.
+`platform_update_healing_session`. Workers running as `qp_app` can
+therefore publish snapshots without ever holding table-level write grants.
+The functions also enforce the lifecycle, not just the write:
+`platform_update_connector_status` only permits the
+`HEALTHY→DEGRADED→HEALING→HEALTHY` cycle;
+`platform_insert_healing_session` requires the failing snapshot to belong
+to the connector being healed; `platform_update_healing_session` permits
+`OPEN→PR_READY/MERGED/FAILED` and `PR_READY→MERGED/FAILED` only
+(`MERGED`/`FAILED` are terminal — a resolved session cannot reopen with
+`resolved_at` already stamped).
 
 `platform_delete_organization(org_id)` is the **only** tenant-teardown
-path: it sets the transaction-local `app.tenant_teardown` flag (which the
-two immutability triggers honor), pins the tenant context, and deletes the
-organization row; cascades remove every Camada B row, membership and
-`inbound_messages` receipt. Ordinary `qp_app` deletes on sent quotes or
-lines still raise.
+path: it sets the transaction-local `app.tenant_teardown` flag, pins the
+tenant context, and deletes the organization row; cascades remove every
+Camada B row, membership and `inbound_messages` receipt. The immutability
+triggers honor the flag **only** alongside `current_user <> session_user`,
+which holds inside this SECURITY DEFINER function (owner `qp_migrator`)
+and nowhere in a direct `qp_app` session — so the teardown flag cannot be
+forged to unlock sent quotes, and it cannot leak protection to another org
+after teardown returns. Note the function is deliberately EXECUTE-able by
+`qp_app` for any org id: caller authorization (admin-only endpoint) lives
+in the API layer, consistent with the GUC trust model — flag for Pedro if
+a DB-level restriction is wanted later.
 
 ## 6. Enum types (`CREATE TYPE` in `app`)
 
