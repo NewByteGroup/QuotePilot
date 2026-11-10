@@ -146,9 +146,10 @@ func (e *Endpoints) issueLoginToken(ctx context.Context, userID uuid.UUID) (stri
 }
 
 // magicLinkURL builds the spec section 8 exchange link; the token is
-// base64url (RawURLEncoding), so it needs no query escaping.
+// base64url (RawURLEncoding), so it needs no query escaping. A trailing
+// slash on WEB_URL would otherwise double the path's first separator.
 func magicLinkURL(webURL, token string) string {
-	return webURL + "/auth/exchange?token=" + token
+	return strings.TrimRight(webURL, "/") + "/auth/exchange?token=" + token
 }
 
 // loginBadRequest is the typed 400 the handler returns for request-shape

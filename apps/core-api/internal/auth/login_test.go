@@ -397,3 +397,26 @@ func TestLoginWithoutClientIPMiddlewareFailsLoud(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Empty(t, q.finds, "a mis-mounted login must not reach the store")
 }
+
+// A WEB_URL carrying a trailing slash must not leak a double separator into
+// the magic link — the link is what the user actually clicks.
+func TestLoginTrimsTrailingSlashOnWebURL(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	q := &loginQuerier{users: map[string]uuid.UUID{"ada@test.dev": uuid.New()}, fail: map[string]error{}}
+	cfg := &platform.Config{WebURL: "https://web.test/", LoginTTL: 15 * time.Minute}
+	mailer := &platform.FakeMailSender{}
+	endpoints := auth.NewEndpoints(cfg, platform.NewStore(q), mailer,
+		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
+		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
+		clock.Now)
+	handler := auth.NewServer(endpoints)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"email":"ada@test.dev"}`))
+	req.RemoteAddr = "198.51.100.9:443"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Len(t, mailer.Sends, 1)
+	assert.True(t, strings.HasPrefix(mailer.Sends[0].URL, "https://web.test/auth/exchange?token="),
+		"trailing-slash WEB_URL must not produce //auth/exchange, got %q", mailer.Sends[0].URL)
+}
