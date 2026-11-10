@@ -5,10 +5,624 @@
 package inboxdb
 
 import (
+	"database/sql/driver"
+	"fmt"
+
 	"github.com/jackc/pgx/v5/pgtype"
-	pgvector "github.com/pgvector/pgvector-go"
 	"github.com/shopspring/decimal"
 )
+
+type AppBatchStatus string
+
+const (
+	AppBatchStatusPENDINGREVIEW AppBatchStatus = "PENDING_REVIEW"
+	AppBatchStatusACTIVE        AppBatchStatus = "ACTIVE"
+)
+
+func (e *AppBatchStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppBatchStatus(s)
+	case string:
+		*e = AppBatchStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppBatchStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAppBatchStatus struct {
+	AppBatchStatus AppBatchStatus
+	Valid          bool // Valid is true if AppBatchStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppBatchStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppBatchStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppBatchStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppBatchStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppBatchStatus), nil
+}
+
+type AppChargeCategory string
+
+const (
+	AppChargeCategoryOCEANFREIGHT      AppChargeCategory = "OCEAN_FREIGHT"
+	AppChargeCategoryAIRFREIGHT        AppChargeCategory = "AIR_FREIGHT"
+	AppChargeCategorySURCHARGE         AppChargeCategory = "SURCHARGE"
+	AppChargeCategoryORIGINCHARGE      AppChargeCategory = "ORIGIN_CHARGE"
+	AppChargeCategoryDESTINATIONCHARGE AppChargeCategory = "DESTINATION_CHARGE"
+	AppChargeCategoryTERMINAL          AppChargeCategory = "TERMINAL"
+	AppChargeCategoryCUSTOMS           AppChargeCategory = "CUSTOMS"
+	AppChargeCategoryOTHER             AppChargeCategory = "OTHER"
+)
+
+func (e *AppChargeCategory) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppChargeCategory(s)
+	case string:
+		*e = AppChargeCategory(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppChargeCategory: %T", src)
+	}
+	return nil
+}
+
+type NullAppChargeCategory struct {
+	AppChargeCategory AppChargeCategory
+	Valid             bool // Valid is true if AppChargeCategory is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppChargeCategory) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppChargeCategory, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppChargeCategory.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppChargeCategory) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppChargeCategory), nil
+}
+
+type AppConnectorStatus string
+
+const (
+	AppConnectorStatusHEALTHY  AppConnectorStatus = "HEALTHY"
+	AppConnectorStatusDEGRADED AppConnectorStatus = "DEGRADED"
+	AppConnectorStatusHEALING  AppConnectorStatus = "HEALING"
+)
+
+func (e *AppConnectorStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppConnectorStatus(s)
+	case string:
+		*e = AppConnectorStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppConnectorStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAppConnectorStatus struct {
+	AppConnectorStatus AppConnectorStatus
+	Valid              bool // Valid is true if AppConnectorStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppConnectorStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppConnectorStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppConnectorStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppConnectorStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppConnectorStatus), nil
+}
+
+type AppFreightModal string
+
+const (
+	AppFreightModalFCL AppFreightModal = "FCL"
+	AppFreightModalLCL AppFreightModal = "LCL"
+	AppFreightModalAIR AppFreightModal = "AIR"
+)
+
+func (e *AppFreightModal) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppFreightModal(s)
+	case string:
+		*e = AppFreightModal(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppFreightModal: %T", src)
+	}
+	return nil
+}
+
+type NullAppFreightModal struct {
+	AppFreightModal AppFreightModal
+	Valid           bool // Valid is true if AppFreightModal is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppFreightModal) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppFreightModal, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppFreightModal.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppFreightModal) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppFreightModal), nil
+}
+
+type AppHealingStatus string
+
+const (
+	AppHealingStatusOPEN    AppHealingStatus = "OPEN"
+	AppHealingStatusPRREADY AppHealingStatus = "PR_READY"
+	AppHealingStatusMERGED  AppHealingStatus = "MERGED"
+	AppHealingStatusFAILED  AppHealingStatus = "FAILED"
+)
+
+func (e *AppHealingStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppHealingStatus(s)
+	case string:
+		*e = AppHealingStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppHealingStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAppHealingStatus struct {
+	AppHealingStatus AppHealingStatus
+	Valid            bool // Valid is true if AppHealingStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppHealingStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppHealingStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppHealingStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppHealingStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppHealingStatus), nil
+}
+
+type AppLineSourceType string
+
+const (
+	AppLineSourceTypePRIVATETARIFF   AppLineSourceType = "PRIVATE_TARIFF"
+	AppLineSourceTypeFIRECRAWLPUBLIC AppLineSourceType = "FIRECRAWL_PUBLIC"
+	AppLineSourceTypeORGFIXEDRULE    AppLineSourceType = "ORG_FIXED_RULE"
+	AppLineSourceTypeMANUALOVERRIDE  AppLineSourceType = "MANUAL_OVERRIDE"
+	AppLineSourceTypeCARRIEROFFER    AppLineSourceType = "CARRIER_OFFER"
+)
+
+func (e *AppLineSourceType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppLineSourceType(s)
+	case string:
+		*e = AppLineSourceType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppLineSourceType: %T", src)
+	}
+	return nil
+}
+
+type NullAppLineSourceType struct {
+	AppLineSourceType AppLineSourceType
+	Valid             bool // Valid is true if AppLineSourceType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppLineSourceType) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppLineSourceType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppLineSourceType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppLineSourceType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppLineSourceType), nil
+}
+
+type AppMembershipRole string
+
+const (
+	AppMembershipRoleOWNER          AppMembershipRole = "OWNER"
+	AppMembershipRoleADMIN          AppMembershipRole = "ADMIN"
+	AppMembershipRolePRICINGANALYST AppMembershipRole = "PRICING_ANALYST"
+)
+
+func (e *AppMembershipRole) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppMembershipRole(s)
+	case string:
+		*e = AppMembershipRole(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppMembershipRole: %T", src)
+	}
+	return nil
+}
+
+type NullAppMembershipRole struct {
+	AppMembershipRole AppMembershipRole
+	Valid             bool // Valid is true if AppMembershipRole is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppMembershipRole) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppMembershipRole, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppMembershipRole.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppMembershipRole) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppMembershipRole), nil
+}
+
+type AppPricingModal string
+
+const (
+	AppPricingModalFCL AppPricingModal = "FCL"
+	AppPricingModalLCL AppPricingModal = "LCL"
+	AppPricingModalAIR AppPricingModal = "AIR"
+	AppPricingModalALL AppPricingModal = "ALL"
+)
+
+func (e *AppPricingModal) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppPricingModal(s)
+	case string:
+		*e = AppPricingModal(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppPricingModal: %T", src)
+	}
+	return nil
+}
+
+type NullAppPricingModal struct {
+	AppPricingModal AppPricingModal
+	Valid           bool // Valid is true if AppPricingModal is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppPricingModal) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppPricingModal, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppPricingModal.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppPricingModal) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppPricingModal), nil
+}
+
+type AppQuoteLineCategory string
+
+const (
+	AppQuoteLineCategoryINTLFREIGHT        AppQuoteLineCategory = "INTL_FREIGHT"
+	AppQuoteLineCategoryORIGINCHARGES      AppQuoteLineCategory = "ORIGIN_CHARGES"
+	AppQuoteLineCategoryTERMINALSTORAGETHC AppQuoteLineCategory = "TERMINAL_STORAGE_THC"
+	AppQuoteLineCategoryCUSTOMSDISPATCH    AppQuoteLineCategory = "CUSTOMS_DISPATCH"
+	AppQuoteLineCategorySURCHARGE          AppQuoteLineCategory = "SURCHARGE"
+)
+
+func (e *AppQuoteLineCategory) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppQuoteLineCategory(s)
+	case string:
+		*e = AppQuoteLineCategory(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppQuoteLineCategory: %T", src)
+	}
+	return nil
+}
+
+type NullAppQuoteLineCategory struct {
+	AppQuoteLineCategory AppQuoteLineCategory
+	Valid                bool // Valid is true if AppQuoteLineCategory is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppQuoteLineCategory) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppQuoteLineCategory, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppQuoteLineCategory.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppQuoteLineCategory) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppQuoteLineCategory), nil
+}
+
+type AppQuoteStatus string
+
+const (
+	AppQuoteStatusDRAFT        AppQuoteStatus = "DRAFT"
+	AppQuoteStatusSUPERSEDED   AppQuoteStatus = "SUPERSEDED"
+	AppQuoteStatusAPPROVEDSENT AppQuoteStatus = "APPROVED_SENT"
+)
+
+func (e *AppQuoteStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppQuoteStatus(s)
+	case string:
+		*e = AppQuoteStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppQuoteStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAppQuoteStatus struct {
+	AppQuoteStatus AppQuoteStatus
+	Valid          bool // Valid is true if AppQuoteStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppQuoteStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppQuoteStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppQuoteStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppQuoteStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppQuoteStatus), nil
+}
+
+type AppRfqKind string
+
+const (
+	AppRfqKindRFQ          AppRfqKind = "RFQ"
+	AppRfqKindTARIFFUPDATE AppRfqKind = "TARIFF_UPDATE"
+	AppRfqKindOTHER        AppRfqKind = "OTHER"
+)
+
+func (e *AppRfqKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppRfqKind(s)
+	case string:
+		*e = AppRfqKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppRfqKind: %T", src)
+	}
+	return nil
+}
+
+type NullAppRfqKind struct {
+	AppRfqKind AppRfqKind
+	Valid      bool // Valid is true if AppRfqKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppRfqKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppRfqKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppRfqKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppRfqKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppRfqKind), nil
+}
+
+type AppRfqStatus string
+
+const (
+	AppRfqStatusRECEIVED     AppRfqStatus = "RECEIVED"
+	AppRfqStatusPARSING      AppRfqStatus = "PARSING"
+	AppRfqStatusPRICING      AppRfqStatus = "PRICING"
+	AppRfqStatusNEEDSREVIEW  AppRfqStatus = "NEEDS_REVIEW"
+	AppRfqStatusREADY        AppRfqStatus = "READY"
+	AppRfqStatusAPPROVEDSENT AppRfqStatus = "APPROVED_SENT"
+	AppRfqStatusFAILED       AppRfqStatus = "FAILED"
+	AppRfqStatusIGNORED      AppRfqStatus = "IGNORED"
+)
+
+func (e *AppRfqStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppRfqStatus(s)
+	case string:
+		*e = AppRfqStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppRfqStatus: %T", src)
+	}
+	return nil
+}
+
+type NullAppRfqStatus struct {
+	AppRfqStatus AppRfqStatus
+	Valid        bool // Valid is true if AppRfqStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppRfqStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppRfqStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppRfqStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppRfqStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppRfqStatus), nil
+}
+
+type AppTariffSourceType string
+
+const (
+	AppTariffSourceTypeCSVUPLOAD     AppTariffSourceType = "CSV_UPLOAD"
+	AppTariffSourceTypeRESENDINBOUND AppTariffSourceType = "RESEND_INBOUND"
+)
+
+func (e *AppTariffSourceType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AppTariffSourceType(s)
+	case string:
+		*e = AppTariffSourceType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AppTariffSourceType: %T", src)
+	}
+	return nil
+}
+
+type NullAppTariffSourceType struct {
+	AppTariffSourceType AppTariffSourceType
+	Valid               bool // Valid is true if AppTariffSourceType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAppTariffSourceType) Scan(value interface{}) error {
+	if value == nil {
+		ns.AppTariffSourceType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AppTariffSourceType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAppTariffSourceType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AppTariffSourceType), nil
+}
+
+type AppCarrierOffer struct {
+	ID               pgtype.UUID
+	OrganizationID   pgtype.UUID
+	RfqID            pgtype.UUID
+	Carrier          string
+	OfferReference   pgtype.Text
+	OfferPayloadJson []byte
+	FetchedAt        pgtype.Timestamptz
+	ExpiresAt        pgtype.Timestamptz
+	CreatedAt        pgtype.Timestamptz
+}
+
+type AppConnector struct {
+	ID              pgtype.UUID
+	Slug            string
+	DisplayName     string
+	TargetUrl       string
+	Status          AppConnectorStatus
+	ConfidenceScore pgtype.Numeric
+	LastScrapedAt   pgtype.Timestamptz
+	CreatedAt       pgtype.Timestamptz
+	UpdatedAt       pgtype.Timestamptz
+}
+
+type AppHealingSession struct {
+	ID                       pgtype.UUID
+	ConnectorID              pgtype.UUID
+	Status                   AppHealingStatus
+	FailingSnapshotID        pgtype.UUID
+	FailingPayloadHash       pgtype.Text
+	FailingPayloadStorageKey pgtype.Text
+	DevinSessionID           pgtype.Text
+	DevinSessionUrl          pgtype.Text
+	GithubPrUrl              pgtype.Text
+	PytestPassed             pgtype.Bool
+	CreatedAt                pgtype.Timestamptz
+	ResolvedAt               pgtype.Timestamptz
+}
 
 type AppInboundMessage struct {
 	ID               pgtype.UUID
@@ -19,9 +633,213 @@ type AppInboundMessage struct {
 	ReceivedAt       pgtype.Timestamptz
 }
 
-type AppPrivateTariffEmbedding struct {
+type AppOrgQuoteCounter struct {
+	OrganizationID pgtype.UUID
+	NextSeq        int32
+}
+
+type AppOrganization struct {
+	ID                pgtype.UUID
+	Name              string
+	Slug              string
+	Cnpj              pgtype.Text
+	InboundEmailAlias string
+	OutboundFromName  string
+	OutboundReplyTo   string
+	BrandingJson      []byte
+	CreatedAt         pgtype.Timestamptz
+}
+
+type AppOrganizationConnectorPreference struct {
 	ID             pgtype.UUID
 	OrganizationID pgtype.UUID
-	Embedding      pgvector.Vector
-	EmbeddingModel string
+	ConnectorID    pgtype.UUID
+	Enabled        bool
+	SettingsJson   []byte
+	CreatedAt      pgtype.Timestamptz
+}
+
+type AppOrganizationMembership struct {
+	ID             pgtype.UUID
+	OrganizationID pgtype.UUID
+	UserID         pgtype.UUID
+	Role           AppMembershipRole
+	CreatedAt      pgtype.Timestamptz
+}
+
+type AppPricingRule struct {
+	ID                   pgtype.UUID
+	OrganizationID       pgtype.UUID
+	Modal                AppPricingModal
+	DefaultTargetMargin  decimal.Decimal
+	FxSafetySpread       decimal.Decimal
+	AutoApproveThreshold pgtype.Numeric
+	FixedFeesJson        []byte
+	QuoteValidityDays    int32
+	OriginLocode         pgtype.Text
+	DestLocode           pgtype.Text
+	RouteTargetMargin    pgtype.Numeric
+	MinMarkupUsd         pgtype.Numeric
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+}
+
+type AppPrivateTariff struct {
+	ID                pgtype.UUID
+	OrganizationID    pgtype.UUID
+	BatchID           pgtype.UUID
+	CarrierOrAgent    string
+	Modal             AppFreightModal
+	OriginLocode      string
+	DestLocode        string
+	EquipmentOrUnit   string
+	ChargeCategory    AppChargeCategory
+	ChargeCode        string
+	Currency          string
+	NetAmount         decimal.Decimal
+	MinAmount         pgtype.Numeric
+	FreeTimeDays      pgtype.Int4
+	TransitTimeDays   pgtype.Int4
+	ValidFrom         pgtype.Date
+	ValidUntil        pgtype.Date
+	SearchDescription string
+	Embedding         interface{}
+	EmbeddingModel    pgtype.Text
+	IsRemoved         bool
+	CreatedAt         pgtype.Timestamptz
+}
+
+type AppPrivateTariffBatch struct {
+	ID             pgtype.UUID
+	OrganizationID pgtype.UUID
+	SourceType     AppTariffSourceType
+	SourceFilename pgtype.Text
+	UploadedBy     pgtype.UUID
+	Status         AppBatchStatus
+	ActivatedAt    pgtype.Timestamptz
+	CreatedAt      pgtype.Timestamptz
+}
+
+type AppPublicSnapshot struct {
+	ID                 pgtype.UUID
+	ConnectorID        pgtype.UUID
+	ParserVersion      string
+	RawMarkdownHash    pgtype.Text
+	ExtractedRatesJson []byte
+	SourceUrl          pgtype.Text
+	StorageKey         pgtype.Text
+	ConfidenceScore    pgtype.Numeric
+	CheckResultsJson   []byte
+	ScrapedAt          pgtype.Timestamptz
+	CreatedAt          pgtype.Timestamptz
+}
+
+type AppQuote struct {
+	ID             pgtype.UUID
+	OrganizationID pgtype.UUID
+	RfqID          pgtype.UUID
+	QuoteNumber    string
+	Version        int32
+	Status         AppQuoteStatus
+	QuoteDate      pgtype.Date
+	PricedAt       pgtype.Timestamptz
+	InputsHash     pgtype.Text
+	CarrierOfferID pgtype.UUID
+	CargoCifBrl    pgtype.Numeric
+	TotalCostBrl   decimal.Decimal
+	TargetMargin   decimal.Decimal
+	// Sum of the rounded line sell amounts (half-up per line; RFC-001 section 8). Invariant under test: sum(quote_line_items.sell_amount_brl) = final_price_brl.
+	FinalPriceBrl         decimal.Decimal
+	FxRatesAppliedJson    []byte
+	OverallConfidence     decimal.Decimal
+	PricingResultJson     []byte
+	PdfStorageKey         pgtype.Text
+	ApprovedAt            pgtype.Timestamptz
+	ApprovedByUserID      pgtype.UUID
+	ApprovedVia           pgtype.Text
+	SentOutboundMessageID pgtype.Text
+	CreatedAt             pgtype.Timestamptz
+	UpdatedAt             pgtype.Timestamptz
+}
+
+type AppQuoteLineItem struct {
+	ID               pgtype.UUID
+	OrganizationID   pgtype.UUID
+	QuoteID          pgtype.UUID
+	SortOrder        int32
+	Category         AppQuoteLineCategory
+	Description      string
+	SourceType       AppLineSourceType
+	PrivateTariffID  pgtype.UUID
+	PublicSnapshotID pgtype.UUID
+	CarrierOfferID   pgtype.UUID
+	OriginalCurrency string
+	OriginalAmount   decimal.Decimal
+	FxRateUsed       decimal.Decimal
+	CostAmountBrl    decimal.Decimal
+	SellAmountBrl    decimal.Decimal
+	LineConfidence   decimal.Decimal
+	Flags            []byte
+	CreatedAt        pgtype.Timestamptz
+}
+
+type AppRfqAttachment struct {
+	ID             pgtype.UUID
+	OrganizationID pgtype.UUID
+	RfqID          pgtype.UUID
+	StorageKey     string
+	Filename       string
+	MimeType       pgtype.Text
+	ParsedMarkdown pgtype.Text
+	SizeBytes      pgtype.Int8
+	CreatedAt      pgtype.Timestamptz
+}
+
+type AppRfqRequest struct {
+	ID                   pgtype.UUID
+	OrganizationID       pgtype.UUID
+	Kind                 AppRfqKind
+	Status               AppRfqStatus
+	ResendMessageID      string
+	RfcMessageID         pgtype.Text
+	ThreadHeadersJson    []byte
+	CustomerEmail        string
+	CustomerName         pgtype.Text
+	Subject              string
+	ReceivedAt           pgtype.Timestamptz
+	RawTextBody          pgtype.Text
+	RawHtmlBody          pgtype.Text
+	ExtractedPayloadJson []byte
+	ExtractionConfidence pgtype.Numeric
+	FailureReason        pgtype.Text
+	CreatedAt            pgtype.Timestamptz
+	UpdatedAt            pgtype.Timestamptz
+}
+
+type AppSuppressionList struct {
+	ID             pgtype.UUID
+	OrganizationID pgtype.UUID
+	Email          string
+	Reason         pgtype.Text
+	CreatedAt      pgtype.Timestamptz
+}
+
+type AppTenantAuditLog struct {
+	ID             pgtype.UUID
+	OrganizationID pgtype.UUID
+	ActorUserID    pgtype.UUID
+	Action         string
+	EntityType     pgtype.Text
+	EntityID       pgtype.UUID
+	MetadataJson   []byte
+	CreatedAt      pgtype.Timestamptz
+}
+
+type AppUser struct {
+	ID                     pgtype.UUID
+	Email                  string
+	FullName               pgtype.Text
+	PasswordHashOrMagicSub pgtype.Text
+	IsPlatformAdmin        bool
+	CreatedAt              pgtype.Timestamptz
 }
