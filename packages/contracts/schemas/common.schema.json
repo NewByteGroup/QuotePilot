@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quotepilot.dev/contracts/common.schema.json",
+  "title": "Common contract definitions",
+  "description": "Shared primitives for ExtractionResult and PrivateTariff. Enums mirror the app.* Postgres types in docs/specs/2026-11-10-data-model-v1.3.md section 6 so generated types line up with the database.",
+  "$defs": {
+    "DecimalString": {
+      "type": "string",
+      "pattern": "^-?[0-9]+(\\.[0-9]+)?$",
+      "description": "Decimal quantity or amount as a string. JSON floats are forbidden anywhere near money or cargo quantities; consumers parse into shopspring/decimal (Go) or Decimal (Python)."
+    },
+    "Locode": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}[A-Z0-9]{3}$",
+      "description": "UN/LOCODE: two-letter ISO country code plus three-alphanumeric location code, e.g. BRSSZ, DEHAM. Existence in the reference dataset is checked by core-api, not by this pattern alone."
+    },
+    "Iso4217Currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$",
+      "description": "ISO 4217 alpha-3 currency code. Membership in the organization allow-list is checked by core-api."
+    },
+    "FreightModal": {
+      "type": "string",
+      "enum": ["FCL", "LCL", "AIR"],
+      "description": "Mirrors app.freight_modal. v1.3 prices FCL and AIR only; LCL is still extracted and flagged out-of-scope by core-api."
+    },
+    "Incoterm": {
+      "type": "string",
+      "enum": ["EXW", "FCA", "FAS", "FOB", "CFR", "CIF", "CPT", "CIP", "DAP", "DPU", "DDP"],
+      "description": "Incoterms 2020. FAS, FOB, CFR and CIF are sea/inland-waterway terms; pairing them with modal AIR is a deterministic-check failure (RFC-004 section 4)."
+    },
+    "EquipmentOrUnit": {
+      "type": "string",
+      "enum": [
+        "20DV", "40DV", "40HC", "45HC",
+        "20RF", "40RF", "20OT", "40OT",
+        "20FR", "40FR", "20TK", "40TK",
+        "PALLET", "PIECE", "ULD", "OTHER"
+      ],
+      "description": "Equipment for FCL (dry/reefer/open-top/flat-rack/tank in 20/40/45 ft) or a handling unit for AIR and LCL. Business-reviewable list; extend here only, never in generated code."
+    },
+    "EvidenceSource": {
+      "type": "string",
+      "pattern": "^(EMAIL_BODY|ATTACHMENT:.+)$",
+      "description": "Where an extracted value came from: the email body or a named attachment (e.g. ATTACHMENT:booking.pdf). Drives split-screen UI highlights."
+    },
+    "ReasonCode": {
+      "type": "string",
+      "enum": [
+        "SCHEMA_INVALID",
+        "LOCODE_UNKNOWN",
+        "NCM_INVALID",
+        "NCM_WRONG_LENGTH",
+        "VALUE_OUT_OF_BOUNDS",
+        "DENSITY_IMPLAUSIBLE",
+        "CURRENCY_NOT_ALLOWED",
+        "EVIDENCE_UNVERIFIED",
+        "VALUE_NOT_IN_QUOTE",
+        "AMBIGUOUS_NUMBER",
+        "ORIGIN_EQUALS_DESTINATION",
+        "INCOTERM_MODAL_MISMATCH",
+        "REQUIRED_FIELD_MISSING",
+        "MODAL_OUT_OF_SCOPE",
+        "INFERRED_VALUE",
+        "LOW_CONFIDENCE",
+        "AUDITOR_UNREACHABLE",
+        "MODEL_ESCALATED"
+      ],
+      "description": "Machine-checkable codes only, never prose. core-api appends codes from its deterministic checks (RFC-004 section 4); ai-engine may prefill INFERRED_VALUE, AMBIGUOUS_NUMBER, AUDITOR_UNREACHABLE or MODEL_ESCALATED."
+    },
+    "FieldStatus": {
+      "type": "string",
+      "enum": ["GREEN", "AMBER", "RED"],
+      "description": "Computed by core-api from deterministic checks plus auditor confidence (RFC-004 section 5). Never set by ai-engine; present so the same envelope shape can be persisted and rendered by web."
+    },
+    "FieldValue": {
+      "type": "object",
+      "description": "Per-field extraction envelope (RFC-004 section 3). Every extracted value travels in this shape.",
+      "required": ["value", "evidence", "inferred", "confidence", "reasons"],
+      "properties": {
+        "value": {
+          "type": "string",
+          "description": "The normalized value as a string. Enums, LOCODEs and dates keep their documented formats; money and quantities are DecimalString."
+        },
+        "evidence": {
+          "type": "object",
+          "required": ["source", "exact_quote"],
+          "properties": {
+            "source": { "$ref": "#/$defs/EvidenceSource" },
+            "exact_quote": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Literal excerpt of the source supporting the value. core-api re-finds it in the original text (NFKC, collapsed whitespace, case-folded); offsets are computed by core-api, not the model."
+            }
+          },
+          "additionalProperties": false
+        },
+        "inferred": {
+          "type": "boolean",
+          "description": "True when the value was deduced rather than stated. Inferred fields can never be GREEN."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Calibrated probability from the confidence auditor (pplx-decider-v1.2), not the extractor's self-report. Stored as NUMERIC(5,4)."
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ReasonCode" },
+          "description": "Reason codes accumulated through the pipeline; ai-engine writes its own, core-api appends check results."
+        },
+        "status": { "$ref": "#/$defs/FieldStatus" }
+      },
+      "additionalProperties": false
+    },
+    "IsoDate": {
+      "type": "string",
+      "format": "date",
+      "description": "ISO 8601 calendar date (YYYY-MM-DD)."
+    },
+    "Embedding": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 1024,
+      "maxItems": 1024,
+      "description": "qwen/qwen3-embedding-8b vector at 1024 dimensions (MRL), L2-normalized. One vector space across the platform."
+    }
+  }
+}
