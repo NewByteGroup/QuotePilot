@@ -69,8 +69,8 @@ sweet spot (AGENTS.md, small-PR rule):
 | A | `feat/core-auth-session-schema` | Migration 0003: two Layer A tables + the §5 function family + allowlist triplet | ADR-005 sign-off; §3.3 decision; §3.1 naming ratification |
 | B | `feat/core-platform-package` | `internal/platform`: config, JWT/token helpers, typed accessors | A |
 | B2 | `feat/core-tenant-middleware` | `Authenticate` → `ResolveTenant` → `RequireRole` chain + its httptest proofs | B |
-| C0 | `feat/contracts-core-api-openapi` | `packages/contracts/openapi/core-api.yaml` + oapi-codegen plumbing (recommended — see §8.2) | none; can run parallel to A/B |
-| C1–C6 | `feat/core-auth-<endpoint>` | One endpoint per PR (AGENTS.md small-PR rule), in order: `login`, `session`, `refresh`, `logout`, `me`, `me/organization` | B2 (and C0 if codegen is used) |
+| C0 | `feat/contracts-core-api-openapi` | `packages/contracts/openapi/core-api.yaml` + oapi-codegen plumbing (DECIDED §8.2 — required) | none; can run parallel to A/B |
+| C1–C6 | `feat/core-auth-<endpoint>` | One endpoint per PR (AGENTS.md small-PR rule), in order: `login`, `session`, `refresh`, `logout`, `me`, `me-organization` (the route's `/` becomes `-` — one slash per branch) | B2 and C0 (both landed) |
 
 `C6` (`GET /me/organization`) is the slice that proves the whole chain
 end to end, so it lands last. Deferred explicitly: rewiring the Resend webhook to
@@ -195,7 +195,7 @@ fails on a table it was never told about:
 | Stored | nowhere (stateless) | SHA-256 hex in `auth_sessions` |
 | Lifetime | 15 minutes | 30 days, sliding on every rotation |
 | Claims | `sub` (user id), `sid` (session id), `exp`, `iat` — **no org, no role** | n/a |
-| Transport | `qp_access` cookie: HttpOnly, Secure, `SameSite=Lax`, `Path=/` | `qp_refresh` cookie: HttpOnly, Secure, `SameSite=Strict`, `Path=/auth/refresh` |
+| Transport | `qp_access` cookie: HttpOnly, Secure, `SameSite=Lax`, `Path=/` | `qp_refresh` cookie: HttpOnly, Secure, `SameSite=Strict`, `Path=/auth` |
 
 - **Rotation:** every `POST /auth/refresh` exchanges the presented
   refresh token for the next generation in the same `family_id` and
@@ -235,7 +235,8 @@ the platform-functions.sql catalog diff fails CI if one appears.
 | `consume_login_token(p_token_hash text)` | `uuid` or NULL | One atomic `UPDATE ... SET consumed_at = now() WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() RETURNING user_id` (ADR-005 §2 verbatim) — the single-use guarantee is the row lock. |
 | `create_session(p_user_id uuid, p_refresh_token_hash text, p_expires_at timestamptz)` | `uuid` (session id) | Inserts generation 0 with `family_id = id` — the family is rooted at its first session. |
 | `rotate_session(p_presented_hash text, p_new_hash text, p_new_expires_at timestamptz)` | `TABLE(session_id uuid, user_id uuid, rotated boolean)` | `SELECT ... FOR UPDATE` the row by hash, then exactly one of: **empty set** — unknown hash, revoked, or `expires_at <= now()`; **`rotated=false`** — `rotated_at` already set (reuse): revoke the whole family (`UPDATE ... SET revoked_at = now() WHERE family_id = $fam`) and return the row with NULL ids; **`rotated=true`** — stamp `rotated_at`, insert the successor in the same `family_id` with `p_new_hash`/`p_new_expires_at`, return its id and the user. Consume-and-create are atomic by construction — no TOCTOU window. |
-| `revoke_session(p_session_id uuid)` | `boolean` | `UPDATE ... SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`; logout. The JWT's `sid` is always the family's live generation, so single-row revoke is sufficient — prior generations are already rotated dead. |
+| `revoke_session(p_session_id uuid)` | `boolean` | `UPDATE ... SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`. Single-row revoke — the JWT's `sid` is the family's live generation. Retained for future per-session admin operations; **not** the logout interface — logout holds a token, not a session id. |
+| `revoke_session_family_by_hash(p_refresh_token_hash text)` | `boolean` | `UPDATE ... SET revoked_at = now() WHERE family_id = (SELECT family_id FROM auth_sessions WHERE refresh_token_hash = $1)`; `FOUND`-style boolean for the caller's metrics — the endpoint still always answers 204 so the boolean is not an oracle. Logout's revocation interface: the opaque refresh cookie resolves to its whole family in one call, so every generation dies — live and already-rotated alike. Unknown/revoked hash → `false`, same shape. |
 | `get_membership(p_user_id uuid, p_organization_id uuid)` | `app.membership_role` or NULL | `STABLE`. The per-request tenant check; NULL indistinguishably covers non-member and nonexistent org — that indistinguishability is the security property. |
 | `get_user_profile(p_user_id uuid)` | `TABLE(id uuid, email text, full_name text)` | `STABLE`. **Spec addition beyond ADR-005's table** — `GET /me` needs it; minimal columns, same argument-trust model as `get_membership`. |
 | `list_memberships_for_email(p_email text)` | extended to `(organization_id, name, slug, role)` — per §3.3 | Org-switcher data in the existing lookup; drop + recreate in this migration. |
@@ -258,14 +259,16 @@ internal/platform/
   store.go       — Store over a narrow Querier interface (satisfied by
                    *pgxpool.Pool and pgx.Tx): typed wrappers for every §5
                    function, NULL → (zero, false)
-  middleware.go  — Authenticate, ResolveTenant, RequireRole + private
-                   ctx keys + Accessors UserID/SessionID/OrgID/Role +
-                   the uniform writeError
   ratelimit.go   — hand-rolled token bucket: map+mutex, clock injected;
                    per-email and per-IP limiters for /auth/login
   mail.go        — MailSender interface (SendMagicLink(ctx, to, url));
                    Resend-backed impl; FakeMailSender lives in tests
 ```
+
+PR B2 lands `middleware.go` in this same package — `Authenticate`,
+`ResolveTenant`, `RequireRole`, private ctx keys, the
+UserID/SessionID/OrgID/Role accessors and the uniform `writeError` —
+shipped separately so the mission's core gets its own review.
 
 Env names land in `.env.example` in the same PR: `AUTH_JWT_KEYS`
 (`kid=secret` comma-separated, first = active), `AUTH_JWT_ACTIVE_KID`,
@@ -306,7 +309,7 @@ sets the per-surface mux precedent).
 | `POST /auth/login` | rate limit → handler | `{email}` → **always 200 `{"status":"ok"}`** for any well-formed email. If the user exists: `create_login_token` + `MailSender` with `${WEB_URL}/auth/exchange?token=…`. The platform sender, not a tenant brand (ADR-005 §3). Malformed body → 400. Bucket exhausted → 429. |
 | `POST /auth/session` | — | `{token}` → `consume_login_token`; success → `create_session` + sign JWT + set both cookies → 200 with the profile + memberships payload the switcher needs. Used/expired/unknown → uniform 401. |
 | `POST /auth/refresh` | — | `qp_refresh` cookie → `rotate_session`; `rotated` → new JWT + new scoped cookie; reuse → family already revoked + clear cookies + 401; empty → 401 + clear cookies. |
-| `POST /auth/logout` | — (refresh cookie) | Reads `qp_refresh` — still valid after `qp_access` expires — and calls `revoke_session` for the session family; always 204 + clears both cookies, valid token or not (no validity oracle). |
+| `POST /auth/logout` | — (refresh cookie) | Reads `qp_refresh` — still valid after `qp_access` expires, and delivered by its `Path=/auth` scope — and calls `revoke_session_family_by_hash` on it; always 204 + clears both cookies, valid token or not (no validity oracle). |
 | `GET /me` | `Authenticate` | `get_user_profile` + the §3.3 membership list → `{id, email, full_name, memberships:[…]}`. |
 | `GET /me/organization` | `Authenticate` + `ResolveTenant` | **The end-to-end proof**: inside `InTenantTx(org)` call `get_current_organization()` → `{id, name, slug, inbound_email_alias, branding_json}` — the first endpoint where request → JWT → tenant → tenant transaction runs for real. |
 
@@ -323,12 +326,12 @@ other endpoints poor abuse targets for the MVP. In-process state assumes
 one `core-api` instance (ADR-005 §3); the multi-instance consequence is
 an open item (§11).
 
-### 8.2 OpenAPI / codegen — PR C0 recommended
+### 8.2 OpenAPI / codegen — PR C0 (DECIDED 2026-11-10: required)
 
 ADR-002 already chose `oapi-codegen` (`std-http-server` + `strict-server`,
 generated code committed, `contracts-drift` diffs it). The webhook spike
 hand-rolled its mux because no contract existed; the auth surface is the
-first one that *can* start on a contract. **Recommendation:** dedicate
+first one that *can* start on a contract. **Decision:** dedicate
 PR C0 to `packages/contracts/openapi/core-api.yaml` (the six endpoints,
 cookie security scheme, shared error shape) plus the codegen config and
 Makefile wiring, so each handler PR stays small. Falling back to
@@ -348,7 +351,9 @@ Allowlists move with the migration in the same PR (§3.4).
 `consume_login_token` is single-use (second consume → NULL) and refuses
 expired/unknown hashes; `rotate_session` happy path descends the family,
 reuse revokes every generation, revoked/expired/unknown → empty;
-`revoke_session` kills the refresh path; `get_membership` returns the
+`revoke_session` flips a session's `revoked_at` once and no twice;
+`revoke_session_family_by_hash` resolves the presented cookie to its
+family and kills every generation; `get_membership` returns the
 role for a member and NULL for non-member *and* nonexistent org alike;
 `get_user_profile` returns only the documented columns; the extended
 list returns `name`+`slug`.

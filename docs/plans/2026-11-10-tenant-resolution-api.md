@@ -4,15 +4,17 @@
   every rule below resolves to it; ADR-005 §§1–5 is the governing source)
 - **Branches:** one per PR, all off `develop` — `feat/core-auth-session-schema`
   (A), `feat/core-platform-package` (B), `feat/core-tenant-middleware` (B2),
-  `feat/contracts-core-api-openapi` (C0, recommended), then one
-  `feat/core-auth-<endpoint>` per route (C1–C6)
+  `feat/contracts-core-api-openapi` (C0, required — DECIDED), then one
+  `feat/core-auth-<endpoint>` per route (C1–C6; the route `/` becomes
+  `-`, so C6 is `feat/core-auth-me-organization`)
 - **Scope:** `apps/core-api` request edge + the two infra check files.
   No webhook changes, no approval tokens, no waiter registry, no `apps/web`
   work — spec §10 non-goals stay out.
-- **Gate:** ADR-005 is Proposed and the spec carries three SPEC DECISION
-  REQUIRED items (§3.1 function naming ratification, §3.3 switcher
-  function, §8.2 contract plumbing). **PR A does not open until Pedro
-  answers all three.**
+- **Gate:** resolved 2026-11-10 — Pedro ratified ADR-005 (Accepted) and
+  all three spec decisions: §3.1 naming convention ratified (unprefixed
+  = `qp_app`, `platform_` = `qp_admin`), §3.3 extend
+  `list_memberships_for_email`, §8.2 contract-first C0 required. PR A is
+  unblocked.
 
 ## Constraints that apply while coding
 
@@ -55,7 +57,7 @@ apps/core-api/internal/platform/{jwt,token,middleware,ratelimit}_test.go
 apps/core-api/internal/platform/store_integration_test.go    # real-Postgres accessors
 .env.example                                                 # AUTH_* / RESEND_* names
 
-# PR C0 (recommended) — contract plumbing
+# PR C0 (required — DECIDED) — contract plumbing
 packages/contracts/openapi/core-api.yaml
 apps/core-api/oapi-codegen.yaml                              # std-http-server (ADR-002)
 apps/core-api/internal/auth/authapi/                         # generated, committed
@@ -72,7 +74,7 @@ apps/core-api/cmd/server/main.go                             # C1: compose auth 
 
 1. **PR A — migration 0003 + allowlist triplet.** Tables per spec §3.2;
    functions per §5 with paired grants; the §3.3 decision applied
-   (recommended: drop + recreate `list_memberships_for_email` with the
+   (decided: drop + recreate `list_memberships_for_email` with the
    four-column return and update its enforcement rows). Extend the three
    lint lists, `platform-functions.sql` (new `qp_app` grants asserted,
    `qp_admin` still pinned to the platform five) and matching
@@ -108,7 +110,7 @@ apps/core-api/cmd/server/main.go                             # C1: compose auth 
    *Accept:* `go test -count=1 -race ./internal/platform/...`,
    `go vet ./... && gofmt -l .`.
 
-3. **PR C0 (recommended) — contract plumbing.** Write
+3. **PR C0 (required — DECIDED) — contract plumbing.** Write
    `packages/contracts/openapi/core-api.yaml` for the six routes (cookie
    auth scheme, shared error shape, header param `X-Organization-Id` on
    tenant routes); add `oapi-codegen.yaml` (`std-http-server` +
@@ -147,8 +149,9 @@ apps/core-api/cmd/server/main.go                             # C1: compose auth 
    refresh → 401.
    *Accept:* `go test -count=1 -race ./internal/auth/...`.
 
-7. **PR C4 — `POST /auth/logout`.** `qp_refresh` → `revoke_session`
-   family; always 204 + clears both cookies (spec §8 — works when
+7. **PR C4 — `POST /auth/logout`.** `qp_refresh` →
+   `revoke_session_family_by_hash` kills the token's family; always 204 +
+   clears both cookies (spec §8 — works when
    `qp_access` is already expired; no validity oracle).
    *Tests:* logout after access-expiry still revokes the family;
    repeated logout stays 204.
