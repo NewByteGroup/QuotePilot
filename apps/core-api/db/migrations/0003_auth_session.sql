@@ -133,13 +133,19 @@ REVOKE EXECUTE ON FUNCTION app.create_session(uuid, text, timestamptz) FROM PUBL
 GRANT EXECUTE ON FUNCTION app.create_session(uuid, text, timestamptz) TO qp_app;
 -- +goose StatementEnd
 
--- rotate_session: the whole exchange is one call holding the FOR UPDATE lock,
--- so consume-and-create have no TOCTOU window (spec section 5). Exactly one
--- outcome per call: empty set for unknown, revoked or expired hashes;
--- rotated=false with NULL ids when the presented generation was already
--- exchanged (reuse — the family is killed in the same call so a stolen token
--- cannot outlive it); rotated=true with the successor's id and the user.
--- plpgsql because the contract needs FOR UPDATE plus conditional statements.
+-- rotate_session: the whole exchange is one call, and every mutation of a
+-- family serializes on a per-family advisory lock (pg_advisory_xact_lock
+-- keyed by family_id) so a concurrent rotation cannot commit a successor
+-- inside a revoker's statement window and let it escape the family kill
+-- (Devin Review). Lock order everywhere is family-advisory THEN row FOR
+-- UPDATE — taking the advisory after a row lock would deadlock against a
+-- revoker doing family-first.
+-- Exactly one outcome per call: empty set for unknown, revoked or expired
+-- hashes; rotated=false with NULL ids when the presented generation was
+-- already exchanged (reuse — the family is killed in the same call so a
+-- stolen token cannot outlive it); rotated=true with the successor's id and
+-- the user. plpgsql because the contract needs FOR UPDATE plus conditional
+-- statements.
 -- +goose StatementBegin
 CREATE FUNCTION app.rotate_session(p_presented_hash text, p_new_hash text, p_new_expires_at timestamptz)
     RETURNS TABLE (session_id uuid, user_id uuid, rotated boolean)
@@ -148,16 +154,35 @@ CREATE FUNCTION app.rotate_session(p_presented_hash text, p_new_hash text, p_new
     SET search_path = app
 AS $fn$
 DECLARE
+    v_family uuid;
     v_session app.auth_sessions%ROWTYPE;
     v_new_id uuid;
 BEGIN
+    -- Resolve the family with a plain read first: rows are never deleted,
+    -- so the id stays valid, and the locked read below is what must observe
+    -- the post-serialization state.
+    SELECT s.family_id INTO v_family
+    FROM app.auth_sessions AS s
+    WHERE s.refresh_token_hash = p_presented_hash;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    -- Serializes against every other mutation of this family (the reuse
+    -- kill below and revoke_session_family_by_hash): a racing mutation is
+    -- either committed — hence visible to the FOR UPDATE read — or still
+    -- waiting here and will see this call's committed result.
+    PERFORM pg_advisory_xact_lock(hashtextextended(v_family::text, 0));
+
     SELECT s.* INTO v_session
     FROM app.auth_sessions AS s
     WHERE s.refresh_token_hash = p_presented_hash
     FOR UPDATE;
 
     -- Unknown, revoked and expired are one shape: no row back, nothing
-    -- revealed about which case it was.
+    -- revealed about which case it was. NOT FOUND only covers a delete
+    -- mid-resolution; nothing deletes today but the check costs nothing.
     IF NOT FOUND
        OR v_session.revoked_at IS NOT NULL
        OR v_session.expires_at <= now() THEN
@@ -166,7 +191,10 @@ BEGIN
 
     -- Reuse: presenting an already-exchanged generation means the token was
     -- stolen or replayed, so the whole family dies in the same atomic call.
-    -- NULL ids keep the answer as uniform as the empty set.
+    -- The advisory lock makes this UPDATE airtight: a racing successor is
+    -- either still blocked on the advisory (unborn) or already committed and
+    -- inside this statement's candidate set. NULL ids keep the answer as
+    -- uniform as the empty set.
     IF v_session.rotated_at IS NOT NULL THEN
         UPDATE app.auth_sessions AS s
         SET revoked_at = now()
@@ -196,6 +224,10 @@ GRANT EXECUTE ON FUNCTION app.rotate_session(text, text, timestamptz) TO qp_app;
 -- per-session admin operations; it is NOT the logout interface — logout holds
 -- an opaque refresh token, not a session id (revoke_session_family_by_hash
 -- below).
+-- No family advisory here: one named row races a concurrent rotate
+-- consistently under EPQ — either the rotate committed first (this revoke
+-- stamps an already-rotated row, still id-correct) or it re-reads the row
+-- revoked and returns the empty set.
 -- +goose StatementBegin
 CREATE FUNCTION app.revoke_session(p_session_id uuid) RETURNS boolean
     LANGUAGE plpgsql
@@ -220,17 +252,32 @@ GRANT EXECUTE ON FUNCTION app.revoke_session(uuid) TO qp_app;
 -- call, so every generation dies — live and already-rotated alike. The
 -- boolean feeds caller metrics only; the endpoint always answers 204, so a
 -- false (unknown hash or already-dead family) is not an oracle.
+-- The family advisory lock — same key and same order as rotate_session — is
+-- why a successor can never be born inside the kill window: a concurrent
+-- rotate waits here until this UPDATE commits, then re-reads its row
+-- revoked and returns the empty set (Devin Review).
 -- +goose StatementBegin
 CREATE FUNCTION app.revoke_session_family_by_hash(p_refresh_token_hash text) RETURNS boolean
     LANGUAGE plpgsql
     SECURITY DEFINER
     SET search_path = app
 AS $fn$
+DECLARE
+    v_family uuid;
 BEGIN
+    SELECT s.family_id INTO v_family
+    FROM app.auth_sessions AS s
+    WHERE s.refresh_token_hash = p_refresh_token_hash;
+
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(v_family::text, 0));
+
     UPDATE app.auth_sessions AS s
     SET revoked_at = now()
-    WHERE s.family_id = (SELECT f.family_id FROM app.auth_sessions AS f
-                         WHERE f.refresh_token_hash = p_refresh_token_hash)
+    WHERE s.family_id = v_family
       AND s.revoked_at IS NULL;
     RETURN FOUND;
 END;

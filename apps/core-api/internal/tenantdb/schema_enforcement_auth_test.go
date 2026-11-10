@@ -13,6 +13,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -348,4 +349,119 @@ func TestSchemaEnforcementSessionFamilyRevoke(t *testing.T) {
 			hash, "rh-"+uuid.NewString()).Scan(&rows))
 		assert.Zero(t, rows, "a family-killed generation must return the empty set")
 	}
+}
+
+// TestSchemaEnforcementFamilyRevokeSerializes proves the family-advisory
+// ordering that closes the reuse-kill race (Devin Review, migration 0003):
+// while a session holds pg_advisory_lock on the family key, a concurrent
+// rotate_session waits on that advisory — not on the row — and must re-read
+// the post-mutation state once the lock passes. The mutation committed
+// inside that wait is exactly the original escape window: the rotate must
+// return the empty set and the would-be successor must never exist. The
+// wait is observed in pg_locks, so nothing here is timing-dependent.
+func TestSchemaEnforcementFamilyRevokeSerializes(t *testing.T) {
+	db := testenv.Open(t)
+	migrator := testenv.MigratorPool(t)
+	ctx := context.Background()
+
+	userID := seedAuthUser(t, "auth-race-"+uuid.NewString()+"@test.dev", "Race User")
+	gen0Hash := "rh-" + uuid.NewString()
+	var gen0 uuid.UUID
+	require.NoError(t, db.Pool().QueryRow(ctx,
+		`SELECT app.create_session($1, $2, now() + interval '30 days')`,
+		userID.String(), gen0Hash).Scan(&gen0))
+	// gen0 roots its own family, so it is the family key.
+
+	var familyKey int64
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT hashtextextended($1::text, 0)`, gen0.String()).Scan(&familyKey))
+
+	// The session-level advisory lock shares the lock space with the
+	// functions' pg_advisory_xact_lock: holding it here simulates a family
+	// mutation mid-flight.
+	holder, err := db.Pool().Acquire(ctx)
+	require.NoError(t, err)
+	defer holder.Release()
+	_, err = holder.Exec(ctx, `SELECT pg_advisory_lock($1)`, familyKey)
+	require.NoError(t, err)
+
+	succHash := "rh-" + uuid.NewString()
+	type rotateOutcome struct {
+		rows int
+		err  error
+	}
+	done := make(chan rotateOutcome, 1)
+	go func() {
+		rotator, err := db.Pool().Acquire(ctx)
+		if err != nil {
+			done <- rotateOutcome{err: err}
+			return
+		}
+		defer rotator.Release()
+		var rows int
+		err = rotator.QueryRow(ctx,
+			`SELECT count(*) FROM app.rotate_session($1, $2, now() + interval '30 days')`,
+			gen0Hash, succHash).Scan(&rows)
+		done <- rotateOutcome{rows: rows, err: err}
+	}()
+
+	// Deterministic: the rotator is observed waiting on this family's
+	// advisory key in pg_locks before the test proceeds — it has resolved
+	// the family and is blocked exactly where the serialization point is.
+	// classid/objid are the two 32-bit halves of the int64 key; splitting
+	// them in Go keeps SQL bitwise type inference out of the picture.
+	keyHi := int64(uint64(familyKey) >> 32)
+	keyLo := int64(uint32(familyKey))
+	require.Eventually(t, func() bool {
+		select {
+		case out := <-done:
+			t.Fatalf("rotate_session finished without blocking on the advisory: %+v", out)
+		default:
+		}
+		var waiters int
+		if err := migrator.QueryRow(ctx,
+			`SELECT count(*) FROM pg_locks
+			 WHERE locktype = 'advisory' AND NOT granted
+			   AND classid::bigint = $1 AND objid::bigint = $2`,
+			keyHi, keyLo).Scan(&waiters); err != nil {
+			return false
+		}
+		return waiters > 0
+	}, 5*time.Second, 10*time.Millisecond, "rotate_session must wait on the family advisory lock")
+
+	select {
+	case out := <-done:
+		t.Fatalf("rotate_session must block on the family advisory, not finish early: %+v", out)
+	default:
+	}
+
+	// The kill lands inside the wait — the window the advisory lock exists
+	// to close. As migrator so the write is not gated by qp_app's grants.
+	_, err = migrator.Exec(ctx,
+		`UPDATE app.auth_sessions SET revoked_at = now() WHERE family_id = $1`, gen0.String())
+	require.NoError(t, err)
+
+	select {
+	case out := <-done:
+		t.Fatalf("rotate_session released early — the interim kill is invisible to it: %+v", out)
+	default:
+	}
+
+	_, err = holder.Exec(ctx, `SELECT pg_advisory_unlock($1)`, familyKey)
+	require.NoError(t, err)
+
+	select {
+	case out := <-done:
+		require.NoError(t, out.err)
+		assert.Zero(t, out.rows, "rotate after the serialized family kill must return the empty set")
+	case <-time.After(5 * time.Second):
+		t.Fatal("rotate_session did not finish after the advisory was released")
+	}
+
+	// The original race let the successor commit inside the revoker's
+	// statement window and survive; under the advisory it is never born.
+	var succRows int
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT count(*) FROM app.auth_sessions WHERE refresh_token_hash = $1`, succHash).Scan(&succRows))
+	assert.Zero(t, succRows, "no successor may be born inside the kill window")
 }
