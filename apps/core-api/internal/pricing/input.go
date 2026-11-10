@@ -258,7 +258,7 @@ func (in Input) validateEquipment() error {
 		return nil
 	}
 	if strings.TrimSpace(in.EquipmentOrUnit) == "" {
-		return fmt.Errorf("pricing: equipment or unit required for %s", in.Modal)
+		return fmt.Errorf("pricing: equipment or unit %q for %s; expected a non-empty code", in.EquipmentOrUnit, in.Modal)
 	}
 	return nil
 }
