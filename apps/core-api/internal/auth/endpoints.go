@@ -55,8 +55,9 @@ func NewEndpoints(
 // the strict handler carries ExtractClientIP plus the two strict hooks, and
 // the std wrapper carries the binding-failure hook, so every rejection is one
 // of the spec section 7 {"error": ...} bodies — never http.Error text. The
-// returned handler routes all six contract paths itself; cmd/server mounts it
-// alongside the inbox surface.
+// returned handler routes all six contract paths itself and caps JSON bodies
+// before the generated binder can read them; cmd/server mounts it alongside
+// the inbox surface.
 //
 //	http.ListenAndServe(addr, auth.NewServer(endpoints))
 func NewServer(endpoints *Endpoints) http.Handler {
@@ -67,8 +68,22 @@ func NewServer(endpoints *Endpoints) http.Handler {
 			RequestErrorHandlerFunc:  writeBadRequest,
 			ResponseErrorHandlerFunc: writeInternal,
 		})
-	return authapi.HandlerWithOptions(strict, authapi.StdHTTPServerOptions{
+	return limitBody(authapi.HandlerWithOptions(strict, authapi.StdHTTPServerOptions{
 		ErrorHandlerFunc: writeBadRequest,
+	}))
+}
+
+// maxJSONBody caps every auth request body — the six routes each carry one
+// small JSON object, so anything larger is hostile, not bigger.
+const maxJSONBody = 8 << 10
+
+// limitBody caps request bodies before the generated binder reads them —
+// an oversized body dies as a uniform 400 inside the wrapper, spending no
+// limiter budget and bounded parse effort.
+func limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -79,8 +94,9 @@ func writeBadRequest(w http.ResponseWriter, _ *http.Request, _ error) {
 }
 
 // writeInternal collapses every handler-side failure — driver error, mint
-// failure, mail failure — into the same 500: a server fault is not an
-// enumeration signal, so no detail of it crosses the wire.
+// failure — into the same 500: a server fault is not an enumeration signal,
+// so no detail of it crosses the wire. (Mail failures no longer reach this
+// hook: the send is detached and only ever logged — see sendMagicLink.)
 func writeInternal(w http.ResponseWriter, _ *http.Request, _ error) {
 	writeError(w, http.StatusInternalServerError, authapi.ErrorCodeInternal)
 }

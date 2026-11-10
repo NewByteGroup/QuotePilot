@@ -13,9 +13,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,10 +122,52 @@ func (q *loginQuerier) createRow(args []any) pgx.Row {
 }
 
 // failMailer is a MailSender that always errors — FakeMailSender never fails,
-// so the send-failure branch needs its own double.
+// so the detached send-failure branch needs its own double.
 type failMailer struct{ err error }
 
 func (f failMailer) SendMagicLink(context.Context, string, string) error { return f.err }
+
+// recordLog is a slog.Handler that captures record messages — the detached
+// send logs from a goroutine, so a test asserts on the capture with
+// require.Eventually rather than on the response.
+type recordLog struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (h *recordLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordLog) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = append(h.messages, r.Message)
+	return nil
+}
+
+func (h *recordLog) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordLog) WithGroup(string) slog.Handler      { return h }
+
+// contains reports whether any captured message carries the needle — read
+// under the same mutex Handle writes with.
+func (h *recordLog) contains(needle string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, m := range h.messages {
+		if strings.Contains(m, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitSend polls for one recorded fake send: the mail leaves the response
+// path on a detached goroutine, so a synchronous Len would race it.
+func awaitSend(t *testing.T, mailer *platform.FakeMailSender, n int) []platform.MagicSend {
+	t.Helper()
+	require.Eventually(t, func() bool { return len(mailer.Sent()) == n },
+		time.Second, 5*time.Millisecond, "expected %d recorded send(s)", n)
+	return mailer.Sent()
+}
 
 // rig is a mounted auth surface plus the test's windows into it.
 type rig struct {
@@ -175,13 +219,13 @@ func TestLoginKnownEmailSendsMagicLink(t *testing.T) {
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
 	assert.Equal(t, `{"status":"ok"}`+"\n", rec.Body.String())
 
-	require.Len(t, mailer.Sends, 1)
-	assert.Equal(t, "ada@test.dev", mailer.Sends[0].To, "the recipient is the normalized address")
+	sent := awaitSend(t, mailer, 1)
+	assert.Equal(t, "ada@test.dev", sent[0].To, "the recipient is the normalized address")
 
 	prefix := r.cfg.WebURL + "/auth/exchange?token="
-	require.True(t, strings.HasPrefix(mailer.Sends[0].URL, prefix),
-		"magic link must be ${WEB_URL}/auth/exchange?token=…, got %q", mailer.Sends[0].URL)
-	token := strings.TrimPrefix(mailer.Sends[0].URL, prefix)
+	require.True(t, strings.HasPrefix(sent[0].URL, prefix),
+		"magic link must be ${WEB_URL}/auth/exchange?token=…, got %q", sent[0].URL)
+	token := strings.TrimPrefix(sent[0].URL, prefix)
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	require.NoError(t, err)
 	assert.Len(t, raw, 32, "the link carries a 32-byte opaque token")
@@ -192,7 +236,7 @@ func TestLoginKnownEmailSendsMagicLink(t *testing.T) {
 	assert.Equal(t, userID, r.q.creates[0].userID)
 	assert.Equal(t, platform.HashToken(token), r.q.creates[0].hash,
 		"the store holds the SHA-256 hash of the mailed token")
-	assert.NotContains(t, mailer.Sends[0].URL, r.q.creates[0].hash,
+	assert.NotContains(t, sent[0].URL, r.q.creates[0].hash,
 		"the hash must never cross the wire")
 	assert.Equal(t, r.clock.now.Add(r.cfg.LoginTTL), r.q.creates[0].expiresAt)
 }
@@ -215,7 +259,8 @@ func TestLoginUniform200(t *testing.T) {
 		"known and unknown emails must answer byte-identically")
 	assert.Equal(t, `{"status":"ok"}`+"\n", unknown.Body.String())
 
-	assert.Len(t, mailer.Sends, 1, "exactly one link went out — the known user's")
+	awaitSend(t, mailer, 1)
+	assert.Len(t, mailer.Sent(), 1, "exactly one link went out — the known user's")
 	assert.Len(t, r.q.creates, 1, "exactly one token row was stored")
 	assert.Len(t, r.q.finds, 2, "both requests still pay the same lookup")
 }
@@ -250,14 +295,16 @@ func TestLoginBadRequests(t *testing.T) {
 			assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
 		})
 	}
-	assert.Empty(t, mailer.Sends)
+	assert.Empty(t, mailer.Sent())
 	assert.Empty(t, r.q.finds, "no rejected request may reach the store")
 	assert.Empty(t, r.q.creates)
 }
 
-// TestLoginFailuresAreUniform500 proves a driver or sender failure is the
-// same 500 {"error":"internal"} wherever it strikes — a server fault is not
-// an enumeration signal, and a send failure sends nothing more.
+// TestLoginFailuresAreUniform500 proves a driver failure is the same 500
+// {"error":"internal"} wherever it strikes — a server fault is not an
+// enumeration signal. A mail failure is deliberately absent here: the send
+// is detached, so it can never reach the wire — see
+// TestLoginMailFailureIsLoggedNotSurfaced.
 func TestLoginFailuresAreUniform500(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -266,7 +313,6 @@ func TestLoginFailuresAreUniform500(t *testing.T) {
 	}{
 		{"lookup driver error", &platform.FakeMailSender{}, "find_user_by_email"},
 		{"token insert driver error", &platform.FakeMailSender{}, "create_login_token"},
-		{"mail send failure", failMailer{err: errBoom}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,6 +329,47 @@ func TestLoginFailuresAreUniform500(t *testing.T) {
 	}
 }
 
+// TestLoginMailFailureIsLoggedNotSurfaced proves a dead mailer cannot unmask
+// a provisioned address: the send runs off the response path, so the client
+// still gets the uniform 200 and the failure only ever reaches the log.
+func TestLoginMailFailureIsLoggedNotSurfaced(t *testing.T) {
+	logs := &recordLog{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(logs))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	r := newRig(t, failMailer{err: errBoom}, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+	r.q.users["ada@test.dev"] = uuid.New()
+
+	rec := r.postLogin(t, `{"email":"ada@test.dev"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	assert.Equal(t, `{"status":"ok"}`+"\n", rec.Body.String(),
+		"a mail failure must not change the uniform answer")
+
+	require.Eventually(t, func() bool { return logs.contains("magic link send failed") },
+		time.Second, 5*time.Millisecond, "the detached send failure must be logged")
+	assert.Len(t, r.q.creates, 1, "the token was already stored before the send ran")
+}
+
+// TestLoginOversizedBodyIsUniform400 caps the parse cost of a hostile body:
+// limitBody sits between the mux and the generated binder, so a body past
+// maxJSONBody dies as the uniform 400 — spending no limiter budget and no
+// store work.
+func TestLoginOversizedBodyIsUniform400(t *testing.T) {
+	mailer := &platform.FakeMailSender{}
+	r := newRig(t, mailer, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+
+	body := `{"email":"` + strings.Repeat("a", 9<<10) + `@test.dev"}`
+	rec := r.postLogin(t, body)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+	assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+	assert.Empty(t, mailer.Sent())
+	assert.Empty(t, r.q.finds, "an oversized body must never reach the store")
+}
+
 // TestLoginIPRateLimit drains the per-IP bucket (spec section 8.1): the
 // over-budget request gets the uniform 429 and does no store or mail work,
 // another IP carries its own bucket, and a denied call consumes nothing —
@@ -294,13 +381,13 @@ func TestLoginIPRateLimit(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"ada@test.dev"}`).Code)
 	require.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"ada@test.dev"}`).Code)
-	require.Len(t, mailer.Sends, 2)
+	awaitSend(t, mailer, 2)
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
 	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
-	assert.Len(t, mailer.Sends, 2, "a denied request sends nothing")
+	assert.Len(t, mailer.Sent(), 2, "a denied request sends nothing")
 	assert.Len(t, r.q.creates, 2, "a denied request stores no token")
 
 	// A different RemoteAddr is a different bucket.
@@ -315,6 +402,7 @@ func TestLoginIPRateLimit(t *testing.T) {
 	r.clock.Advance(platform.LimitWindow / 2)
 	assert.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"ada@test.dev"}`).Code,
 		"a denied call consumed nothing — one refilled token admits the retry")
+	awaitSend(t, mailer, 4)
 }
 
 // TestLoginEmailRateLimit drains the per-recipient bucket: the same address
@@ -328,12 +416,12 @@ func TestLoginEmailRateLimit(t *testing.T) {
 	r.q.users["grace@test.dev"] = uuid.New()
 
 	require.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"ada@test.dev"}`).Code)
-	require.Len(t, mailer.Sends, 1)
+	awaitSend(t, mailer, 1)
 
 	rec := r.postLogin(t, `{"email":"ADA@Test.dev"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
-	assert.Len(t, mailer.Sends, 1, "a denied request sends nothing")
+	assert.Len(t, mailer.Sent(), 1, "a denied request sends nothing")
 
 	assert.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"grace@test.dev"}`).Code,
 		"the email bucket is keyed per normalized recipient")
@@ -342,7 +430,8 @@ func TestLoginEmailRateLimit(t *testing.T) {
 	r.clock.Advance(platform.LimitWindow)
 	assert.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"ada@test.dev"}`).Code,
 		"a denied call consumed nothing — one refilled token admits the retry")
-	assert.Len(t, mailer.Sends, 3)
+	awaitSend(t, mailer, 3)
+	assert.Len(t, mailer.Sent(), 3)
 }
 
 // TestUnimplementedEndpointsFailLoud pins the stub contract: the contract
@@ -416,7 +505,7 @@ func TestLoginTrimsTrailingSlashOnWebURL(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	require.Len(t, mailer.Sends, 1)
-	assert.True(t, strings.HasPrefix(mailer.Sends[0].URL, "https://web.test/auth/exchange?token="),
-		"trailing-slash WEB_URL must not produce //auth/exchange, got %q", mailer.Sends[0].URL)
+	sent := awaitSend(t, mailer, 1)
+	assert.True(t, strings.HasPrefix(sent[0].URL, "https://web.test/auth/exchange?token="),
+		"trailing-slash WEB_URL must not produce //auth/exchange, got %q", sent[0].URL)
 }

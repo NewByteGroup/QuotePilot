@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -111,7 +113,10 @@ func parseLoginEmail(raw string) (string, bool) {
 // deliverMagicLink runs the lookup-and-send for a throttled, well-formed
 // email. An unknown email is not an error: nothing is created or sent and the
 // caller still gets the uniform 200 (spec section 8 — the only observable
-// difference is inside the platform, never in the response).
+// difference is inside the platform, never in the response). The send itself
+// leaves the response path: the mail provider's round trip would otherwise
+// make a provisioned address measurably slower than an unknown one — a
+// timing oracle identical bodies cannot hide.
 func (e *Endpoints) deliverMagicLink(ctx context.Context, email string) error {
 	userID, found, err := e.store.FindUserByEmail(ctx, email)
 	if err != nil {
@@ -124,10 +129,21 @@ func (e *Endpoints) deliverMagicLink(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mailer.SendMagicLink(ctx, email, magicLinkURL(e.cfg.WebURL, token)); err != nil {
-		return fmt.Errorf("auth: send magic link: %w", err)
-	}
+	go e.sendMagicLink(context.WithoutCancel(ctx), email, magicLinkURL(e.cfg.WebURL, token))
 	return nil
+}
+
+// sendMagicLink delivers the link off the response path: the mail RTT must
+// never distinguish a provisioned address from an unknown one (uniform-200
+// spec section 8). WithoutCancel detaches request cancellation while keeping
+// request values; the send is bounded by its own timeout and a failure is
+// logged, never surfaced — the client already has its uniform answer.
+func (e *Endpoints) sendMagicLink(ctx context.Context, email, link string) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := e.mailer.SendMagicLink(ctx, email, link); err != nil {
+		slog.Default().WarnContext(ctx, "auth: magic link send failed", "error", err)
+	}
 }
 
 // issueLoginToken mints a fresh opaque token and stores only its SHA-256 hex

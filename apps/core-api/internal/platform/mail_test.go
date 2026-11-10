@@ -13,7 +13,7 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 )
 
-// TestFakeMailSenderRecords proves the double itself: calls land in Sends
+// TestFakeMailSenderRecords proves the double itself: calls land in Sent()
 // in order.
 func TestFakeMailSenderRecords(t *testing.T) {
 	fake := &platform.FakeMailSender{}
@@ -23,7 +23,7 @@ func TestFakeMailSenderRecords(t *testing.T) {
 	require.Equal(t, []platform.MagicSend{
 		{To: "a@test.dev", URL: "https://app.test/auth/exchange?token=one"},
 		{To: "b@test.dev", URL: "https://app.test/auth/exchange?token=two"},
-	}, fake.Sends)
+	}, fake.Sent())
 }
 
 // TestResendMailSenderPosts pins the wire contract against a real HTTP
