@@ -120,7 +120,7 @@ The object key always comes from a row read under RLS, never from client input; 
 
 ### 10. Service-to-service: `core-api` to `ai-engine`
 
-Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in constant time, with two tokens accepted at once to allow rotation. `ai-engine` never calls `core-api`; there are no callbacks. mTLS is out of scope for the MVP.
+Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, sent as the `X-Internal-Service-Key` header and verified on all `ai-engine` routes, compared in constant time, with two tokens accepted at once to allow rotation. `ai-engine` never calls `core-api`; there are no callbacks. mTLS is out of scope for the MVP.
 
 ## Threats and controls
 
