@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,10 +123,18 @@ func (q *loginQuerier) createRow(args []any) pgx.Row {
 }
 
 // failMailer is a MailSender that always errors — FakeMailSender never fails,
-// so the detached send-failure branch needs its own double.
-type failMailer struct{ err error }
+// so the detached send-failure branch needs its own double. calls counts the
+// attempts so tests prove the retry budget rather than guess at goroutine
+// timing.
+type failMailer struct {
+	err   error
+	calls atomic.Int32
+}
 
-func (f failMailer) SendMagicLink(context.Context, string, string) error { return f.err }
+func (f *failMailer) SendMagicLink(context.Context, string, string) error {
+	f.calls.Add(1)
+	return f.err
+}
 
 // recordLog is a slog.Handler that captures record messages — the detached
 // send logs from a goroutine, so a test asserts on the capture with
@@ -338,7 +347,8 @@ func TestLoginMailFailureIsLoggedNotSurfaced(t *testing.T) {
 	slog.SetDefault(slog.New(logs))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	r := newRig(t, failMailer{err: errBoom}, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+	mailer := &failMailer{err: errBoom}
+	r := newRig(t, mailer, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	r.q.users["ada@test.dev"] = uuid.New()
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev"}`)
@@ -350,6 +360,8 @@ func TestLoginMailFailureIsLoggedNotSurfaced(t *testing.T) {
 	require.Eventually(t, func() bool { return logs.contains("magic link send failed") },
 		time.Second, 5*time.Millisecond, "the detached send failure must be logged")
 	assert.Len(t, r.q.creates, 1, "the token was already stored before the send ran")
+	require.Eventually(t, func() bool { return mailer.calls.Load() == 3 },
+		5*time.Second, 10*time.Millisecond, "a failed send retries up to the 3-attempt budget")
 }
 
 // TestLoginOversizedBodyIsUniform400 caps the parse cost of a hostile body:
@@ -508,4 +520,18 @@ func TestLoginTrimsTrailingSlashOnWebURL(t *testing.T) {
 	sent := awaitSend(t, mailer, 1)
 	assert.True(t, strings.HasPrefix(sent[0].URL, "https://web.test/auth/exchange?token="),
 		"trailing-slash WEB_URL must not produce //auth/exchange, got %q", sent[0].URL)
+}
+
+// TestLoginTrailingGarbageIsUniform400 pins the declared-length reject: a
+// valid object riding before an over-cap tail must die before the binder —
+// MaxBytesReader alone bounds reads, but the decoder never reads the tail.
+func TestLoginTrailingGarbageIsUniform400(t *testing.T) {
+	mailer := &platform.FakeMailSender{}
+	r := newRig(t, mailer, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+
+	rec := r.postLogin(t, `{"email":"ada@test.dev"}`+strings.Repeat(" ", 9<<10))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+	assert.Empty(t, r.q.creates, "a rejected body never reaches the store")
+	assert.Empty(t, mailer.Sent())
 }
