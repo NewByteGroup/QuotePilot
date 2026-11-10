@@ -184,9 +184,10 @@ type UserProfile struct {
 }
 
 // OrganizationIDHeader UUID of an organization the caller belongs to. Plain `string`, not
-// `format: uuid`: uuid/email formats pull
-// `github.com/oapi-codegen/runtime` into go.mod, and the ADR-002
-// allow-list needs Pedro's sign-off for any new dependency.
+// `format: uuid` — handlers validate with `uuid.Parse` so the
+// generated model stays free of `types.UUID`/`types.Email` wrapper
+// types (the middleware emits the spec's uniform `missing_organization`
+// 400, not a binding error).
 type OrganizationIDHeader = string
 
 // BadRequest defines model for BadRequest.

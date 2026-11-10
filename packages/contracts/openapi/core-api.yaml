@@ -98,7 +98,7 @@ paths:
         creates the session family (`create_session`), signs the access JWT
         and sets both cookies — `qp_access` (HttpOnly, Secure, SameSite=Lax,
         `Path=/`, 15 minutes) and `qp_refresh` (HttpOnly, Secure,
-        SameSite=Strict, `Path=/auth/refresh`, 30 days sliding) — then returns
+        SameSite=Strict, `Path=/auth`, 30 days sliding) — then returns
         the profile and memberships the organization switcher renders (spec
         sections 3.3 and 8). A used, expired or unknown token gets the same
         401 body; nothing distinguishes the cases.
@@ -134,8 +134,9 @@ paths:
       description: |
         Exchanges the `qp_refresh` cookie for the next generation in the same
         session family (`rotate_session`, spec section 4). Success sets a
-        fresh `qp_access` cookie and a rotated `qp_refresh` scoped to this
-        path. Presenting an already-rotated or already-revoked token is reuse:
+        fresh `qp_access` cookie and a rotated `qp_refresh` scoped `Path=/auth`
+        — it must also reach `/auth/logout`. Presenting an already-rotated or
+        already-revoked token is reuse:
         the whole family is revoked in the same atomic call, both cookies are
         cleared, and the uniform 401 is returned. Unknown or expired tokens
         clear the cookies and get the same 401.
@@ -158,7 +159,7 @@ paths:
       summary: Revoke the session family and clear both cookies.
       description: |
         Reads `qp_refresh` — still valid after `qp_access` expires — and
-        revokes the session (`revoke_session`). Always 204 with both cookies
+        revokes the family (`revoke_session_family_by_hash`). Always 204 with both cookies
         cleared, valid token or not: the response carries no validity oracle
         (spec section 8). The access JWT keeps verifying until its `exp`
         (≤15 min) — the accepted revocation lag of spec section 4.
@@ -253,7 +254,8 @@ components:
       name: qp_refresh
       description: |
         30-day opaque refresh token — HttpOnly, Secure, SameSite=Strict,
-        `Path=/auth/refresh`; rotated on every exchange and the whole family
+        `Path=/auth` — wide enough to reach `/auth/logout`, never sent to
+        tenant routes; rotated on every exchange and the whole family
         is revoked on reuse (spec section 4).
 
   parameters:
@@ -268,9 +270,10 @@ components:
         type: string
         description: |
           UUID of an organization the caller belongs to. Plain `string`, not
-          `format: uuid`: uuid/email formats pull
-          `github.com/oapi-codegen/runtime` into go.mod, and the ADR-002
-          allow-list needs Pedro's sign-off for any new dependency.
+          `format: uuid` — handlers validate with `uuid.Parse` so the
+          generated model stays free of `types.UUID`/`types.Email` wrapper
+          types (the middleware emits the spec's uniform `missing_organization`
+          400, not a binding error).
 
   schemas:
     ErrorCode:
