@@ -99,8 +99,9 @@ func orgBranding(raw json.RawMessage) (map[string]interface{}, error) {
 
 // meOrgUnauthenticated is the fail-closed answer for a request that reached
 // the handler without the chain's planted context — the same
-// {"error":"unauthenticated"} the middleware emits for a bad token, so a
-// mis-mount denies rather than leaks.
+// {"error":"unauthenticated"} the middleware emits for a bad token (modulo
+// the generated writer's trailing newline), so a mis-mount denies rather
+// than leaks.
 func meOrgUnauthenticated() authapi.GetMeOrganizationResponseObject {
 	return authapi.GetMeOrganization401JSONResponse{
 		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},

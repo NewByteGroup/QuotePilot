@@ -344,6 +344,11 @@ func (s *Store) GetCurrentOrganization(ctx context.Context) (Organization, bool,
 	if id == nil {
 		return Organization{}, false, nil
 	}
+	// name/slug/alias are NOT NULL columns; a NULL alongside a non-NULL id is
+	// driver contract drift, answered as an error rather than a nil deref.
+	if name == nil || slug == nil || alias == nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: null column in row %s", *id)
+	}
 	return Organization{
 		ID:                *id,
 		Name:              *name,
