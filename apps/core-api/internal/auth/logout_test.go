@@ -41,6 +41,10 @@ func TestLogoutRevokesWholeFamily(t *testing.T) {
 	now := r.clock.now
 	r.q.sessions[platform.HashToken(gen0)].rotatedAt = &now // the ancestor a rotation left
 
+	// A sibling family of a different user plants a live row that must
+	// survive: the revoke is family-scoped, not user-scoped or global.
+	siblingHash := platform.HashToken(r.plantGeneration(t, uuid.New(), uuid.New(), expiresAt))
+
 	rec := r.postLogout(t, qpRefreshCookie(gen1))
 
 	require.Equal(t, http.StatusNoContent, rec.Code)
@@ -52,6 +56,11 @@ func TestLogoutRevokesWholeFamily(t *testing.T) {
 		"revoke_session_family_by_hash looks up by hash, not the raw cookie")
 	assert.NotEqual(t, gen1, r.q.revocations[0], "the raw token must never reach the store")
 	for hash, s := range r.q.sessions {
+		if hash == siblingHash {
+			assert.Nil(t, s.revokedAt,
+				"a foreign family must survive — the kill is family-scoped")
+			continue
+		}
 		assert.Equal(t, familyID, s.familyID)
 		assert.NotNil(t, s.revokedAt, "family member %s must be revoked", hash)
 	}

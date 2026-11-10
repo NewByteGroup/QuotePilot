@@ -16,7 +16,7 @@ import (
 // The access JWT itself keeps verifying until its exp — the accepted
 // revocation lag of spec section 4.
 //
-// Always 204, valid token or not: the store's boolean feeds metrics only
+// Always 204, valid token or not: the store's boolean is simply discarded
 // and never reaches the wire, so the response carries no validity oracle —
 // absent, unknown and already-dead cookies all get the same cleared pair
 // plus the bare status. An absent cookie skips the store call entirely
