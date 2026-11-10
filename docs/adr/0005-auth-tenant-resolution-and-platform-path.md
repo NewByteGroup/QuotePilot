@@ -120,7 +120,7 @@ The object key always comes from a row read under RLS, never from client input; 
 
 ### 10. Service-to-service: `core-api` to `ai-engine`
 
-Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in constant time, with two tokens accepted at once to allow rotation. `ai-engine` never calls `core-api`; there are no callbacks. mTLS is out of scope for the MVP.
+Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in constant time, with two tokens accepted at once to allow rotation. The product spec v1.2 names `X-Internal-Service-Key` instead; this header and token-format conflict must be resolved before implementation. `ai-engine` never calls `core-api`; there are no callbacks. mTLS is out of scope for the MVP.
 
 ## Threats and controls
 
@@ -140,7 +140,7 @@ Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in co
 
 1. **A `qp_platform` role with `BYPASSRLS`.** Simple, and the most dangerous object in the system: a second credential that can read every tenant. Rejected by ADR-003's reasoning.
 2. **RLS on the identity tables, driven by a "user context" setting.** Needs a second context variable and policies for lookups that, by definition, have no context yet (login by email, alias resolution). More moving parts for the same result.
-3. **Supabase Auth.** ADR-003 uses Supabase as plain Postgres and S3. Adopting its auth schema and JWT-in-RLS pattern would put a second identity system next to ours and conflict with `InTenantTx`.
+3. **Supabase Auth.** ADR-003 uses Supabase as plain production Postgres and Cloudflare R2 for storage. Adopting Supabase's auth schema and JWT-in-RLS pattern would put a second identity system next to ours and conflict with `InTenantTx`.
 4. **Server-side sessions only, or JWT only.** Sessions-only gives up the stateless verify path the spec asked for; JWT-only cannot revoke. The short access token plus rotating refresh token covers both.
 5. **Passwords.** More surface (reset, storage, breach handling) for no benefit with four pilot companies. Magic link only.
 
