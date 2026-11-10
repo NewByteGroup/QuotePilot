@@ -1,0 +1,449 @@
+# OpenAPI 3.0.3 contract for the apps/core-api request edge — 3.0.3, not 3.1,
+# because oapi-codegen does not support 3.1 (ADR-002 section 1).
+#
+# This file fixes the wire shapes implied by
+# docs/specs/2026-11-10-tenant-resolution-api.md (sections 4, 7 and 8) and
+# ADR-005; the C1–C6 PRs implement handlers against the strict-server
+# interfaces generated from it. Generated output is committed to
+# apps/core-api/internal/auth/authapi and the CI contracts-drift job fails on
+# any regeneration diff — never hand-edit generated code.
+openapi: "3.0.3"
+
+info:
+  title: QuotePilot core-api
+  version: 0.1.0
+  description: |
+    Request edge of `apps/core-api`: magic-link login, cookie sessions and the
+    first tenant-resolution proof endpoint.
+
+    Authentication travels in two HttpOnly cookies (`qp_access` and
+    `qp_refresh` — see `components.securitySchemes`), never in an
+    `Authorization` header; tenant context travels in the `X-Organization-Id`
+    header. Failures are uniform (spec section 1): every authentication error
+    is the same 401 body, and a non-member and a nonexistent organization get
+    a byte-identical 404. Nothing in a response reveals whether an email, an
+    organization or a token exists.
+
+    Cookies are documented through the security schemes and operation
+    descriptions, not response `headers`: `Set-Cookie` carries comma-bearing
+    `Expires` dates, so a single header entry cannot represent the pair each
+    endpoint sets. Handlers write both cookies explicitly.
+  contact:
+    url: https://github.com/NewByteGroup/QuotePilot
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+# No public host is decided yet (ADR-007 environments are open); the routes
+# below are root-mounted, so the contract pins a relative server only.
+servers:
+  - url: /
+
+tags:
+  - name: auth
+    description: |
+      Magic-link session lifecycle (spec section 8): `/auth/login` sends the
+      link, `/auth/session` exchanges it for the cookie pair, `/auth/refresh`
+      rotates it and `/auth/logout` revokes it.
+  - name: me
+    description: |
+      Caller identity and the end-to-end tenant-resolution proof — request →
+      JWT → membership → `InTenantTx` (spec section 8).
+
+paths:
+  /auth/login:
+    post:
+      operationId: postAuthLogin
+      tags: [auth]
+      summary: Request a magic-link login email.
+      description: |
+        If `email` belongs to a provisioned user, the server stores a
+        `create_login_token` hash and sends `${WEB_URL}/auth/exchange?token=…`
+        through the platform sender; otherwise it does nothing. The 200 body
+        is identical either way — this endpoint cannot enumerate users (spec
+        section 8). Rate limited per email and per IP (spec section 8.1:
+        proposed 5 tokens/email/hour and 30 requests/IP/hour); the link opens
+        a page and the state change is this POST, so mail scanners prefetching
+        it consume nothing.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: |
+            Always `{"status":"ok"}` for any well-formed email — existing
+            user or not.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/session:
+    post:
+      operationId: postAuthSession
+      tags: [auth]
+      summary: Exchange a magic-link token for the session cookie pair.
+      description: |
+        Consumes a single-use login token (`consume_login_token`): on success
+        creates the session family (`create_session`), signs the access JWT
+        and sets both cookies — `qp_access` (HttpOnly, Secure, SameSite=Lax,
+        `Path=/`, 15 minutes) and `qp_refresh` (HttpOnly, Secure,
+        SameSite=Strict, `Path=/auth/refresh`, 30 days sliding) — then returns
+        the profile and memberships the organization switcher renders (spec
+        sections 3.3 and 8). A used, expired or unknown token gets the same
+        401 body; nothing distinguishes the cases.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionRequest'
+      responses:
+        '200':
+          description: |
+            Session created — the `qp_access`/`qp_refresh` cookie pair is set
+            as described in the operation description. Body carries the
+            switcher payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/refresh:
+    post:
+      operationId: postAuthRefresh
+      tags: [auth]
+      summary: Rotate the refresh cookie and mint a new access cookie.
+      description: |
+        Exchanges the `qp_refresh` cookie for the next generation in the same
+        session family (`rotate_session`, spec section 4). Success sets a
+        fresh `qp_access` cookie and a rotated `qp_refresh` scoped to this
+        path. Presenting an already-rotated or already-revoked token is reuse:
+        the whole family is revoked in the same atomic call, both cookies are
+        cleared, and the uniform 401 is returned. Unknown or expired tokens
+        clear the cookies and get the same 401.
+      security:
+        - qpRefresh: []
+      responses:
+        '200':
+          description: |
+            Rotated — a new `qp_access` cookie and the rotated `qp_refresh`
+            cookie are set (see operation description). No body.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/logout:
+    post:
+      operationId: postAuthLogout
+      tags: [auth]
+      summary: Revoke the session family and clear both cookies.
+      description: |
+        Reads `qp_refresh` — still valid after `qp_access` expires — and
+        revokes the session (`revoke_session`). Always 204 with both cookies
+        cleared, valid token or not: the response carries no validity oracle
+        (spec section 8). The access JWT keeps verifying until its `exp`
+        (≤15 min) — the accepted revocation lag of spec section 4.
+      security:
+        - qpRefresh: []
+      responses:
+        '204':
+          description: |
+            Always; `qp_access` and `qp_refresh` are cleared regardless of
+            whether the presented token was valid.
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /me:
+    get:
+      operationId: getMe
+      tags: [me]
+      summary: The caller's profile and memberships.
+      description: |
+        `Authenticate` verifies the `qp_access` JWT (signature, `exp`, known
+        `kid` — spec section 7; no database call), then the handler returns
+        `get_user_profile(sub)` plus the extended `list_memberships_for_email`
+        set — the organization switcher payload. Role and organization are
+        never in the JWT; membership is re-checked on every request.
+      security:
+        - qpAccess: []
+      responses:
+        '200':
+          description: Profile plus the membership list for the switcher.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /me/organization:
+    get:
+      operationId: getMeOrganization
+      tags: [me]
+      summary: Resolve the requested organization — the end-to-end tenant proof.
+      description: |
+        `Authenticate` then `ResolveTenant` (spec section 7): an absent or
+        non-UUID `X-Organization-Id` is a 400; a non-member and a nonexistent
+        organization get the same byte-identical 404 (`get_membership`
+        returns NULL for both — the indistinguishability is the security
+        property). On membership the handler calls
+        `get_current_organization()` inside `InTenantTx` — the first endpoint
+        where request → JWT → tenant transaction runs for real (spec
+        section 8).
+      security:
+        - qpAccess: []
+      parameters:
+        - $ref: '#/components/parameters/OrganizationIdHeader'
+      responses:
+        '200':
+          description: The resolved organization, read inside `InTenantTx`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationResponse'
+        '400':
+          description: |
+            `X-Organization-Id` absent or not a UUID —
+            `{"error":"missing_organization"}` (spec section 7).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    qpAccess:
+      type: apiKey
+      in: cookie
+      name: qp_access
+      description: |
+        15-minute HS256 access JWT — HttpOnly, Secure, SameSite=Lax,
+        `Path=/` (spec section 4). Claims: `sub`, `sid`, `exp`, `iat`; never
+        organization or role.
+    qpRefresh:
+      type: apiKey
+      in: cookie
+      name: qp_refresh
+      description: |
+        30-day opaque refresh token — HttpOnly, Secure, SameSite=Strict,
+        `Path=/auth/refresh`; rotated on every exchange and the whole family
+        is revoked on reuse (spec section 4).
+
+  parameters:
+    OrganizationIdHeader:
+      name: X-Organization-Id
+      in: header
+      required: true
+      description: |
+        Organization the request scopes to — also part of the CSRF posture,
+        since a cross-site form cannot set headers (ADR-005 section 4).
+      schema:
+        type: string
+        description: |
+          UUID of an organization the caller belongs to. Plain `string`, not
+          `format: uuid`: uuid/email formats pull
+          `github.com/oapi-codegen/runtime` into go.mod, and the ADR-002
+          allow-list needs Pedro's sign-off for any new dependency.
+
+  schemas:
+    ErrorCode:
+      type: string
+      description: |
+        Machine-readable failure code. `unauthenticated`,
+        `missing_organization`, `not_found`, `forbidden` and `internal` are
+        the middleware contract of spec section 7; `bad_request` covers
+        malformed bodies and `rate_limited` the login bucket (spec section
+        8.1 leaves the code unpinned — this contract fixes it).
+      enum:
+        - bad_request
+        - unauthenticated
+        - missing_organization
+        - not_found
+        - forbidden
+        - rate_limited
+        - internal
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorCode'
+
+    MembershipRole:
+      type: string
+      description: Mirrors the `app.membership_role` enum (migration 0002).
+      enum: [OWNER, ADMIN, PRICING_ANALYST]
+    Membership:
+      type: object
+      additionalProperties: false
+      required: [organization_id, name, slug, role]
+      properties:
+        organization_id:
+          type: string
+          description: Organization UUID (see `OrganizationIdHeader` for the plain-string choice).
+        name:
+          type: string
+        slug:
+          type: string
+        role:
+          $ref: '#/components/schemas/MembershipRole'
+    UserProfile:
+      type: object
+      additionalProperties: false
+      required: [id, email, full_name]
+      properties:
+        id:
+          type: string
+          description: User UUID.
+        email:
+          type: string
+          description: Lower-cased login email.
+        full_name:
+          type: string
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          description: |
+            RFC 5322 addr-spec; matched case-insensitively
+            (`find_user_by_email` lower-cases and trims). Plain `string` on
+            purpose — see `OrganizationIdHeader` for the format/dependency
+            trade-off.
+    LoginResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: Always `ok` for a well-formed email — uniform by design.
+    SessionRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: |
+            Base64url 32-byte token from the magic link (spec section 4). It
+            crosses the wire once; the server stores only its SHA-256.
+    SessionResponse:
+      type: object
+      additionalProperties: false
+      required: [profile, memberships]
+      properties:
+        profile:
+          $ref: '#/components/schemas/UserProfile'
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [id, email, full_name, memberships]
+      properties:
+        id:
+          type: string
+          description: User UUID.
+        email:
+          type: string
+        full_name:
+          type: string
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/Membership'
+    OrganizationResponse:
+      type: object
+      additionalProperties: false
+      required: [id, name, slug, inbound_email_alias, branding_json]
+      properties:
+        id:
+          type: string
+          description: Organization UUID.
+        name:
+          type: string
+        slug:
+          type: string
+        inbound_email_alias:
+          type: string
+          description: |
+            Resend Inbound alias — unique, lower-cased (migration 0002
+            `CHECK (inbound_email_alias = lower(inbound_email_alias))`).
+        branding_json:
+          type: object
+          description: |
+            Free-form branding blob (colors, logo, legal footer) —
+            `app.organizations.branding_json`, jsonb with `{}` default.
+
+  responses:
+    BadRequest:
+      description: Malformed request body — `{"error":"bad_request"}`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: |
+        Uniform `{"error":"unauthenticated"}` — missing, forged, expired,
+        reused or unknown credentials all share one byte-identical body
+        (spec section 7).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: |
+        Byte-identical `{"error":"not_found"}` for non-member and
+        nonexistent organization alike — the indistinguishability is the
+        security property (spec section 7).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Login bucket exhausted — `{"error":"rate_limited"}` (spec section 8.1).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: '`{"error":"internal"}` — unclassified server failure.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

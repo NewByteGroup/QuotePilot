@@ -1,0 +1,16 @@
+# oapi-codegen codegen config (ADR-002 section 1: std-http-server +
+# strict-server, generated code committed). Invoke from this directory —
+# `oapi-codegen -config oapi-codegen.yaml ../../packages/contracts/openapi/core-api.yaml`
+# — so `output` resolves under internal/auth/authapi; `make generate` and the
+# packages/contracts Makefile both do this. Output is committed; never edit it
+# by hand (CI contracts-drift regenerates and fails on any diff).
+package: authapi
+output: internal/auth/authapi/authapi.gen.go
+generate:
+  models: true
+  std-http-server: true
+  strict-server: true
+output-options:
+  # Idiomatic Go names — ID, JSON — matching the hand-written code style
+  # (e.g. internal/inbox's OrganizationID). Default ToCamelCase emits `Id`.
+  name-normalizer: ToCamelCaseWithInitialisms
