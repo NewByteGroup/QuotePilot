@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 
 	"github.com/google/uuid"
@@ -105,7 +106,7 @@ func Authenticate(cfg *Config) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID, sessionID, ok := verifyAccessCookie(cfg, r)
 			if !ok {
-				writeError(w, http.StatusUnauthorized, errUnauthenticated)
+				writeError(r.Context(), w, http.StatusUnauthorized, errUnauthenticated)
 				return
 			}
 			ctx := context.WithValue(r.Context(), userCtxKey, userID)
@@ -161,12 +162,12 @@ func ResolveTenant(store *Store) func(http.Handler) http.Handler {
 func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.UUID, string, bool) {
 	orgID, err := uuid.Parse(r.Header.Get(orgHeader))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, errMissingOrg)
+		writeError(r.Context(), w, http.StatusBadRequest, errMissingOrg)
 		return uuid.Nil, "", false
 	}
 	userID, ok := UserID(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, errUnauthenticated)
+		writeError(r.Context(), w, http.StatusUnauthorized, errUnauthenticated)
 		return uuid.Nil, "", false
 	}
 	return checkMembership(store, w, r, userID, orgID)
@@ -179,11 +180,11 @@ func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.U
 func checkMembership(store *Store, w http.ResponseWriter, r *http.Request, userID, orgID uuid.UUID) (uuid.UUID, string, bool) {
 	role, ok, err := store.GetMembership(r.Context(), userID, orgID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, errInternal)
+		writeError(r.Context(), w, http.StatusInternalServerError, errInternal)
 		return uuid.Nil, "", false
 	}
 	if !ok {
-		writeError(w, http.StatusNotFound, errNotFound)
+		writeError(r.Context(), w, http.StatusNotFound, errNotFound)
 		return uuid.Nil, "", false
 	}
 	return orgID, role, true
@@ -202,7 +203,7 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role, ok := Role(r.Context())
 			if !ok || !slices.Contains(roles, role) {
-				writeError(w, http.StatusForbidden, errForbidden)
+				writeError(r.Context(), w, http.StatusForbidden, errForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -220,15 +221,26 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 //	mux.Handle("POST /quotes", platform.CheckOrigin(cfg)(chain(quotes)))
 func CheckOrigin(cfg *Config) func(http.Handler) http.Handler {
 	cop := http.NewCrossOriginProtection()
-	if err := cop.AddTrustedOrigin(cfg.WebURL); err != nil {
+	if err := cop.AddTrustedOrigin(trustedOrigin(cfg.WebURL)); err != nil {
 		// A WEB_URL the CSRF layer cannot parse is a startup bug — better a
 		// loud crash than a silently weaker posture.
 		panic(fmt.Errorf("platform: check origin: %w", err))
 	}
-	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusForbidden, errForbidden)
+	cop.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeError(r.Context(), w, http.StatusForbidden, errForbidden)
 	}))
 	return cop.Handler
+}
+
+// trustedOrigin reduces WebURL — a base URL that may carry a path — to the
+// scheme://host[:port] origin AddTrustedOrigin accepts. An unparseable or
+// non-http(s) WebURL is a startup bug and panics.
+func trustedOrigin(webURL string) string {
+	u, err := url.Parse(webURL)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		panic(fmt.Errorf("platform: trusted origin: bad WEB_URL %q", webURL))
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // writeError is the single failure writer every middleware rejection routes
@@ -237,13 +249,15 @@ func CheckOrigin(cfg *Config) func(http.Handler) http.Handler {
 // status and the code — there is no parameter through which distinguishing
 // detail could leak, which is what makes a non-member and a nonexistent org
 // byte-identical on the wire.
-func writeError(w http.ResponseWriter, status int, code string) {
+func writeError(ctx context.Context, w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if _, err := io.WriteString(w, `{"error":"`+code+`"}`); err != nil {
 		// The wire contract cannot change mid-response; the only thing left
-		// is the diagnostic, so it is logged rather than discarded.
-		slog.Default().Warn("platform: error response write failed",
+		// is the diagnostic, logged rather than discarded. WarnContext carries
+		// the request context so the correlation_id attribute the logging
+		// middleware plants is attached once that middleware lands.
+		slog.Default().WarnContext(ctx, "platform: error response write failed",
 			"status", status, "code", code, "error", err)
 	}
 }
