@@ -29,7 +29,7 @@ enforced; object storage on Cloudflare R2. Diagram:
 - ADR-004: staged River jobs; the worker is the only caller of the pricing engine in the MVP.
 - ADR-003 (On-Hold; provider topology fixed by product spec v1.2): Railway Postgres for dev, Supabase `quotepilot-prod` in `sa-east-1` for prod, Cloudflare R2 (`quotepilot-dev`/`quotepilot-prod` buckets) for object storage. The role model still applies: `qp_migrator` owner and `qp_app` NOBYPASSRLS roles, tables in schema `app`, RLS with stand-in roles locally, Data API and pg_graphql disabled on Supabase, session-mode pooler or direct connection (River needs LISTEN/NOTIFY). Plans, connection limits and account owner are still open.
 - Embeddings: `VECTOR(1024)` plus an `embedding_model` column, no ANN index in the MVP; provider fixed at `qwen/qwen3-embedding-8b` (1024 dims) by ADR-006's approved model matrix — a retrieval-quality eval is still owed.
-- Document rendering (PDF and email HTML): fixed to `ai-engine` by product spec v1.2; the renderer library and templates remain the open piece (RFC-002).
+- Document rendering (PDF and email HTML): `apps/ai-engine/render/` with Jinja2 + WeasyPrint; HTML/CSS templates owned by Marcelo and Amanda (resolved via the ADR-001 items; the output-quality check is owed in RFC-002).
 
 ## Missions, in order
 

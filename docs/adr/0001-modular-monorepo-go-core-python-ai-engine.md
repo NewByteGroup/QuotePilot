@@ -1,6 +1,6 @@
 # ADR-001: Modular monorepo with a Go core and a stateless Python ai-engine
 
-- **Status:** Approved (open items remain)
+- **Status:** Approved
 - **Date:** 2026-11-04
 - **Deciders:** Pedro (backend lead). Reviewed and approved by Marcelo and Amanda.
 - **Related:** ADR-002 (Go core stack), ADR-003 (Postgres on Railway dev / Supabase prod, R2 storage), ADR-004 (async jobs), RFC-003 (connectors and Devin loop)
@@ -95,8 +95,8 @@ quotepilot/
 
 **Reversibility.** `web` and `ai-engine` depend on `core-api` only through the contract. If the Go spike in ADR-002 fails its gate, the core can be reimplemented in Python (FastAPI) behind the same contract and the same two-process boundary, without touching `web` or `ai-engine`.
 
-## Open items
+## Resolved items (previously Open items, closed 2026-11-09/10)
 
-- Document rendering details. Product spec v1.2 fixes the location: `ai-engine` renders the PDF and email HTML, with templates owned by Marcelo and Amanda. RFC-002 still requests their confirmation of the renderer and template details.
-- Embedding consent and evaluation questions (RFC-004). The approved ADR-006 model matrix selects `qwen/qwen3-embedding-8b` at 1024 dimensions, recorded with `embedding_model`.
-- Service-to-service auth between `core-api` and `ai-engine` (private network plus a shared service token is the minimum).
+- Document rendering (resolved): runs in `apps/ai-engine/render/` with Jinja2 + WeasyPrint, producing PDF bytes and short branded HTML/text email bodies; HTML/CSS templates are owned by Marcelo and Amanda. No Node.js / React Email service. The output-quality check against Marcelo's design remains an RFC-002 verification step, not a choice.
+- Embeddings (resolved): `VECTOR(1024)` with an explicit `embedding_model` column on `private_tariffs`, and an exact scan after the `(organization_id, modal)` filter in the MVP (no ANN index). Provider is `qwen/qwen3-embedding-8b` per the approved ADR-006 matrix; consent and evaluation questions stay in RFC-004.
+- Service-to-service auth (resolved): private network plus a shared `X-Internal-Service-Key` header verified on all `ai-engine` routes — the `AI_ENGINE_SERVICE_TOKEN` bearer of ADR-005 section 10.
