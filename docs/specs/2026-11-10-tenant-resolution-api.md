@@ -66,15 +66,14 @@ sweet spot (AGENTS.md, small-PR rule):
 
 | PR | Branch | Content | Depends on |
 |---|---|---|---|
-| A | `feat/core-auth-session-schema` | Migration 0003: two Layer A tables + the §5 function family + allowlist triplet | ADR-005 sign-off; §3.3 decision |
-| B | `feat/core-platform-package` | `internal/platform`: config, JWT/token helpers, typed accessors, middleware chain | A |
+| A | `feat/core-auth-session-schema` | Migration 0003: two Layer A tables + the §5 function family + allowlist triplet | ADR-005 sign-off; §3.3 decision; §3.1 naming ratification |
+| B | `feat/core-platform-package` | `internal/platform`: config, JWT/token helpers, typed accessors | A |
+| B2 | `feat/core-tenant-middleware` | `Authenticate` → `ResolveTenant` → `RequireRole` chain + its httptest proofs | B |
 | C0 | `feat/contracts-core-api-openapi` | `packages/contracts/openapi/core-api.yaml` + oapi-codegen plumbing (recommended — see §8.2) | none; can run parallel to A/B |
-| C | `feat/core-auth-endpoints` | `internal/auth` endpoints + `cmd/server` wiring + `/me/organization` end-to-end | A, B (and C0 if codegen is used) |
+| C1–C6 | `feat/core-auth-<endpoint>` | One endpoint per PR (AGENTS.md small-PR rule), in order: `login`, `session`, `refresh`, `logout`, `me`, `me/organization` | B2 (and C0 if codegen is used) |
 
-If PR C exceeds the budget it splits into C1 (session lifecycle:
-login/session/refresh/logout) and C2 (`/me`, `/me/organization`) —
-C2 is the slice that proves the whole chain, so it must ship even if C1
-slips. Deferred explicitly: rewiring the Resend webhook to
+`C6` (`GET /me/organization`) is the slice that proves the whole chain
+end to end, so it lands last. Deferred explicitly: rewiring the Resend webhook to
 `resolve_inbound_org`, 1-click approval tokens, the waiter registry, and
 admin/teardown endpoints (§10).
 
@@ -302,14 +301,14 @@ sets the per-surface mux precedent).
   use — same code path, same lookup, same response writer; no early
   "org exists" shortcut.
 
-## 8. HTTP surface (`internal/auth`, PR C)
+## 8. HTTP surface (`internal/auth`, PRs C1–C6)
 
 | Route | Chain | Behavior |
 |---|---|---|
 | `POST /auth/login` | rate limit → handler | `{email}` → **always 200 `{"status":"ok"}`** for any well-formed email. If the user exists: `create_login_token` + `MailSender` with `${WEB_URL}/auth/exchange?token=…`. The platform sender, not a tenant brand (ADR-005 §3). Malformed body → 400. Bucket exhausted → 429. |
 | `POST /auth/session` | — | `{token}` → `consume_login_token`; success → `create_session` + sign JWT + set both cookies → 200 with the profile + memberships payload the switcher needs. Used/expired/unknown → uniform 401. |
 | `POST /auth/refresh` | — | `qp_refresh` cookie → `rotate_session`; `rotated` → new JWT + new scoped cookie; reuse → family already revoked + clear cookies + 401; empty → 401 + clear cookies. |
-| `POST /auth/logout` | `Authenticate` | `revoke_session(sid)` + clear both cookies → 204. |
+| `POST /auth/logout` | — (refresh cookie) | Reads `qp_refresh` — still valid after `qp_access` expires — and calls `revoke_session` for the session family; always 204 + clears both cookies, valid token or not (no validity oracle). |
 | `GET /me` | `Authenticate` | `get_user_profile` + the §3.3 membership list → `{id, email, full_name, memberships:[…]}`. |
 | `GET /me/organization` | `Authenticate` + `ResolveTenant` | **The end-to-end proof**: inside `InTenantTx(org)` call `get_current_organization()` → `{id, name, slug, inbound_email_alias, branding_json}` — the first endpoint where request → JWT → tenant → tenant transaction runs for real. |
 
@@ -356,7 +355,8 @@ role for a member and NULL for non-member *and* nonexistent org alike;
 `get_user_profile` returns only the documented columns; the extended
 list returns `name`+`slug`.
 
-**Middleware proofs (httptest + fake store):** forged JWT, non-member
+**Middleware proofs (httptest + fake store):** forged JWT → uniform
+401 (rejected by `Authenticate` before any tenant lookup); non-member
 and nonexistent org produce an **identical** 404 (status and body
 byte-equal); a member removed between requests is refused on the next
 one (nothing cached); missing `X-Organization-Id` on a mutation → 400;

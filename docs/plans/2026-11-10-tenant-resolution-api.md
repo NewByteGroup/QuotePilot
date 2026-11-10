@@ -3,14 +3,16 @@
 - **Spec:** `docs/specs/2026-11-10-tenant-resolution-api.md` (read first —
   every rule below resolves to it; ADR-005 §§1–5 is the governing source)
 - **Branches:** one per PR, all off `develop` — `feat/core-auth-session-schema`
-  (A), `feat/core-platform-package` (B), `feat/contracts-core-api-openapi`
-  (C0, recommended), `feat/core-auth-endpoints` (C)
+  (A), `feat/core-platform-package` (B), `feat/core-tenant-middleware` (B2),
+  `feat/contracts-core-api-openapi` (C0, recommended), then one
+  `feat/core-auth-<endpoint>` per route (C1–C6)
 - **Scope:** `apps/core-api` request edge + the two infra check files.
   No webhook changes, no approval tokens, no waiter registry, no `apps/web`
   work — spec §10 non-goals stay out.
-- **Gate:** ADR-005 is Proposed and the spec carries two SPEC DECISION
-  REQUIRED items (§3.3 switcher function, §8.2 contract plumbing). **PR A
-  does not open until Pedro answers both.**
+- **Gate:** ADR-005 is Proposed and the spec carries three SPEC DECISION
+  REQUIRED items (§3.1 function naming ratification, §3.3 switcher
+  function, §8.2 contract plumbing). **PR A does not open until Pedro
+  answers all three.**
 
 ## Constraints that apply while coding
 
@@ -60,10 +62,10 @@ apps/core-api/internal/auth/authapi/                         # generated, commit
 apps/core-api/Makefile                                       # generate += oapi-codegen
 Makefile                                                     # contracts-drift gains this path
 
-# PR C — endpoints + wiring
+# PR C1–C6 — one endpoint per PR; cumulative layout
 apps/core-api/internal/auth/{server,login,session,refresh,logout,me}.go
 apps/core-api/internal/auth/*_test.go                        # incl. e2e vs real Postgres
-apps/core-api/cmd/server/main.go                             # compose auth + inbox muxes
+apps/core-api/cmd/server/main.go                             # C1: compose auth + inbox muxes
 ```
 
 ## Task order (executor-dispatchable, one task per PR)
@@ -86,18 +88,25 @@ apps/core-api/cmd/server/main.go                             # compose auth + in
    verify with `kid` set (HS256 pinned, alg-confusion rejected);
    `token.go` (32B `crypto/rand`, SHA-256 hex); `store.go` typed
    accessors over a `Querier` interface satisfied by `*pgxpool.Pool` and
-   `pgx.Tx`; `middleware.go` `Authenticate` → `ResolveTenant` →
-   `RequireRole` with private ctx keys and the uniform writers;
-   `ratelimit.go` bucket with injected clock; `mail.go` `MailSender`
-   interface + Resend impl + `FakeMailSender` for tests.
+   `pgx.Tx`; `ratelimit.go` bucket with injected clock; `mail.go`
+   `MailSender` interface + Resend impl + `FakeMailSender` for tests.
    *Tests:* jwt round-trip / wrong-key / wrong-kid / expired / forged;
-   token shape+uniqueness; middleware matrix from spec §9 (identical
-   404s byte-equal, removed member refused next request, missing header
-   → 400, role gates); bucket exhaust+refill; store accessors against
+   token shape+uniqueness; bucket exhaust+refill; store accessors against
    real Postgres incl. NULL → `(zero,false)`.
    *Accept:* `go test -count=1 -race ./internal/platform/...`,
    `go vet ./... && gofmt -l .`, `go build ./...`; integration half under
    `make -C apps/core-api integration-test`.
+
+2b. **PR B2 — tenant middleware.** `middleware.go` `Authenticate` →
+   `ResolveTenant` → `RequireRole` with private ctx keys and the uniform
+   writers; ships alone with its test matrix so the mission's core gets
+   its own review.
+   *Tests:* the spec §9 matrix in full — forged JWT → uniform 401;
+   non-member and nonexistent org → identical 404 (status and body
+   byte-equal); removed member refused on the next request; missing
+   `X-Organization-Id` on a mutation → 400; `RequireRole` 403.
+   *Accept:* `go test -count=1 -race ./internal/platform/...`,
+   `go vet ./... && gofmt -l .`.
 
 3. **PR C0 (recommended) — contract plumbing.** Write
    `packages/contracts/openapi/core-api.yaml` for the six routes (cookie
@@ -111,24 +120,50 @@ apps/core-api/cmd/server/main.go                             # compose auth + in
    --exit-code`), `go build ./...`, spec lints clean (the lint job's
    OpenAPI step).
 
-4. **PR C — `internal/auth` + `cmd/server`.** Handlers behind the mux
-   (or the generated `ServerInterface` if C0 landed): `POST /auth/login`
-   (uniform 200, bucket, `MailSender`), `POST /auth/session` (consume →
-   session + cookie pair), `POST /auth/refresh` (rotate, reuse → clear +
-   401), `POST /auth/logout` (revoke `sid`, clear cookies) — none behind
-   `ResolveTenant`; `GET /me` (`Authenticate`), `GET /me/organization`
-   (`Authenticate` + `ResolveTenant` + `get_current_organization` inside
-   `InTenantTx` — the end-to-end proof). `cmd/server/main.go` composes
-   this mux and `inbox.NewServer`; the webhook's payload-carried org
-   stays until its own PR (spec §10).
-   *Tests:* spec §9 login/session proofs over httptest against real
-   Postgres — identical 200s, single-use, expiry, rotation, family
-   revoke on reuse, cookie flag assertions (HttpOnly/Secure/SameSite/
-   path), no org/role claims in the JWT, `/me/organization` reaching an
-   org row through the full chain.
-   *Split note:* if the diff passes ~500 non-generated lines, land C1
-   (session lifecycle) first, then C2 (`/me`, `/me/organization`) — C2
-   still ships in the same mission.
+4. **PR C1 — `cmd/server` + `POST /auth/login`.** `cmd/server/main.go`
+   composes the auth mux with `inbox.NewServer` (the webhook keeps its
+   payload-carried org until its own PR, spec §10) plus sane
+   `http.Server` timeouts; then the first endpoint: `{email}` → uniform
+   200, bucket, `MailSender` with the exchange link.
+   *Tests:* identical 200 bodies for known/unknown/malformed-adjacent
+   emails, 400 on malformed JSON, 429 on bucket exhaustion, fake sender
+   receives the token link only when the user exists.
+   *Accept:* `go test -count=1 -race ./internal/auth/...`, `go build
+   ./...`; `cmd/server` boots against the dev DSN and serves the webhook
+   unchanged.
+
+5. **PR C2 — `POST /auth/session`.** `{token}` → `consume_login_token` →
+   `create_session` + JWT + both cookies → 200 with the switcher payload;
+   used/expired/unknown → uniform 401.
+   *Tests:* single-use consume, expiry rejection, cookie flag assertions
+   (HttpOnly/Secure/SameSite/path), no org/role claims inside the JWT.
+   *Accept:* `go test -count=1 -race ./internal/auth/...` against real
+   Postgres.
+
+6. **PR C3 — `POST /auth/refresh`.** `qp_refresh` → `rotate_session`;
+   rotated → new JWT + scoped cookie; reuse → family revoked + cleared
+   cookies + 401; empty → 401 + cleared cookies.
+   *Tests:* rotation happy path, reuse → family revocation, expired
+   refresh → 401.
+   *Accept:* `go test -count=1 -race ./internal/auth/...`.
+
+7. **PR C4 — `POST /auth/logout`.** `qp_refresh` → `revoke_session`
+   family; always 204 + clears both cookies (spec §8 — works when
+   `qp_access` is already expired; no validity oracle).
+   *Tests:* logout after access-expiry still revokes the family;
+   repeated logout stays 204.
+   *Accept:* `go test -count=1 -race ./internal/auth/...`.
+
+8. **PR C5 — `GET /me`.** `Authenticate` → `get_user_profile` + the §3.3
+   membership list.
+   *Tests:* authenticated payload shape; forged/absent JWT → 401.
+   *Accept:* `go test -count=1 -race ./internal/auth/...`.
+
+9. **PR C6 — `GET /me/organization`.** `Authenticate` + `ResolveTenant`
+   + `get_current_organization` inside `InTenantTx` — the end-to-end
+   proof of the whole mission.
+   *Tests:* org row through the real chain; non-member vs nonexistent org
+   → identical 404; forged JWT → 401; missing header → 400.
    *Accept:* `go test -count=1 -race ./internal/auth/...`, full
    `make -C apps/core-api integration-test`, `go build ./...`.
 
