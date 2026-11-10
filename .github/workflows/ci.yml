@@ -632,6 +632,21 @@ jobs:
           fi
           psql -X -v ON_ERROR_STOP=1 "$PG_SUPER_DSN" -f infra/postgres/checks/roles.sql
 
+      # The function-denial cases SKIP pre-migration in the integration-test
+      # job (the platform_*/tenant functions do not exist yet); here they get
+      # their real proof on the migrated schema.
+      - name: Negative tests on the migrated schema
+        env:
+          QP_CHECK_DSN: ${{ env.PG_SUPER_DSN }}
+        run: |
+          shopt -s nullglob
+          files=(apps/core-api/db/migrations/*.sql)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "stub: no migrations yet — nothing to re-check"
+            exit 0
+          fi
+          bash infra/postgres/checks/negative-tests.sh
+
   security:
     name: security
     runs-on: ubuntu-latest

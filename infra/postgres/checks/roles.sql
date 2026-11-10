@@ -487,6 +487,10 @@ END $$;
 -- schema-app USAGE plus these EXECUTEs — no relation or column privileges and
 -- no default privileges in app/river, so a grant to it anywhere else means the
 -- minimal-surface contract drifted.
+-- Pre-migration (CI runs roles.sql twice: after init, then after migrate) the
+-- platform functions do not exist yet, so every hard-signature reference below
+-- is gated on to_regprocedure ... IS NOT NULL: vacuous-true before migrations,
+-- real afterwards — the same tolerance [M] shows on empty catalogs.
 DO $$
 DECLARE
   bad text;
@@ -498,7 +502,8 @@ DECLARE
     WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = 'qp_migrator')
       AND a.grantee <> d.defaclrole $q$;
 BEGIN
-  -- qp_admin must EXECUTE exactly the platform five — none missing...
+  -- qp_admin must EXECUTE exactly the platform five — none missing (skipped
+  -- entirely when a signature is absent pre-migration).
   SELECT string_agg(f.fn, ', ') INTO bad
   FROM (VALUES
     ('app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)'),
@@ -507,23 +512,27 @@ BEGIN
     ('app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)'),
     ('app.platform_delete_organization(uuid)')
   ) AS f(fn)
-  WHERE NOT has_function_privilege('qp_admin', f.fn, 'EXECUTE');
+  WHERE to_regprocedure(f.fn) IS NOT NULL
+    AND NOT has_function_privilege('qp_admin', to_regprocedure(f.fn), 'EXECUTE');
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_admin must EXECUTE every platform_* function; missing: %', bad;
   END IF;
 
   -- ...and nothing beyond them in app or river (a tenant-facing function
   -- granted to qp_admin, a river helper, or a new unlisted platform entry
-  -- point, is drift).
+  -- point, is drift). The exclusion list resolves through to_regprocedure so
+  -- absent signatures contribute no oid instead of an error.
   SELECT string_agg(p.oid::regprocedure::text, ', ') INTO bad
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname IN ('app','river') AND has_function_privilege('qp_admin', p.oid, 'EXECUTE')
-    AND p.oid <> ALL (ARRAY[
-      'app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)'::regprocedure,
-      'app.platform_update_connector_status(text, app.connector_status, numeric)'::regprocedure,
-      'app.platform_insert_healing_session(text, uuid, text, text, text, text)'::regprocedure,
-      'app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)'::regprocedure,
-      'app.platform_delete_organization(uuid)'::regprocedure]);
+    AND p.oid <> ALL (ARRAY(
+      SELECT to_regprocedure(f.fn) FROM (VALUES
+        ('app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)'),
+        ('app.platform_update_connector_status(text, app.connector_status, numeric)'),
+        ('app.platform_insert_healing_session(text, uuid, text, text, text, text)'),
+        ('app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)'),
+        ('app.platform_delete_organization(uuid)')
+      ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_admin EXECUTE surface must equal the platform five; extra: %', bad;
   END IF;
@@ -538,7 +547,8 @@ BEGIN
     ('app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)'),
     ('app.platform_delete_organization(uuid)')
   ) AS f(fn)
-  WHERE has_function_privilege('qp_app', f.fn, 'EXECUTE');
+  WHERE to_regprocedure(f.fn) IS NOT NULL
+    AND has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_app must not EXECUTE platform_* functions; offending: %', bad;
   END IF;

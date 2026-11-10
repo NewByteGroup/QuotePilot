@@ -17,6 +17,7 @@ ROLES_SQL="$CHECKS_DIR/roles.sql"
 cd "$CHECKS_DIR/../../.."  # repo root, where docker-compose.yml lives
 passed=0
 failed=0
+skipped=0
 failures=()
 
 run_psql() {
@@ -24,6 +25,15 @@ run_psql() {
     psql -X -v ON_ERROR_STOP=1 -q "$QP_CHECK_DSN"
   else
     docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+  fi
+}
+
+# run_psql_t: same connection, tuples-only unaligned output for probe queries.
+run_psql_t() {
+  if [ -n "${QP_CHECK_DSN:-}" ]; then
+    psql -X -v ON_ERROR_STOP=1 -q -t -A "$QP_CHECK_DSN"
+  else
+    docker compose exec -T db sh -c 'psql -X -v ON_ERROR_STOP=1 -q -t -A -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
   fi
 }
 
@@ -47,6 +57,23 @@ run_case() {
     echo "$out" | sed 's/^/      /' | tail -n 8
     failed=$((failed + 1)); failures+=("$name")
   fi
+}
+
+# run_case_if FUNC_SIG NAME EXPECTED_FRAGMENT MUTATION_SQL: like run_case, but
+# prints SKIP and counts neither pass nor fail when FUNC_SIG does not resolve.
+# The CI integration-test job runs this script BEFORE migrations, where the
+# platform_* and tenant-facing functions do not exist; the mutation would fail
+# with "function does not exist" before the marker, which the harness rightly
+# rejects as a FAIL. Those cases get their real proof post-migrate in the
+# migrations job.
+run_case_if() {
+  local sig="$1" name="$2" found
+  shift 2
+  found="$(printf "SELECT to_regprocedure('%s') IS NOT NULL;\n" "$sig" | run_psql_t)"
+  if [ "$found" != "t" ]; then
+    echo "SKIP  $name ($sig absent pre-migration)"; skipped=$((skipped + 1)); return 0
+  fi
+  run_case "$name" "$@"
 }
 
 # run_selftest: the harness must REJECT an error raised by the mutation itself.
@@ -165,10 +192,10 @@ run_case "75 qp_admin USAGE on river"                "[F3]"  'GRANT USAGE ON SCH
 run_case "76 qp_admin CONNECT revoked"               "[G]"   "$DBCONN_ADMIN"
 run_case "77 qp_admin TEMPORARY on database"         "[G]"   "$DBTEMP_ADMIN"
 run_case "78 table owned by qp_admin"                "[D]"   'CREATE TABLE app.neg_t (id int); ALTER TABLE app.neg_t OWNER TO qp_admin;'
-run_case "79 qp_app EXECUTE platform_delete_organization" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;'
-run_case "80 qp_app EXECUTE platform_update_healing_session" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;'
-run_case "81 qp_admin EXECUTE platform fn revoked"   "[N]"   'REVOKE EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) FROM qp_admin;'
-run_case "82 qp_admin EXECUTE tenant-facing fn"      "[N]"   'GRANT EXECUTE ON FUNCTION app.resolve_inbound_org(text) TO qp_admin;'
+run_case_if "app.platform_delete_organization(uuid)" "79 qp_app EXECUTE platform_delete_organization" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;'
+run_case_if "app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)" "80 qp_app EXECUTE platform_update_healing_session" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;'
+run_case_if "app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)" "81 qp_admin EXECUTE platform fn revoked"   "[N]"   'REVOKE EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) FROM qp_admin;'
+run_case_if "app.resolve_inbound_org(text)" "82 qp_admin EXECUTE tenant-facing fn"      "[N]"   'GRANT EXECUTE ON FUNCTION app.resolve_inbound_org(text) TO qp_admin;'
 run_case "83 table SELECT to qp_admin"               "[N]"   "$TBL GRANT SELECT ON app.neg_t TO qp_admin;"
 run_case "84 default EXECUTE in app to qp_admin"     "[N]"   "$ADP IN SCHEMA app GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
 run_case "85 column SELECT to qp_admin"              "[N]"   "$TBL GRANT SELECT (note) ON app.neg_t TO qp_admin;"
@@ -176,7 +203,7 @@ run_case "86 global EXECUTE default to qp_admin"     "[K1b]" "$ADP GRANT EXECUTE
 run_case "87 river EXECUTE to qp_admin"              "[N]"   'CREATE FUNCTION river.neg_f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; REVOKE EXECUTE ON FUNCTION river.neg_f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION river.neg_f() TO qp_admin;'
 
 echo
-echo "negative tests: $passed passed, $failed failed"
+echo "negative tests: $passed passed, $failed failed, $skipped skipped"
 if [ "$failed" -ne 0 ]; then
   printf 'failed: %s\n' "${failures[@]}"
   exit 1
