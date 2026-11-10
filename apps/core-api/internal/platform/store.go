@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +27,18 @@ type Membership struct {
 	Name  string
 	Slug  string
 	Role  string
+}
+
+// Organization is the resolved tenant's registry row as
+// app.get_current_organization() returns it (spec section 8). Branding is
+// carried raw: the jsonb blob belongs to the caller, so the store neither
+// parses nor validates it — handlers decode into their own contract shape.
+type Organization struct {
+	ID                uuid.UUID
+	Name              string
+	Slug              string
+	InboundEmailAlias string
+	Branding          json.RawMessage
 }
 
 // Store wraps the migration-0003 function family in typed methods (spec
@@ -295,4 +308,47 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 		return nil, fmt.Errorf("platform: list_memberships_for_email rows: %w", err)
 	}
 	return out, nil
+}
+
+// GetCurrentOrganization reads the resolved tenant's registry row through
+// app.get_current_organization() — the migration-0002 accessor that scopes on
+// the app.current_organization_id GUC, so a row can only come back inside
+// InTenantTx/InTenantReadTx. Outside a tenant context the function emits an
+// all-NULL composite row, which maps to (zero, false, nil) like every other
+// miss in this family — callers inside a correctly-scoped tx treat found=false
+// as contract drift, never as "org does not exist".
+//
+//	var org platform.Organization
+//	var found bool
+//	err := runner.InTenantReadTx(ctx, orgID, func(ctx context.Context, tx pgx.Tx) error {
+//		var err error
+//		org, found, err = platform.NewStore(tx).GetCurrentOrganization(ctx)
+//		return err
+//	})
+func (s *Store) GetCurrentOrganization(ctx context.Context) (Organization, bool, error) {
+	var (
+		id                *uuid.UUID
+		name, slug, alias *string
+		branding          json.RawMessage
+	)
+	err := s.q.QueryRow(ctx, `
+		SELECT id, name, slug, inbound_email_alias, branding_json
+		FROM app.get_current_organization()`).
+		Scan(&id, &name, &slug, &alias, &branding)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, false, nil
+	}
+	if err != nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: %w", err)
+	}
+	if id == nil {
+		return Organization{}, false, nil
+	}
+	return Organization{
+		ID:                *id,
+		Name:              *name,
+		Slug:              *slug,
+		InboundEmailAlias: *alias,
+		Branding:          branding,
+	}, true, nil
 }

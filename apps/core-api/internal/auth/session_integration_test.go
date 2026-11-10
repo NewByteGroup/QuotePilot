@@ -46,7 +46,7 @@ func TestSessionExchangeRollsBackConsume(t *testing.T) {
 	// TestSessionFailuresAreUniform500).
 	ghost := sessionConfig()
 	ghost.ActiveKID = "ghost"
-	rec := postSessionTo(t, sessionHandler(ghost, store), `{"token":"`+token+`"}`)
+	rec := postSessionTo(t, sessionHandler(t, ghost, store), `{"token":"`+token+`"}`)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
@@ -63,7 +63,7 @@ func TestSessionExchangeRollsBackConsume(t *testing.T) {
 	assert.Zero(t, sessions, "the rolled-back exchange must leave no orphan session row")
 
 	// The surviving link still exchanges: a working signer earns the 200.
-	rec = postSessionTo(t, sessionHandler(sessionConfig(), store), `{"token":"`+token+`"}`)
+	rec = postSessionTo(t, sessionHandler(t, sessionConfig(), store), `{"token":"`+token+`"}`)
 	require.Equal(t, http.StatusOK, rec.Code,
 		"a rolled-back exchange must leave the magic link usable")
 }
@@ -96,8 +96,8 @@ func plantLoginToken(t *testing.T, store *platform.Store, userID uuid.UUID) (str
 
 // sessionHandler mounts the endpoints on the real store with the production
 // wiring: real store.InStoreTx, real Limiters on wall time, auth.NewServer.
-func sessionHandler(cfg *platform.Config, store *platform.Store) http.Handler {
-	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, &platform.FakeMailSender{},
+func sessionHandler(t *testing.T, cfg *platform.Config, store *platform.Store) http.Handler {
+	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, &neverRunner{t}, &platform.FakeMailSender{},
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, time.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, time.Now),
 		time.Now)

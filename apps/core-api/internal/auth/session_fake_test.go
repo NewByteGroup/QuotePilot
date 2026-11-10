@@ -262,7 +262,7 @@ func newSessionRig(t *testing.T, cfg *platform.Config) *sessionRig {
 	}
 	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		store, directInTx(store), &platform.FakeMailSender{},
+		store, directInTx(store), &neverRunner{t}, &platform.FakeMailSender{},
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, clock.Now),
 		clock.Now)
