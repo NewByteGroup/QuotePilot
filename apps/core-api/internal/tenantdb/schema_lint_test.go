@@ -53,12 +53,20 @@ var layerCTables = []string{"connectors", "public_snapshots", "healing_sessions"
 // carrier_offers is an audit record the same way — RFC-002).
 var appendOnlyTables = []string{"private_tariffs", "tenant_audit_logs", "carrier_offers"}
 
-// platformFunctions are the spec's SECURITY DEFINER surface; qp_app gets
-// EXECUTE on exactly these signatures.
-var platformFunctions = []string{
+// tenantFunctions are the tenant-facing SECURITY DEFINER surface; qp_app gets
+// EXECUTE on exactly these signatures (spec section 3).
+var tenantFunctions = []string{
 	"app.resolve_inbound_org(text)",
 	"app.list_memberships_for_email(text)",
 	"app.get_current_organization()",
+}
+
+// platformFunctions are the platform path's SECURITY DEFINER surface;
+// qp_admin — never qp_app — gets EXECUTE on exactly these signatures (spec
+// section 5, ADR-005). Granting them to qp_app left a single in-function
+// scope check between the exposed API role and tenant deletion (Devin
+// Review); the catalog diff below proves the split mechanically.
+var platformFunctions = []string{
 	"app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz)",
 	"app.platform_update_connector_status(text, app.connector_status, numeric)",
 	"app.platform_insert_healing_session(text, uuid, text, text, text, text)",
@@ -232,9 +240,9 @@ func TestSchemaLintGrants(t *testing.T) {
 		`SELECT has_table_privilege('qp_app', 'app.private_tariff_batches', 'DELETE')`).Scan(&batchDelete))
 	assert.False(t, batchDelete, "qp_app must not DELETE app.private_tariff_batches")
 
-	// SECURITY DEFINER functions: EXECUTE granted to qp_app, denied to PUBLIC
-	// beyond the explicit grant.
-	for _, fn := range platformFunctions {
+	// Tenant-facing SECURITY DEFINER functions: EXECUTE granted to qp_app,
+	// denied to PUBLIC beyond the explicit grant.
+	for _, fn := range tenantFunctions {
 		var allowed bool
 		require.NoError(t, migrator.QueryRow(ctx,
 			`SELECT has_function_privilege('qp_app', $1, 'EXECUTE')`, fn).Scan(&allowed))
@@ -245,46 +253,75 @@ func TestSchemaLintGrants(t *testing.T) {
 		assert.False(t, publicExec, "PUBLIC must not EXECUTE %s", fn)
 	}
 
-	// The EXECUTE surface is a catalog diff like platformTablesNoRLS: the set
-	// of app functions qp_app can EXECUTE must equal the allowlist exactly —
+	// The platform split (Devin Review): qp_admin — never qp_app — EXECUTEs
+	// the platform_* functions, so the tenant credential physically cannot
+	// reach teardown or Layer C writes.
+	for _, fn := range platformFunctions {
+		var adminExec bool
+		require.NoError(t, migrator.QueryRow(ctx,
+			`SELECT has_function_privilege('qp_admin', $1, 'EXECUTE')`, fn).Scan(&adminExec))
+		assert.True(t, adminExec, "qp_admin needs EXECUTE on %s", fn)
+		var appExec bool
+		require.NoError(t, migrator.QueryRow(ctx,
+			`SELECT has_function_privilege('qp_app', $1, 'EXECUTE')`, fn).Scan(&appExec))
+		assert.False(t, appExec, "qp_app must not EXECUTE %s", fn)
+		var publicExec bool
+		require.NoError(t, migrator.QueryRow(ctx,
+			`SELECT has_function_privilege('public', $1, 'EXECUTE')`, fn).Scan(&publicExec))
+		assert.False(t, publicExec, "PUBLIC must not EXECUTE %s", fn)
+	}
+
+	// The EXECUTE surfaces are catalog diffs like platformTablesNoRLS: the set
+	// of app functions each role can EXECUTE must equal its allowlist exactly —
 	// a migration that grants EXECUTE on a trigger/helper, or adds a platform
 	// entry point without listing it, fails here. Signatures go through
 	// regprocedure on this same session so both sides share one rendering:
-	// the allowlist uses aliases (timestamptz, app.connector_status) that the
+	// the allowlists use aliases (timestamptz, app.connector_status) that the
 	// catalog renders canonically (timestamp with time zone, connector_status).
-	wantFns := make([]string, 0, len(platformFunctions))
-	for _, fn := range platformFunctions {
-		var canon string
-		require.NoError(t, migrator.QueryRow(ctx,
-			`SELECT $1::regprocedure::text`, fn).Scan(&canon))
-		wantFns = append(wantFns, canon)
+	canonicalize := func(fns []string) []string {
+		canon := make([]string, 0, len(fns))
+		for _, fn := range fns {
+			var c string
+			require.NoError(t, migrator.QueryRow(ctx,
+				`SELECT $1::regprocedure::text`, fn).Scan(&c))
+			canon = append(canon, c)
+		}
+		sort.Strings(canon)
+		return canon
 	}
-	sort.Strings(wantFns)
+	wantTenant := canonicalize(tenantFunctions)
+	wantPlatform := canonicalize(platformFunctions)
 
-	var executable []string
-	rows, err := migrator.Query(ctx, `
-		SELECT p.oid::regprocedure::text
-		FROM pg_proc p
-		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = 'app'
-		  AND has_function_privilege('qp_app', p.oid, 'EXECUTE')
-		ORDER BY 1`)
-	require.NoError(t, err)
-	for rows.Next() {
-		var name string
-		require.NoError(t, rows.Scan(&name))
-		executable = append(executable, name)
+	executableBy := func(role string) []string {
+		rows, err := migrator.Query(ctx, `
+			SELECT p.oid::regprocedure::text
+			FROM pg_proc p
+			JOIN pg_namespace n ON n.oid = p.pronamespace
+			WHERE n.nspname = 'app'
+			  AND has_function_privilege($1, p.oid, 'EXECUTE')
+			ORDER BY 1`, role)
+		require.NoError(t, err)
+		var fns []string
+		for rows.Next() {
+			var name string
+			require.NoError(t, rows.Scan(&name))
+			fns = append(fns, name)
+		}
+		require.NoError(t, rows.Err())
+		rows.Close()
+		return fns
 	}
-	require.NoError(t, rows.Err())
-	rows.Close()
-	assert.Equal(t, wantFns, executable,
-		"qp_app EXECUTE surface must equal the platform-function allowlist")
+	assert.Equal(t, wantTenant, executableBy("qp_app"),
+		"qp_app EXECUTE surface must equal the tenant-function allowlist")
+	assert.Equal(t, wantPlatform, executableBy("qp_admin"),
+		"qp_admin EXECUTE surface must equal the platform-function allowlist")
 
 	// SECURITY DEFINER is the dangerous property (the body runs as
-	// qp_migrator): its set must equal the same allowlist — no new definer may
-	// appear unlisted, and no allowlisted function may lose the flag silently.
+	// qp_migrator): its set must equal the union of both allowlists — no new
+	// definer may appear unlisted, and no allowlisted function may lose the
+	// flag silently.
 	var definers []string
-	rows, err = migrator.Query(ctx, `
+	rows, err := migrator.Query(ctx, `
 		SELECT p.oid::regprocedure::text
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -298,6 +335,8 @@ func TestSchemaLintGrants(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	rows.Close()
-	assert.Equal(t, wantFns, definers,
-		"SECURITY DEFINER functions in app must equal the platform-function allowlist")
+	wantDefiners := append(append([]string{}, wantTenant...), wantPlatform...)
+	sort.Strings(wantDefiners)
+	assert.Equal(t, wantDefiners, definers,
+		"SECURITY DEFINER functions in app must equal the tenant + platform allowlists")
 }

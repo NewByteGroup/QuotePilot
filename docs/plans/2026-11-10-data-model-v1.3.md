@@ -36,7 +36,9 @@ Up, in this order:
      `app.get_current_organization()` — all `SECURITY DEFINER`, `SET
      search_path = app`, then `GRANT EXECUTE ... TO qp_app`.
    - `app.platform_insert_public_snapshot`, `platform_update_connector_status`,
-     `platform_insert_healing_session` — same pattern, EXECUTE → `qp_app`.
+     `platform_insert_healing_session` — same pattern, EXECUTE → `qp_admin`
+     (the platform path's credential; `qp_app` keeps tenant-facing functions
+     only).
    - `block_snapshot_mutation()` + `block_approved_quote_mutation()` trigger
      functions and their `BEFORE UPDATE OR DELETE` triggers.
 7. `COMMENT ON COLUMN quotes.final_price_brl` recording the round-per-line

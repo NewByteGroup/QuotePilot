@@ -42,6 +42,23 @@ func RequirePostgres(t *testing.T) string {
 	return dsn
 }
 
+// RequireAdmin skips t under -short or without QP_ADMIN_DSN and returns the
+// qp_admin DSN. The platform path (platform_* functions, teardown) runs as
+// qp_admin — qp_app cannot EXECUTE those functions at all (spec section 5).
+//
+//	dsn := testenv.RequireAdmin(t)
+func RequireAdmin(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping real-Postgres test under -short")
+	}
+	dsn := os.Getenv("QP_ADMIN_DSN")
+	if dsn == "" {
+		t.Skip("skipping: QP_ADMIN_DSN is not set")
+	}
+	return dsn
+}
+
 // EnsureMigrated applies all goose and River migrations once per test binary
 // with MIGRATOR_DSN (qp_migrator). Tests may run in any order, so migration
 // state is a prerequisite, not a test of its own.
@@ -67,6 +84,23 @@ func EnsureMigrated(t *testing.T) {
 func Open(t *testing.T) *tenantdb.DB {
 	t.Helper()
 	dsn := RequirePostgres(t)
+	EnsureMigrated(t)
+	db, err := tenantdb.Open(context.Background(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(db.Close)
+	return db
+}
+
+// AdminDB returns a tenantdb.DB on the qp_admin DSN with migrations applied —
+// the platform path's InTenantTx (teardown must run scoped to the org being
+// deleted). qp_admin passes the same ADR-002 section 4 startup assertions as
+// qp_app (not privileged, owns nothing, RLS enforced). The pool closes at test
+// cleanup.
+//
+//	admin := testenv.AdminDB(t)
+func AdminDB(t *testing.T) *tenantdb.DB {
+	t.Helper()
+	dsn := RequireAdmin(t)
 	EnsureMigrated(t)
 	db, err := tenantdb.Open(context.Background(), dsn)
 	require.NoError(t, err)

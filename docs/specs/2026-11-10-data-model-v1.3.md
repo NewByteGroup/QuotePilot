@@ -30,9 +30,12 @@ the two platform functions needed now (ADR-005 is still Proposed).
 | C — Platform-global | `connectors`, `public_snapshots`, `healing_sessions` | No (no `organization_id`) | SELECT only; writes via `SECURITY DEFINER` functions (comment 15) |
 
 Layer A functions are owned by `qp_migrator` (the table owner, not superuser,
-no BYPASSRLS). `qp_app` gets `EXECUTE` only on the functions it needs — the
-init script already revokes default `EXECUTE` on `app` functions, so each
-migration grants explicitly (ADR-005 platform path, comment 6).
+no BYPASSRLS). The init script already revokes default `EXECUTE` on `app`
+functions, so each migration grants explicitly (ADR-005 platform path,
+comment 6). The grant splits by caller: tenant-facing functions go to
+`qp_app`; the `platform_*` write/teardown functions go to `qp_admin` — a
+dedicated platform-path role the API reaches only after admin authorization,
+so the tenant credential physically cannot delete an org or write Layer C.
 
 ## 3. Camada A — identity and routing
 
@@ -66,7 +69,7 @@ see (mail misrouting / membership shadowing).
 FK→users · `role` `app.membership_role` NOT NULL ·
 `UNIQUE (organization_id, user_id)` · `created_at`.
 
-### Platform functions (SECURITY DEFINER, EXECUTE → `qp_app`)
+### Tenant-facing functions (SECURITY DEFINER, EXECUTE → `qp_app`)
 
 - `app.resolve_inbound_org(recipient text) returns uuid` (STABLE) — resolve
   the Resend `to` address to an organization via `inbound_email_alias`
@@ -282,10 +285,16 @@ through `SECURITY DEFINER` functions owned by `qp_migrator` (comment 15).
   `failing_payload_hash text` + `failing_payload_storage_key text`
   (comment 15 — big payloads live in storage, not Postgres)
 
-Platform write functions (EXECUTE → `qp_app`): `platform_insert_public_snapshot`,
-`platform_update_connector_status`, `platform_insert_healing_session`,
-`platform_update_healing_session`. Workers running as `qp_app` can
-therefore publish snapshots without ever holding table-level write grants.
+Platform write functions (EXECUTE → `qp_admin`, never `qp_app`):
+`platform_insert_public_snapshot`, `platform_update_connector_status`,
+`platform_insert_healing_session`, `platform_update_healing_session`. The
+platform path can therefore publish snapshots without ever holding
+table-level write grants — and `qp_app` cannot reach the functions at all:
+granting them to the exposed tenant role left a single in-function scope
+check between `qp_app` and Layer C writes or teardown (Devin Review).
+`qp_admin` holds the mirror-image minimum: schema-`app` USAGE, USAGE on the
+enum types in the signatures, EXECUTE on the platform functions — and no
+table or default privileges anywhere (roles.sql `[N]` asserts the split).
 The functions also enforce the lifecycle, not just the write:
 `platform_update_connector_status` only permits the
 `HEALTHY→DEGRADED→HEALING→HEALTHY` cycle;
@@ -296,8 +305,9 @@ to the connector being healed; `platform_update_healing_session` permits
 `resolved_at` already stamped).
 
 `platform_delete_organization(org_id)` is the **only** tenant-teardown
-path, and it can only delete **the org the caller is already scoped
-into**: it refuses unless
+path, executable by `qp_admin` alone — `qp_app` gets permission denied
+before any scope check runs — and it can only delete **the org the caller
+is already scoped into**: it refuses unless
 `NULLIF(current_setting('app.current_organization_id', true), '')::uuid`
 already equals `org_id`, so an `InTenantTx` pinned to the target must wrap
 the call — the shape the API produces only after admin authorization.
@@ -306,12 +316,12 @@ the organization row; cascades remove every Camada B row, membership and
 `inbound_messages` receipt. The immutability triggers honor the flag
 **only** alongside `current_user <> session_user`, which holds inside
 this SECURITY DEFINER function (owner `qp_migrator`) and nowhere in a
-direct `qp_app` session — so the teardown flag cannot be forged to unlock
+direct session — so the teardown flag cannot be forged to unlock
 sent quotes, and it cannot leak protection to another org after teardown
-returns. Residual: a deliberately malicious `qp_app` could still pin any
-tenant context itself — that is the accepted GUC trust model (the app
-role is trusted to pin the org it was authorized for); flag for Pedro if
-a dedicated teardown role is wanted later.
+returns. Residual: a deliberately malicious `qp_admin` could still pin any
+tenant context itself — authorizing WHO may call the platform path stays
+the API layer's job; the role boundary only means the tenant credential
+(`qp_app`) physically cannot, which is the accepted GUC trust model.
 
 Related upgrade guard: 0002 also refuses to run on a v1 database that
 holds `inbound_messages` receipts whose `organization_id` matches no
@@ -358,8 +368,10 @@ grouping).
    `organization_memberships` (platform-path table, comment 9). Also asserts
    Camada C tables grant only SELECT to `qp_app`,
    `private_tariffs`/`tenant_audit_logs` lack UPDATE/DELETE for `qp_app`,
-   and `app.goose_db_version` lacks INSERT/UPDATE/DELETE (the migration
-   revokes the DML qp_app inherited via migrator default privileges).
+   `app.goose_db_version` lacks INSERT/UPDATE/DELETE (the migration
+   revokes the DML qp_app inherited via migrator default privileges), and
+   the EXECUTE split holds exactly: tenant functions → `qp_app`,
+   `platform_*` functions → `qp_admin` only.
 2. **Isolation suite** keeps running; the identical-vectors test moves from
    the dropped `private_tariff_embeddings` to `private_tariffs.embedding`.
 3. Quote immutability trigger and append-only revokes each get a test
@@ -371,7 +383,7 @@ grouping).
 | # | Comment/RFC item | Resolution |
 |---|---|---|
 | 4 | webhook pre-tenant resolution | `resolve_inbound_org` SECURITY DEFINER + `in.` subdomain; receipt → fetch job → `rfq_requests` |
-| 6 | platform path | Layer A revoked from `qp_app`, two lookup functions now, rest with ADR-005 |
+| 6 | platform path | Layer A revoked from `qp_app`, lookup functions now (`qp_app`), `platform_*` + teardown on `qp_admin`, rest with ADR-005 |
 | 9 | Layer A not under RLS | implemented; function-gated access + `get_current_organization` |
 | 10 | pricing_rules NULLs | `UNIQUE NULLS NOT DISTINCT`; precedence route > modal > ALL |
 | 11 | private_tariffs | +`charge_category`/`charge_code`, append-only revoke, `CHECK` dates, `VECTOR(1024)`+`embedding_model`, no ANN index, `is_removed` tombstones |

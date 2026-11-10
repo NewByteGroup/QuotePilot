@@ -3,7 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-11-08
 - **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
-- **Related:** ADR-001 (boundary rules), ADR-002 (`InTenantTx`), ADR-003 (roles: `qp_migrator`, `qp_app`), ADR-004 (River jobs), RFC-002 (email pipeline), RFC-003 (connectors)
+- **Related:** ADR-001 (boundary rules), ADR-002 (`InTenantTx`), ADR-003 (roles: `qp_migrator`, `qp_app`, `qp_admin`), ADR-004 (River jobs), RFC-002 (email pipeline), RFC-003 (connectors)
 
 ## Context
 
@@ -22,20 +22,22 @@ Facts about Resend that shape the design (verified against its documentation on 
 `organizations`, `users`, `organization_memberships` and the new `auth_login_tokens` and `auth_sessions` are **platform tables**: they carry no `organization_id` RLS policy because they are read before a tenant exists.
 
 - After creating each platform table, the migration runs `REVOKE ALL ON app.<table> FROM qp_app`. This is required because `ALTER DEFAULT PRIVILEGES` in the init script grants `qp_app` DML on every new table in `app`.
-- `qp_app` reaches platform tables only through the functions in section 2.
+- `qp_app` reaches platform tables only through the tenant-facing functions in section 2; the `platform_*` write/teardown functions belong to `qp_admin`.
 - CI asserts that the set of non-RLS tables in `app` equals an explicit allow-list kept in the test, and that `qp_app` holds no privilege on any of them (extends the checks of ADR-008).
 
 ### 2. The platform path: narrow `SECURITY DEFINER` functions
 
-There is **no** `BYPASSRLS` role, no second credential and no generic "run as platform" helper. Pre-tenant work happens through a closed set of functions in schema `app`, owned by `qp_migrator`.
+There is **no** `BYPASSRLS` role and no generic "run as platform" helper. Pre-tenant work happens through a closed set of functions in schema `app`, owned by `qp_migrator`. A second, minimal credential `qp_admin` carries the `platform_*` surface: it holds no table or default privileges anywhere, so its whole power is schema USAGE plus the explicit EXECUTE grants below — while `qp_app`, the tenant-facing credential, physically cannot EXECUTE the platform functions.
+
+*Amended for data model v1.3 (Devin Review): this supersedes the earlier qp_app-grant sketch, which left a single in-function scope check between the exposed tenant credential and tenant teardown.*
 
 Hygiene rules for every such function:
 
 1. `SECURITY DEFINER` with `SET search_path = pg_catalog, pg_temp` and fully schema-qualified object names (defeats search-path hijacking).
 2. Static SQL only, typed arguments, minimal return columns, one purpose per function.
-3. Explicit `GRANT EXECUTE ... TO qp_app` in the same migration. Execute on `app` functions is revoked from `PUBLIC` by default (see the init script).
+3. Explicit `GRANT EXECUTE` in the same migration — `qp_app` for the tenant-facing functions it calls on request paths, `qp_admin` for `platform_*` writes and teardown. `qp_app` holds no platform EXECUTE by credential, not by convention. Execute on `app` functions is revoked from `PUBLIC` by default (see the init script).
 4. A definer function never reads a table under tenant RLS. The owner is subject to `FORCE ROW LEVEL SECURITY` and has no tenant context, so such a read returns nothing: it fails closed.
-5. Each function ships with a test that `qp_app` can execute it, cannot read the underlying table directly, and gets only the documented columns.
+5. Each function ships with a test that the credential named in its grant (`qp_app` or `qp_admin`) can execute it, that `qp_app` is denied on the `platform_*` set outright, that neither role can read the underlying table directly, and that only the documented columns come back.
 6. Migrations that create or alter these functions fall under the existing CODEOWNERS rule for `apps/core-api/db/migrations/**`.
 7. Go access lives only in `internal/platform`, as typed methods. `depguard` forbids the generic pool elsewhere (ADR-002).
 
@@ -51,7 +53,7 @@ Initial set (names are the contract, signatures are fixed in the migration):
 | `platform_resolve_inbound_alias(alias)` | inbound webhook | `organization_id` or null |
 | `platform_register_waiter(connector_id, organization_id, rfq_id)` | pricing, inside a tenant tx | nothing; see section 6 |
 | `platform_take_waiters(connector_id)` | connector repair job | `organization_id`, `rfq_id` rows |
-| `platform_record_snapshot(...)` and the connector-status updates | connector jobs | nothing. Layer C tables (public data) are read-only for `qp_app`; writes go through these functions |
+| `platform_record_snapshot(...)` and the connector-status updates | connector jobs | nothing. Layer C tables (public data) are read-only for `qp_app`; writes go through these functions, granted to `qp_admin` only |
 
 `platform_register_waiter` checks that its `organization_id` argument equals `current_setting('app.current_organization_id', true)`, so a tenant transaction can register only itself.
 
@@ -132,13 +134,13 @@ Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, sent as the `X
 | Forwarded approval email | Token only for `READY` quotes; version-bound; single use; short expiry |
 | Webhook replay or spoof | Svix signature and timestamp; idempotency key `(organization_id, resend_message_id)` |
 | Message addressed to two tenants | Quarantine; never guess |
-| Definer function abused or hijacked | Pinned `search_path`, static SQL, narrow returns, per-function tests, CODEOWNERS review |
+| Definer function abused or hijacked | Pinned `search_path`, static SQL, narrow returns, EXECUTE split between `qp_app`/`qp_admin`, per-function tests, CODEOWNERS review |
 | App role reads identity tables directly | `REVOKE ALL` on platform tables plus the CI allow-list assertion |
 | Cross-tenant job loop | Waiter registry; one River job per RFQ, IDs only |
 
 ## Alternatives considered
 
-1. **A `qp_platform` role with `BYPASSRLS`.** Simple, and the most dangerous object in the system: a second credential that can read every tenant. Rejected by ADR-003's reasoning.
+1. **A `qp_platform` role with `BYPASSRLS`.** Simple, and the most dangerous object in the system: a second credential that can read every tenant. Rejected by ADR-003's reasoning — the accepted `qp_admin` is the opposite shape: no BYPASSRLS, no reads, EXECUTE on a named function list only.
 2. **RLS on the identity tables, driven by a "user context" setting.** Needs a second context variable and policies for lookups that, by definition, have no context yet (login by email, alias resolution). More moving parts for the same result.
 3. **Supabase Auth.** ADR-003 uses Supabase as plain Postgres in production and Cloudflare R2 for object storage; development Postgres runs on Railway. Adopting its auth schema and JWT-in-RLS pattern would put a second identity system next to ours and conflict with `InTenantTx`.
 4. **Server-side sessions only, or JWT only.** Sessions-only gives up the stateless verify path the spec asked for; JWT-only cannot revoke. The short access token plus rotating refresh token covers both.

@@ -76,6 +76,8 @@ DBSET=$'DO $$ BEGIN EXECUTE format(\'ALTER ROLE qp_app IN DATABASE %I SET search
 DBCREATE=$'DO $$ BEGIN EXECUTE format(\'GRANT CREATE ON DATABASE %I TO qp_app\', current_database()); END $$;'
 DBTEMP=$'DO $$ BEGIN EXECUTE format(\'GRANT TEMPORARY ON DATABASE %I TO PUBLIC\', current_database()); END $$;'
 DBCREATE_ANON=$'DO $$ BEGIN EXECUTE format(\'GRANT CREATE ON DATABASE %I TO anon\', current_database()); END $$;'
+DBCONN_ADMIN=$'DO $$ BEGIN EXECUTE format(\'REVOKE CONNECT ON DATABASE %I FROM qp_admin\', current_database()); END $$;'
+DBTEMP_ADMIN=$'DO $$ BEGIN EXECUTE format(\'GRANT TEMPORARY ON DATABASE %I TO qp_admin\', current_database()); END $$;'
 ADP='ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator'
 
 # name | expected tag | mutation. One case per line.
@@ -148,6 +150,30 @@ run_case "63 type owned by qp_app"                   "[D]"   "CREATE TYPE app.ne
 run_case "64 column SELECT to qp_app WITH GRANT"     "[J2]"  "$TBL GRANT SELECT (note) ON app.neg_t TO qp_app WITH GRANT OPTION;"
 run_case "65 qp_migrator CREATE on extensions"       "[E1]"  'GRANT CREATE ON SCHEMA extensions TO qp_migrator;'
 run_case "66 anon CREATE on database"                "[E2]"  "$DBCREATE_ANON"
+
+# qp_admin (platform path, ADR-005): same role-model properties as qp_app plus
+# the [N] split — it alone EXECUTEs platform_* and holds nothing else.
+run_case "67 qp_admin member of pg_monitor"          "[B4]"  'GRANT pg_monitor TO qp_admin;'
+run_case "68 qp_admin granted to anon"               "[B3]"  'GRANT qp_admin TO anon;'
+run_case "69 qp_admin CREATEROLE"                    "[A]"   'ALTER ROLE qp_admin CREATEROLE;'
+run_case "70 qp_admin BYPASSRLS"                     "[A]"   'ALTER ROLE qp_admin BYPASSRLS;'
+run_case "71 qp_admin search_path changed"           "[C1]"  'ALTER ROLE qp_admin SET search_path = public, app;'
+run_case "72 qp_admin CREATE on schema app"          "[E1]"  'GRANT CREATE ON SCHEMA app TO qp_admin;'
+run_case "73 qp_admin USAGE on app revoked"          "[F3]"  'REVOKE USAGE ON SCHEMA app FROM qp_admin;'
+run_case "74 qp_admin USAGE on extensions revoked"   "[F3]"  'REVOKE USAGE ON SCHEMA extensions FROM qp_admin;'
+run_case "75 qp_admin USAGE on river"                "[F3]"  'GRANT USAGE ON SCHEMA river TO qp_admin;'
+run_case "76 qp_admin CONNECT revoked"               "[G]"   "$DBCONN_ADMIN"
+run_case "77 qp_admin TEMPORARY on database"         "[G]"   "$DBTEMP_ADMIN"
+run_case "78 table owned by qp_admin"                "[D]"   'CREATE TABLE app.neg_t (id int); ALTER TABLE app.neg_t OWNER TO qp_admin;'
+run_case "79 qp_app EXECUTE platform_delete_organization" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;'
+run_case "80 qp_app EXECUTE platform_update_healing_session" "[N]" 'GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;'
+run_case "81 qp_admin EXECUTE platform fn revoked"   "[N]"   'REVOKE EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) FROM qp_admin;'
+run_case "82 qp_admin EXECUTE tenant-facing fn"      "[N]"   'GRANT EXECUTE ON FUNCTION app.resolve_inbound_org(text) TO qp_admin;'
+run_case "83 table SELECT to qp_admin"               "[N]"   "$TBL GRANT SELECT ON app.neg_t TO qp_admin;"
+run_case "84 default EXECUTE in app to qp_admin"     "[N]"   "$ADP IN SCHEMA app GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
+run_case "85 column SELECT to qp_admin"              "[N]"   "$TBL GRANT SELECT (note) ON app.neg_t TO qp_admin;"
+run_case "86 global EXECUTE default to qp_admin"     "[K1b]" "$ADP GRANT EXECUTE ON FUNCTIONS TO qp_admin;"
+run_case "87 river EXECUTE to qp_admin"              "[N]"   'CREATE FUNCTION river.neg_f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; REVOKE EXECUTE ON FUNCTION river.neg_f() FROM PUBLIC; GRANT EXECUTE ON FUNCTION river.neg_f() TO qp_admin;'
 
 echo
 echo "negative tests: $passed passed, $failed failed"

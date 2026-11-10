@@ -228,11 +228,14 @@ func TestSchemaEnforcementBatchActivation(t *testing.T) {
 }
 
 // TestSchemaEnforcementPlatformFunctions exercises each SECURITY DEFINER
-// function as qp_app: they run, return only the documented shape, and the
-// underlying tables stay unreadable directly (ADR-005 section 2 hygiene
-// rule 5).
+// function on the role that owns it: the three tenant-facing ones as qp_app,
+// the platform_* write path as qp_admin — qp_app is denied EXECUTE on the
+// platform surface entirely (Devin Review). They return only the documented
+// shape, and the underlying tables stay unreadable directly (ADR-005 section
+// 2 hygiene rule 5).
 func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 	db := testenv.Open(t)
+	admin := testenv.AdminDB(t)
 	migrator := testenv.MigratorPool(t)
 	ctx := context.Background()
 
@@ -330,44 +333,58 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 		`SELECT (app.get_current_organization()).id`).Scan(&nilOrg))
 	assert.Nil(t, nilOrg, "no tenant context must yield NULL, not an ''::uuid error")
 
-	// Platform write path: qp_app writes Layer C only through the functions.
+	// The tenant credential is locked out of the whole platform surface
+	// (Devin Review): every platform_* call as qp_app is a permission error,
+	// not a scope error — even teardown is unreachable.
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_update_connector_status($1, 'DEGRADED', NULL)`, slug)
+	require.Error(t, err, "qp_app must not EXECUTE platform_update_connector_status")
+	assert.Contains(t, err.Error(), "permission denied")
+	_, err = db.Pool().Exec(ctx,
+		`SELECT app.platform_delete_organization($1)`, org.String())
+	require.Error(t, err, "qp_app must not EXECUTE platform_delete_organization")
+	assert.Contains(t, err.Error(), "permission denied")
+
+	// Platform write path: qp_admin writes Layer C only through the functions.
 	var snapshotID uuid.UUID
-	require.NoError(t, db.Pool().QueryRow(ctx, `
+	require.NoError(t, admin.Pool().QueryRow(ctx, `
 		SELECT app.platform_insert_public_snapshot(
 			$1, 'p1', 'https://example.test/feed', 'sha256:cafe',
 			'platform/snapshots/lint.json', '{}'::jsonb, 0.98, '[]'::jsonb, now())`,
 		slug).Scan(&snapshotID))
 	require.NotEqual(t, uuid.Nil, snapshotID)
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_connector_status($1, 'DEGRADED', 0.42)`, slug)
 	require.NoError(t, err)
 	// The connector machine is the HEALTHY -> DEGRADED -> HEALING -> HEALTHY
 	// cycle only: edges that skip a stage or go backwards are refused.
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_connector_status($1, 'HEALTHY', NULL)`, slug)
 	require.Error(t, err, "DEGRADED -> HEALTHY must pass through HEALING")
 	assert.Contains(t, err.Error(), "not an allowed transition")
 	var sessionID uuid.UUID
-	require.NoError(t, db.Pool().QueryRow(ctx, `
+	require.NoError(t, admin.Pool().QueryRow(ctx, `
 		SELECT app.platform_insert_healing_session(
 			$1, $2, 'sha256:beef', 'platform/healing/lint.bin',
 			'devin-lint-0001', 'https://app.devin.ai/sessions/lint')`,
 		slug, snapshotID.String()).Scan(&sessionID))
 	require.NotEqual(t, uuid.Nil, sessionID)
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_connector_status($1, 'HEALING', NULL)`, slug)
 	require.NoError(t, err)
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_connector_status($1, 'HEALTHY', NULL)`, slug)
 	require.NoError(t, err)
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_connector_status($1, 'HEALING', NULL)`, slug)
 	require.Error(t, err, "HEALTHY -> HEALING skips DEGRADED")
 	assert.Contains(t, err.Error(), "not an allowed transition")
 
 	// Sessions leave OPEN only through platform_update_healing_session:
-	// progress first, then a terminal status stamps resolved_at.
-	_, err = db.Pool().Exec(ctx,
+	// progress first, then a terminal status stamps resolved_at. The direct
+	// table reads below stay on qp_app — qp_admin holds no table privileges
+	// at all (roles.sql [N]).
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_healing_session($1, 'PR_READY', 'https://github.com/x/pull/1', true, NULL)`,
 		sessionID.String())
 	require.NoError(t, err)
@@ -379,11 +396,11 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 	assert.Equal(t, "PR_READY", status)
 	assert.Nil(t, resolvedAt, "non-terminal status must not stamp resolved_at")
 	// The session machine refuses non-forward edges.
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_healing_session($1, 'OPEN', NULL, NULL, NULL)`, sessionID.String())
 	require.Error(t, err, "PR_READY -> OPEN goes backwards")
 	assert.Contains(t, err.Error(), "not an allowed transition")
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_healing_session($1, 'MERGED', NULL, NULL, NULL)`, sessionID.String())
 	require.NoError(t, err)
 	require.NoError(t, db.Pool().QueryRow(ctx,
@@ -392,7 +409,7 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 	assert.Equal(t, "MERGED", status)
 	assert.NotNil(t, resolvedAt, "MERGED must stamp resolved_at")
 	// MERGED is terminal: the session cannot reopen with resolved_at stamped.
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_update_healing_session($1, 'OPEN', NULL, NULL, NULL)`, sessionID.String())
 	require.Error(t, err, "MERGED is terminal")
 	assert.Contains(t, err.Error(), "not an allowed transition")
@@ -405,12 +422,12 @@ func TestSchemaEnforcementPlatformFunctions(t *testing.T) {
 		otherSlug)
 	require.NoError(t, err)
 	var foreignSnapshot uuid.UUID
-	require.NoError(t, db.Pool().QueryRow(ctx, `
+	require.NoError(t, admin.Pool().QueryRow(ctx, `
 		SELECT app.platform_insert_public_snapshot(
 			$1, 'p1', 'https://example.test/other', 'sha256:f00d',
 			'platform/snapshots/lint-b.json', '{}'::jsonb, 0.5, '[]'::jsonb, now())`,
 		otherSlug).Scan(&foreignSnapshot))
-	_, err = db.Pool().Exec(ctx,
+	_, err = admin.Pool().Exec(ctx,
 		`SELECT app.platform_insert_healing_session($1, $2, NULL, NULL, NULL, NULL)`,
 		slug, foreignSnapshot.String())
 	require.Error(t, err, "a session must not pin a snapshot of a different connector")

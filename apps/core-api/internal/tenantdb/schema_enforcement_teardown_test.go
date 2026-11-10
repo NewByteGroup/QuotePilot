@@ -1,10 +1,11 @@
 package tenantdb_test
 
 // Teardown-path enforcement for the v1.3 data model: the deliberate
-// platform_delete_organization path (spec section 4) plus the abuse case it
-// must survive — qp_app forging the app.tenant_teardown GUC outside a
-// SECURITY DEFINER context. Split from schema_enforcement_test.go to keep
-// both files under the 500-line style limit (AGENTS.md).
+// platform_delete_organization path (spec section 4) exercised as qp_admin —
+// the only role with EXECUTE — plus the abuse case it must survive: qp_app
+// forging the app.tenant_teardown GUC outside a SECURITY DEFINER context.
+// Split from schema_enforcement_test.go to keep both files under the
+// 500-line style limit (AGENTS.md).
 
 import (
 	"context"
@@ -27,6 +28,7 @@ import (
 // flag (spec section 4). A second call raises.
 func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 	db := testenv.Open(t)
+	admin := testenv.AdminDB(t)
 	migrator := testenv.MigratorPool(t)
 	ctx := context.Background()
 
@@ -85,12 +87,12 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		return nil
 	}))
 
-	// The teardown call itself runs as qp_app through the platform function,
-	// inside InTenantTx for the org being deleted — the function's scope
-	// guard refuses anything else (Devin Review). Passing proves the triggers
-	// saw current_user = qp_migrator inside the cascades — the SECURITY
-	// DEFINER context the flag alone cannot fake.
-	err = db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+	// The teardown call itself runs as qp_admin — the only role with EXECUTE —
+	// inside InTenantTx for the org being deleted: the function's scope guard
+	// refuses anything else (Devin Review). Passing proves the triggers saw
+	// current_user = qp_migrator inside the cascades — the SECURITY DEFINER
+	// context the flag alone cannot fake.
+	err = admin.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
 		return err
 	})
@@ -131,7 +133,7 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 	// Replaying teardown on a missing org raises instead of silently passing
 	// (still inside InTenantTx — unscoped calls now hit the scope guard
 	// first, which the negative test below covers).
-	err = db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+	err = admin.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, org.String())
 		return err
 	})
@@ -140,13 +142,15 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 }
 
 // TestSchemaEnforcementDeleteOrganizationScope is the scope-guard half of
-// the teardown contract (Devin Review): qp_app holds EXECUTE on
+// the teardown contract (Devin Review): qp_admin holds EXECUTE on
 // platform_delete_organization, but the function must refuse to delete any
 // org other than the one the caller's tenant transaction is pinned to —
-// and any call with no tenant context at all. Org B must survive both
-// attempts fully intact.
+// and any call with no tenant context at all. qp_app cannot reach the
+// function at all (permission denied, not a scope error). Org B must
+// survive every attempt fully intact.
 func TestSchemaEnforcementDeleteOrganizationScope(t *testing.T) {
 	db := testenv.Open(t)
+	admin := testenv.AdminDB(t)
 	migrator := testenv.MigratorPool(t)
 	ctx := context.Background()
 
@@ -164,7 +168,7 @@ func TestSchemaEnforcementDeleteOrganizationScope(t *testing.T) {
 	}))
 
 	// Pinned to A but asking for B: the cross-scope call raises the guard.
-	err := db.InTenantTx(ctx, orgA, func(ctx context.Context, tx pgx.Tx) error {
+	err := admin.InTenantTx(ctx, orgA, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, orgB.String())
 		return err
 	})
@@ -172,9 +176,18 @@ func TestSchemaEnforcementDeleteOrganizationScope(t *testing.T) {
 	assert.Contains(t, err.Error(), "must run inside an InTenantTx scoped to organization")
 
 	// No tenant context at all raises the same guard.
-	_, err = db.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, orgB.String())
+	_, err = admin.Pool().Exec(ctx, `SELECT app.platform_delete_organization($1)`, orgB.String())
 	require.Error(t, err, "unscoped teardown call must refuse")
 	assert.Contains(t, err.Error(), "must run inside an InTenantTx scoped to organization")
+
+	// qp_app — even pinned to org B — is refused before the scope guard ever
+	// runs: EXECUTE is qp_admin's alone (Devin Review trust model).
+	err = db.InTenantTx(ctx, orgB, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `SELECT app.platform_delete_organization($1)`, orgB.String())
+		return err
+	})
+	require.Error(t, err, "qp_app must not EXECUTE platform_delete_organization")
+	assert.Contains(t, err.Error(), "permission denied")
 
 	// Org B is fully intact: the registry row and its tenant rows survived.
 	var orgRows int

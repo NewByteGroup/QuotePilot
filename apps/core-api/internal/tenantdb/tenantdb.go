@@ -20,8 +20,10 @@ type DB struct {
 	pool *pgxpool.Pool
 }
 
-// Open connects as qp_app and refuses to return unless the ADR-002 section 4
-// startup assertions hold (role not privileged, owns nothing, RLS enforced).
+// Open connects and refuses to return unless the ADR-002 section 4 startup
+// assertions hold (role not privileged, owns nothing, RLS enforced). The DSN
+// names the role: qp_app on the tenant request path, qp_admin on the platform
+// path — the assertions are role-agnostic and qp_admin passes them too.
 //
 //	db, err := tenantdb.Open(ctx, os.Getenv("POSTGRES_DSN"))
 func Open(ctx context.Context, dsn string) (*DB, error) {

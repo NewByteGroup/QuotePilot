@@ -260,6 +260,7 @@ jobs:
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
         ports:
           - 5432:5432
         # No /docker-entrypoint-initdb.d mount: service containers start before
@@ -277,6 +278,7 @@ jobs:
       # service env, so the literals are duplicated on purpose).
       PG_SUPER_DSN: postgresql://postgres:ci-pg-5c0ff3a1b7d24e98@localhost:5432/quotepilot
       QP_APP_DSN: postgresql://qp_app:ci-app-8e3a6b0f15d94c27@localhost:5432/quotepilot
+      QP_ADMIN_DSN: postgresql://qp_admin:ci-admin-23509f02e8c1a4f3@localhost:5432/quotepilot
       MIGRATOR_DSN: postgresql://qp_migrator:ci-migrator-2f7b9d14c8a04e61@localhost:5432/quotepilot
     steps:
       - name: Checkout
@@ -313,6 +315,7 @@ jobs:
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
           PGHOST: localhost
           PGPASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
         run: bash infra/postgres/init/01-roles-and-schemas.sh
@@ -374,7 +377,7 @@ jobs:
           fi
           # Any unset DSN would silently skip DB tests (RequirePostgres and
           # the v1-upgrade test skip); fail loudly instead.
-          for v in POSTGRES_DSN MIGRATOR_DSN PG_SUPER_DSN; do
+          for v in POSTGRES_DSN MIGRATOR_DSN PG_SUPER_DSN QP_ADMIN_DSN; do
             if [ -z "${!v:-}" ]; then
               echo "error: $v is not set — refusing to pass on skipped tests"
               exit 1
@@ -463,6 +466,7 @@ jobs:
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
         ports:
           - 5432:5432
         # Same as integration-test: no init-volume mount (service containers
@@ -501,14 +505,16 @@ jobs:
           echo "postgres did not become ready"
           exit 1
 
-      # Creates qp_migrator/qp_app and the app/river/extensions schemas —
-      # required before MIGRATOR_DSN can connect. Same step as integration-test.
+      # Creates qp_migrator/qp_app/qp_admin and the app/river/extensions
+      # schemas — required before MIGRATOR_DSN can connect. Same step as
+      # integration-test.
       - name: First-init script (roles, schemas, extensions)
         env:
           POSTGRES_USER: postgres
           POSTGRES_DB: quotepilot
           QP_MIGRATOR_PASSWORD: ci-migrator-2f7b9d14c8a04e61 # gitleaks:allow — throwaway, see comment above
           QP_APP_PASSWORD: ci-app-8e3a6b0f15d94c27 # gitleaks:allow — throwaway, see comment above
+          QP_ADMIN_PASSWORD: ci-admin-23509f02e8c1a4f3 # gitleaks:allow — throwaway, see comment above
           PGHOST: localhost
           PGPASSWORD: ci-pg-5c0ff3a1b7d24e98 # gitleaks:allow — throwaway, see comment above
         run: bash infra/postgres/init/01-roles-and-schemas.sh

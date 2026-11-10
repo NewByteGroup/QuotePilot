@@ -2,13 +2,15 @@
 -- Layer A: identity and routing, no tenant RLS, function-gated (comment 9).
 -- Layer B: tenant tables, ENABLE + FORCE RLS + tenant_isolation_policy.
 -- Layer C: platform-global tables, SELECT-only for qp_app, writes through
--- SECURITY DEFINER functions (comment 15).
+-- SECURITY DEFINER functions granted to qp_admin only (comment 15).
 --
 -- Applied by qp_migrator (object owner). qp_app receives SELECT/INSERT/UPDATE/
 -- DELETE on new tables via ALTER DEFAULT PRIVILEGES in the init script, so the
 -- restrictive cases of the spec are explicit REVOKEs below. Functions get no
 -- EXECUTE by default (init script revokes PUBLIC EXECUTE); each function below
--- grants EXECUTE to qp_app explicitly (ADR-003 section 1, ADR-005 section 2).
+-- grants EXECUTE explicitly — tenant-facing functions to qp_app, the
+-- platform_* write/teardown path to qp_admin only (ADR-003 section 1,
+-- ADR-005 section 2, spec section 5).
 --
 -- The tenant policy copies the 0001 pattern (AGENTS.md rule 4):
 --   organization_id = NULLIF(current_setting('app.current_organization_id', true), '')::uuid
@@ -637,6 +639,10 @@ DROP TABLE app.private_tariff_embeddings;
 -- fully qualified object names; qp_app holds no table privilege on Layer A/C
 -- and reaches them only through these. EXECUTE is granted explicitly per
 -- function because the init script revokes default EXECUTE on app functions.
+-- The grant splits by caller: the three tenant-facing functions stay with
+-- qp_app; the five platform_* functions (Layer C writes and teardown) go to
+-- qp_admin, the platform path's role, so the tenant credential physically
+-- cannot reach them (Devin Review — the teardown trust model).
 -- =========================================================================
 
 -- resolve_inbound_org: normalize the Resend `to` address (lower case, plus-tag
@@ -739,7 +745,8 @@ GRANT EXECUTE ON FUNCTION app.get_current_organization() TO qp_app;
 -- +goose StatementEnd
 
 -- platform_insert_public_snapshot: the only write path into immutable
--- snapshots for qp_app (comment 15); also refreshes connectors.last_scraped_at.
+-- snapshots, called by the platform path as qp_admin (comment 15); also
+-- refreshes connectors.last_scraped_at.
 -- +goose StatementBegin
 CREATE FUNCTION app.platform_insert_public_snapshot(
     p_connector_slug text,
@@ -785,7 +792,7 @@ END;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) TO qp_app;
+GRANT EXECUTE ON FUNCTION app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamptz) TO qp_admin;
 -- +goose StatementEnd
 
 -- platform_update_connector_status: HEALTHY -> DEGRADED -> HEALING -> HEALTHY
@@ -827,7 +834,7 @@ END;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION app.platform_update_connector_status(text, app.connector_status, numeric) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.platform_update_connector_status(text, app.connector_status, numeric) TO qp_app;
+GRANT EXECUTE ON FUNCTION app.platform_update_connector_status(text, app.connector_status, numeric) TO qp_admin;
 -- +goose StatementEnd
 
 -- platform_insert_healing_session: opens a repair session for a DEGRADED
@@ -881,13 +888,13 @@ END;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION app.platform_insert_healing_session(text, uuid, text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.platform_insert_healing_session(text, uuid, text, text, text, text) TO qp_app;
+GRANT EXECUTE ON FUNCTION app.platform_insert_healing_session(text, uuid, text, text, text, text) TO qp_admin;
 -- +goose StatementEnd
 
 -- platform_update_healing_session: reports session progress (PR opened,
 -- tests green, merged or failed). Without it a healing_sessions row could
--- never leave OPEN — qp_app has no table write grant by design (comment 15).
--- MERGED/FAILED stamp resolved_at once.
+-- never leave OPEN — qp_admin holds no table write grant by design
+-- (comment 15). MERGED/FAILED stamp resolved_at once.
 -- +goose StatementBegin
 CREATE FUNCTION app.platform_update_healing_session(
     p_session_id uuid,
@@ -931,18 +938,22 @@ END;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_app;
+GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text) TO qp_admin;
 -- +goose StatementEnd
 
 -- platform_delete_organization: controlled tenant teardown (spec section 4).
 -- The ONLY delete path for an organization — qp_app holds no privilege on
--- Layer A and nothing else can reach the registry. Teardown deletes only the
+-- Layer A and nothing else can reach the registry. EXECUTE goes to qp_admin,
+-- never qp_app: the exposed tenant credential cannot delete an org at all
+-- (Devin Review — granting qp_app EXECUTE left a single in-function scope
+-- check between the API role and tenant deletion). Teardown deletes only the
 -- tenant the caller is already scoped into: the guard at the top of the body
--- requires an InTenantTx pinned to p_org_id, so qp_app's EXECUTE grant can no
--- longer reach an arbitrary org (Devin Review — the API opens that tenant
+-- requires an InTenantTx pinned to p_org_id, so qp_admin's EXECUTE grant can
+-- no longer reach an arbitrary org (Devin Review — the API opens that tenant
 -- transaction only after admin authorization). A deliberately malicious
--- qp_app could still pin any context itself; that residual is the accepted
--- GUC trust model documented in the spec. Two transaction-local GUCs make
+-- qp_admin could still pin any context itself; that residual is the accepted
+-- GUC trust model documented in the spec — authorizing WHO may call the
+-- platform path stays the API layer's job. Two transaction-local GUCs make
 -- the cascade work under the role model:
 --   app.current_organization_id — pinned by the caller and verified here;
 --     the cascaded deletes need it because the function runs as
@@ -956,8 +967,8 @@ GRANT EXECUTE ON FUNCTION app.platform_update_healing_session(uuid, app.healing_
 --     alone is forgeable (any role can set_config), so both triggers also
 --     require current_user <> session_user — true only inside a SECURITY
 --     DEFINER body like this one, where the effective user is qp_migrator.
---     qp_app holds no role memberships (init section 2, roles.sql [B1]), so
---     SET ROLE cannot fake the difference either.
+--     qp_app and qp_admin hold no role memberships (init section 2,
+--     roles.sql [B]), so SET ROLE cannot fake the difference either.
 -- set_config(..., true) is transaction-local, so neither flag can leak into
 -- the pooled session the call rode in on.
 -- +goose StatementBegin
@@ -981,7 +992,17 @@ END;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION app.platform_delete_organization(uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_app;
+GRANT EXECUTE ON FUNCTION app.platform_delete_organization(uuid) TO qp_admin;
+-- +goose StatementEnd
+
+-- qp_admin also needs USAGE on the enum types in the platform signatures:
+-- EXECUTE on the function alone does not cover argument/return types, so a
+-- call typed with app.connector_status or app.healing_status would raise
+-- permission denied for type. Types carry PUBLIC USAGE by default; the
+-- explicit grant keeps the qp_admin contract working even if a later
+-- migration revokes that default.
+-- +goose StatementBegin
+GRANT USAGE ON TYPE app.healing_status, app.connector_status TO qp_admin;
 -- +goose StatementEnd
 
 -- =========================================================================
@@ -1011,9 +1032,11 @@ BEGIN
     -- set_config('app.tenant_teardown', 'on', true) in its own transaction.
     -- The bypass therefore also requires current_user <> session_user, which
     -- holds only while executing inside a SECURITY DEFINER function
-    -- (platform_delete_organization, owned by qp_migrator). A direct qp_app
-    -- write has current_user = session_user = qp_app and can satisfy neither
-    -- side of the difference.
+    -- (platform_delete_organization, owned by qp_migrator and executable by
+    -- qp_admin only). A direct qp_app write — qp_app is the only role with
+    -- tenant table writes; qp_admin holds none — has
+    -- current_user = session_user = qp_app and can satisfy neither side of
+    -- the difference.
     IF current_setting('app.tenant_teardown', true) = 'on'
        AND current_user <> session_user THEN
         IF TG_OP = 'DELETE' THEN
@@ -1062,7 +1085,8 @@ DECLARE
 BEGIN
     -- Same teardown contract as block_approved_quote_mutation: the flag must
     -- ride inside a SECURITY DEFINER context (current_user <> session_user)
-    -- or qp_app could forge it with a bare set_config.
+    -- or qp_app — the only role that writes tenant rows directly — could
+    -- forge it with a bare set_config.
     IF current_setting('app.tenant_teardown', true) = 'on'
        AND current_user <> session_user THEN
         IF TG_OP = 'DELETE' THEN
