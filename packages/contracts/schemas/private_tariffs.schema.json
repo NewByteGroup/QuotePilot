@@ -11,10 +11,12 @@
     "charge_code",
     "origin_locode",
     "dest_locode",
+    "equipment_or_unit",
     "currency",
     "net_amount",
     "valid_from",
-    "valid_until"
+    "valid_until",
+    "search_description"
   ],
   "properties": {
     "carrier_or_agent": {
