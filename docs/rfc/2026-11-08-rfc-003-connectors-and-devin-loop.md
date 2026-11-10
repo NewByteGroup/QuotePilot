@@ -9,31 +9,33 @@
 
 ## 1. Scope
 
-Layer C of the data model: connectors that turn public sources into immutable snapshots; how a snapshot is scored; what quotes do when a source is unhealthy; and how a broken parser is repaired by Devin without opening a path into tenant data.
+Layer C of the data model: connectors that turn public sources into immutable snapshots; how a snapshot is scored; what quotes do when a source is unhealthy; and how a broken parser is repaired by Devin without opening a path into tenant data. The MVP's Hapag API carrier-rate connector is a separate, tenant-sensitive path in `ai-engine` (proposed ADR-004 stage 4A); sections 3 to 8 below describe the public-source snapshot and repair loop, not automatic repair of Hapag integration code.
 
 ## 2. Sources for the MVP
 
-The team's guardrail is three or four connectors done well. Candidates:
+MVP v1.3 supports FCL and AIR for imports and exports; LCL, Inland/Door-to-Door and AFRMM are outside MVP scope. Quotes include only costs payable by the requesting customer under the agreed Incoterm. The proposed ADR-004 stage 4A calls the Hapag API connector in `ai-engine` only for FCL whose requesting customer owes ocean freight; AIR base freight is likewise included only when the customer owes it. `core-api` obtains the required tenant context inside `InTenantTx`, calls `ai-engine` without `organization_id`, validates the returned offer's schema and sanity bounds, and persists it under tenant context before deterministic pricing in proposed stage 4B. Quote versions would pin the validated offer when applicable, public snapshots and FX rates. The exact offer contract, checkpoint and stage sequence await review in ADR-004. Hapag offers are tenant-sensitive and are not Layer C public snapshots.
+
+The public-source connector set remains a proposal. Candidates:
 
 | Connector | Source | Method | Notes |
 |---|---|---|---|
 | `bcb_ptax` | Central Bank open-data API (`olinda.bcb.gov.br`, service PTAX, OData, JSON) | Plain HTTP call, **no scraping** | Official and public, so Firecrawl is not needed. Publishes several bulletins a day. Endpoint and parameters to be re-checked when the connector is written. |
 | `carrier_fx_daily` | Carrier or coloader pages that publish a daily rate | Firecrawl | **Open:** which carriers the pilot companies use, and whether those rates are public at all. If a carrier does not publish one, fall back to PTAX plus the organization's spread (RFC-001) or let the company enter its own rate. |
-| Terminal fee tables | Santos Brasil, BTP, Portonave, TCP are named in the spec | Firecrawl, HTML or PDF | Pick the two or three the pilot companies actually use. Formats differ per terminal. |
+| Terminal fee tables | Santos Brasil, BTP, Portonave, TCP are named in the spec | Firecrawl, HTML or PDF | These candidates are import-biased; validate export fee coverage and each source's terms before selecting tables for either direction. Formats differ per terminal. |
 | `demo_mirror_terminal` | A controlled replica of a terminal page | Firecrawl | For the live break-and-repair demo (section 8). Never used for real tenants' quotes. |
 
-**Before any scraping:** check each site's terms of use and robots rules, and the licence of the content. Public does not automatically mean free to republish, and the repository is public (section 7). **Owner: Amanda, reviewed by Pedro.**
+**Before any scraping:** check each site's terms of use and robots rules, and the licence of the content. Public does not automatically mean free to republish, and the repository is public (section 7). **Owner: Amanda, reviewed by Pedro.** Separately, verify Hapag API access terms, permitted use of offers, rate limits, credential source, scope and handling, and whether recorded API fixtures may be committed; no live carrier calls belong in tests.
 
 ## 3. Connector contract
 
-A connector is a Python module in `apps/ai-engine/connectors/<slug>/` with two parts: fetch (get the raw content) and parse (turn it into rates). Its output is a `ConnectorOutput` defined in `packages/contracts`:
+A public-source connector is a Python module in `apps/ai-engine/connectors/<slug>/` with two parts: fetch (get the raw content) and parse (turn it into rates). Its output is a `ConnectorOutput` defined in `packages/contracts`:
 
 - `connector_slug`, `parser_version`, `source_url`, `fetched_at`, `source_content_hash`
 - `raw_content`: the fetched bytes, base64, size-capped by a configured limit; its SHA-256 must equal `source_content_hash`, which `core-api` verifies before storing it under the platform prefix. If the content exceeds the cap the connector fails its hard checks rather than truncating.
 - `rates`: typed rows (kind, keys such as terminal and fee band, amount as a decimal string, currency, unit, validity if known)
 - `diagnostics`: rows found, columns seen, structure signature, notes
 
-Flow (ADR-004 style, all in the existing runtimes):
+Public-source flow (ADR-004 style, all in the existing runtimes):
 
 1. A River periodic job in `core-api` triggers `connector.run` on the connector's schedule.
 2. `core-api` calls `ai-engine` at `/connectors/<slug>/run`. `ai-engine` fetches (with Firecrawl's key, which only it holds) and parses. It has no database or storage access (rule 1).
@@ -57,7 +59,7 @@ The spec's score `S_conf` must not come from an LLM's opinion of itself. It is c
 
 `S_conf` is the weighted share of checks passed, from 0 to 1. **A failed hard check forces `DEGRADED` regardless of the score.** A connector entering `DEGRADED`, whether through a failed hard check or `S_conf` below 0.95 (the spec's threshold), triggers healing. Weights and thresholds are configuration, calibrated on recorded fixtures, and reviewed when a connector is added.
 
-Status machine: `HEALTHY` to `DEGRADED` (low score or hard fail), then `HEALING` while a repair is open, then `HEALTHY` after a repaired parser passes. A connector that exhausts its repair budget moves to `FAILED` and waits for a human. `FAILED` is an addition to the spec's three statuses (data model v1.2).
+Status machine: `HEALTHY` to `DEGRADED` (low score or hard fail), then `HEALING` while a repair is open, then `HEALTHY` after a repaired parser passes. A connector that exhausts its repair budget moves to `FAILED` and waits for a human. `FAILED` is a proposed addition to the product data model's three statuses.
 
 ## 5. Degraded mode for quotes
 
@@ -72,6 +74,8 @@ Each source kind has a maximum acceptable age (proposal, **[business]** to confi
 Whenever a quote is held back by a connector, pricing registers a waiter inside its tenant transaction (ADR-005 section 6). After the connector recovers, a platform job takes the waiters and enqueues one reprocess job per RFQ, each with its own tenant envelope. Reprocessing creates a new quote version.
 
 ## 6. The Devin repair loop
+
+This loop applies to public-source parsers and the controlled terminal mirror. A Hapag API failure would follow the proposed stage 4A failure and review path in ADR-004; this RFC does not authorize Devin to repair that integration automatically.
 
 ### 6.1 Trigger and inputs
 
@@ -108,18 +112,19 @@ The repository is public. Fixtures hold recorded page excerpts, so each source's
 
 | # | Question | Owner | Default if unanswered |
 |---|---|---|---|
-| 1 | Which carriers and terminals do the four pilot companies actually use | Marcelo, pilot companies | Start with PTAX plus two terminals |
+| 1 | Which carriers and terminals cover the pilot companies' import and export flows | Marcelo, pilot companies | Start with PTAX and validate terminal sources for both directions |
 | 2 | Do those carriers publish daily rates publicly | Pilot companies | If not, PTAX plus spread, or tenant-entered rate |
-| 3 | Terms of use and robots rules for each source | Amanda | No source goes live before this is checked |
+| 3 | Terms of use and robots rules for each source, including export fee pages | Amanda | No source goes live before this is checked |
 | 4 | How failing content reaches Devin (branch, private mirror, or prompt) | Pedro, Amanda | Minimal excerpt on a branch, subject to question 3 |
 | 5 | Max age per source kind | Pilot companies | 1 business day for rates, 30 days for terminal tables |
 | 6 | Repair budget N | Pedro | 3 per connector per day |
 | 7 | Firecrawl plan limits and schedule frequency | Amanda | Daily for rates, daily to weekly for terminals; verify credits |
 | 8 | Devin API access and limits for the team | Amanda | Verify before the demo |
+| 9 | Hapag API access terms, credential source, scope and handling, rate limits and rights to record test fixtures | Pedro, Amanda | Do not enable live calls or commit captured offers until verified; use synthetic fixtures meanwhile |
 
 ## 10. Impact
 
-- **Data model v1.2:** `FAILED` connector status; `S_conf` details and check results stored per snapshot; waiters table (ADR-005); `parser_version` on snapshots; `healing_sessions.failing_snapshot_payload` replaced by a hash plus a reference (comment 15).
+- **Data-model follow-up for v1.3:** `FAILED` connector status; `S_conf` details and check results stored per snapshot; waiters table (ADR-005); `parser_version` on snapshots; `healing_sessions.failing_snapshot_payload` replaced by a hash plus a reference (comment 15).
 - **CI:** `devin-scope` and the connector fixture tests are required checks (already in `AGENTS.md`).
 - **RFC-001:** consumes snapshots through the lookups defined there.
 

@@ -12,19 +12,19 @@
 The equation in spec section 4.4 is a good outline, but the engine cannot be written from it. Five things are undefined:
 
 1. The Incoterm decides which cost groups belong in the quote. The equation ignores it.
-2. The order of calculation: terminal fees depend on the CIF value, and the CIF value depends on the freight.
+2. For the import proposal, destination terminal fees may depend on a CIF-based value and the freight amount; export terminal fee incidence and calculation basis still need validation.
 3. Origin charges and surcharges (GRI, BAF, peak season) appear as line categories but not in the equation.
-4. Rounding: dividing each line by `(1 - M)` produces cent differences, and the lines must add up to the price exactly.
-5. Whether the margin applies to pass-through terminal costs, and which exchange rate applies to which amount.
+4. Rounding the eligible FCL ocean or air freight markup and converting each line can produce cent differences; the line sell amounts must add up to the quote exactly.
+5. The v1.3 spec fixes markup scope: FCL `OCEAN_FREIGHT` and base air freight only; local charges, FSC/SSC and fixed fees pass through. Exchange-rate selection remains open.
 
 `internal/pricing` is a pure package (no I/O, decimal only). Everything below is what that package takes in and gives back.
 
 ## 2. Scope and assumptions
 
-- **MVP is import into Brazil.** The spec's destination terminals, storage by CIF band, THC and customs dispatch all describe imports. Export quotes are out of scope. **[business] confirm.**
-- Taxes and duties (II, IPI, ICMS, PIS/COFINS) are **not** part of the quote. The spec equation has none. **[business] confirm that the forwarder's proposal excludes them.**
-- Sea (FCL, LCL) and air are in scope, matching the `modal` enum.
-- All output is in BRL. Foreign-currency amounts are converted line by line and the rate is recorded.
+- **MVP covers imports into and exports from Brazil in FCL Hapag and AIR.** Quote only charges payable by the requesting customer (importer or exporter) under the Incoterm. The destination-terminal, CIF-band storage, THC and customs-dispatch examples below describe an import proposal; export charge allocation remains open for validation.
+- Import taxes and duties (II, IPI, ICMS, PIS/COFINS) are proposed outside the quote. **[business] confirm that exclusion; export-specific customs and tax treatment remains open in question 16.**
+- FCL Hapag and air are in the MVP. LCL, Inland, Door-to-Door and AFRMM are outside the MVP, even if an enum or historical tariff still names them.
+- BRL output remains the current proposal. Confirm the export quote currency and FX treatment under open question 16. Foreign-currency amounts are converted line by line and every applied rate is recorded.
 
 ## 3. Inputs and outputs
 
@@ -44,12 +44,12 @@ The equation in spec section 4.4 is a good outline, but the engine cannot be wri
 
 ## 4. Which cost groups the quote includes, by Incoterm
 
-The forwarder quotes the **buyer's side**. Proposal, to be validated with the pilot companies (terminal fee allocation in particular varies in practice) **[business]**:
+The forwarder quotes only the charges payable by the requesting customer, whether importer or exporter, under the Incoterm. The following matrix is an **import-only proposal** for the buyer's side and has not been validated for export; the export matrix is an open design item with the pilot companies **[business]**:
 
 | Incoterm (2020) | Origin charges | International freight | Terminal storage and THC | Customs dispatch | Where the freight for the CIF base comes from |
 |---|---|---|---|---|---|
 | EXW | yes | yes | yes | yes | private tariff |
-| FCA | per RFQ: yes only if pre-carriage or loading is requested | yes | yes | yes | private tariff |
+| FCA | applicable origin terminal or loading fees; inland pre-carriage is outside the MVP | yes | yes | yes | private tariff |
 | FOB (also FAS) | no (seller's) | yes | yes | yes | private tariff |
 | CFR, CIF, CPT, CIP | no | **no** (seller pays; the declared freight is an input, not a charge) | yes | yes | declared in the RFQ or invoice |
 | DAP, DPU | no | no | per RFQ | yes | declared |
@@ -62,27 +62,26 @@ Notes:
 
 ## 5. Calculation order
 
-1. **Validate and resolve.** Reject margins outside `[0, 1)`. Resolve rules by precedence route, modal, `ALL`. The data model enforces one rule per scope with `UNIQUE NULLS NOT DISTINCT` (comment 10).
+1. **Validate and resolve.** Reject negative or invalid markup percentages. Resolve `route_target_margin` before the spec's `default_markup_rate`, and modal before `ALL`. Both rates mean markup on freight cost for the MVP. The proposed field rename is documented in the spec only; schema and contract changes require separate review. The data model enforces one rule per scope with `UNIQUE NULLS NOT DISTINCT` (comment 10).
 2. **Chargeable quantity.**
    - FCL: number of equipment units.
-   - LCL: chargeable W/M is the greater of weight in tonnes and volume in cubic metres (1 tonne = 1 m³ convention).
-   - Air: chargeable weight is the greater of gross kg and volumetric kg, with volumetric kg = volume m³ × 167 (the usual 6000 cm³ per kg convention).
-   **[business] confirm the conventions with the pilot companies.**
-3. **Select tariffs.** Filter by route, modal and equipment. For each tariff natural key (carrier, route, modal, equipment, charge_category, charge_code), consider the rows whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing time (`activated_at <= priced_at`); take the row from the batch with the latest `activated_at`. If that row is a tombstone (`is_removed`), that natural key is dropped from the candidates (for example one carrier's rate); whether the result is then `INCOMPLETE` follows the offer rule in open question 12. See RFC-002 step 3 (tariff versioning). Filtering is deterministic on codes; embeddings only help rank service descriptions among already-valid rows (spec section 5.4 warning applies). If several carriers qualify, the default is: price the lowest net cost, list the others as alternatives in the audit view. **[business] one price or several options?** Missing tariff for a required group makes the result `INCOMPLETE`; the engine never invents a number.
-4. **Freight and origin lines.** `quantity × net_amount`, never below `min_amount`, converted to BRL (section 7). Surcharges (BAF, GRI, peak season) are their own lines, identified by `charge_category` and `charge_code` on the tariff row (comment 11).
-5. **CIF base in BRL.** `(goods value + freight + insurance)` where freight is the tariff freight (EXW, FCA, FOB) or the declared freight (CIF family). Converted at the customs rate (section 7).
-6. **Terminal lines.** Look up the public fee band for the CIF base, weight and volume. Storage covers the first period only unless the RFQ says otherwise. **[business] confirm the storage period assumption.**
-7. **Organization fixed fees.** From `fixed_fees_json`, converted if not in BRL.
+   - LCL: W/M calculation is deferred beyond the MVP.
+   - Air: `chargeable_kg = max(gross_kg, volume_m3 × 166.67)`. This factor is fixed for the MVP; any carrier-specific exception requires a later decision.
+3. **Select tariffs.** Filter by direction, route, modal and equipment for charges payable by the requesting customer. Before this pure package runs, Stage 4A obtains a Hapag FCL offer through the `ai-engine` connector only when the customer owes ocean freight under the Incoterm; the worker passes that offer as pricing input. The package selects an AIR freight tariff only when the customer owes air freight. If freight is not payable by the customer, do not create a sell line for it. Direction and export tariff coverage still need validation. For each tariff natural key (carrier, route, modal, equipment, charge_category, charge_code), consider the rows whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing time (`activated_at <= priced_at`); take the row from the batch with the latest `activated_at`. If that row is a tombstone (`is_removed`), that natural key is dropped from the candidates (for example one carrier's rate); whether the result is then `INCOMPLETE` follows the offer rule in open question 12. See RFC-002 step 3 (tariff versioning). Filtering is deterministic on codes; embeddings only help rank service descriptions among already-valid rows (spec section 5.4 warning applies). If several carriers qualify, the default is: price the lowest net cost, list the others as alternatives in the audit view. **[business] one price or several options?** Missing tariff for a required group makes the result `INCOMPLETE`; the engine never invents a number.
+4. **Freight and pass-through lines.** When the customer owes FCL Hapag ocean freight, apply cost-based markup only to `OCEAN_FREIGHT`, with floor `min_markup_usd × container_count`. When the customer owes air freight, calculate base net freight as `max(min_amount, chargeable_kg × net_amount)` and apply cost-based markup only to that base. Local charges, air FSC/SSC and fixed fees are separate pass-through lines sold at cost only when payable by the requesting customer under the Incoterm. Convert each line to BRL using the pinned FX rate (section 7).
+5. **Import CIF base in BRL, when applicable.** For import fee bands only, use `(goods value + freight + insurance)`, with freight from the tariff when payable by the customer or declared in the documents when paid by the other party. Convert at the still-open customs rate (section 7). Do not assume this CIF-based fee basis applies to exports.
+6. **Terminal lines by direction.** For the import proposal, look up the destination public fee band for the CIF base, weight and volume; first-period storage remains a business assumption. Which export origin/destination terminal charges are payable by the requesting customer, and their calculation basis and source, remain open **[business]**.
+7. **Organization fixed fees.** Include fees from `fixed_fees_json` only when payable by the requesting customer under the Incoterm; convert if not in BRL. The export allocation is open in question 13.
 8. **Cost total** is the sum of the rounded line costs (section 6), so what the analyst audits adds up.
-9. **Margin and price** (section 6 and 8).
+9. **Markup and price** (sections 6 and 8): add the markup to the eligible FCL ocean or base air freight only, then add all other lines at cost.
 
 ## 6. Rounding and cent allocation
 
 - Money is `decimal`. BRL amounts have two decimal places; FX rates have six (`NUMERIC(10,6)`).
 - Each cost line is rounded **half up** to the cent when it is converted to BRL. Banker's rounding is rejected because it surprises people who check by hand. **[business] confirm.**
-- Price: `P = round_half_up( C / (1 - M) )` where `C` is the sum of rounded cost lines.
-- Each line's unrounded sell amount is `cost_i / (1 - M)`. The cents of `P` are shared among the lines by the **largest remainder method** (floor each line to the cent, then give the leftover cents to the lines with the largest fractional parts, ties broken by line order). The result is exact: **the sum of line sell amounts equals `P`**. This is a mandatory invariant test (ADR-008).
-- `M` is margin **on price**: `margin = (P - C) / P`. This is not markup. The interface labels it clearly, because markup and margin are easy to confuse.
+- Price is the sum of rounded sell lines. For FCL, the eligible ocean freight sell amount is `Net_Ocean + max(Net_Ocean × M_route, min_markup_usd × container_count)`; for air, it is `Net_Air × (1 + M_route)`. All other lines sell at their rounded cost. Convert foreign-currency amounts to BRL with pinned FX rates before the final sum.
+- Allocate any rounding cent deterministically among eligible freight lines so that **the sum of line sell amounts equals the quote price**; pass-through lines remain equal to their rounded cost. Tie order and half-up behavior remain part of the golden-quote validation (ADR-008).
+- `M_route` is markup **on freight cost**, not margin on the final selling price. The product spec names the route field `route_target_margin` and the default field `default_markup_rate`; the default-field rename is not yet a schema or contract change. Label the UI as markup.
 
 ## 7. Exchange rates
 
@@ -93,42 +92,40 @@ Notes:
 - A rate older than one business day is flagged `STALE_FX`. Every rate applied is stored in `fx_rates_applied_json` and per line in `fx_rate_used`.
 - Recalculation always creates a new quote version with the then-current rates. Old versions are never changed.
 
-## 8. Margin scope
+## 8. Markup scope
 
-The spec equation applies `M` to the entire cost, terminal pass-through fees included. That may overprice items the company merely passes on.
+The v1.3 product spec resolves the MVP scope: When the requesting customer owes ocean freight, FCL Hapag uses cost-based markup only on `OCEAN_FREIGHT`, with a floor of `min_markup_usd` per container; local costs pass through. When the customer owes air freight, Air uses `chargeable_kg = max(gross_kg, volume_m3 × 166.67)` and `Net_Air = max(min_amount, chargeable_kg × net_amount)`; cost-based markup applies only to that base air freight, while FSC/SSC and fixed fees pass through. LCL, Inland, Door-to-Door and AFRMM are outside the MVP.
 
-| Option | Formula | Effect |
-|---|---|---|
-| **A. Margin on everything** (spec as written) | `P = C / (1 - M)` | Simple. Terminal fees are marked up. |
-| B. Margin on the forwarder's own services only | `P = C_pass + C_services / (1 - M)` | Pass-through lines are sold at cost. |
-| C. Separate pass-through markup | `P = C_pass × (1 + k) + C_services / (1 - M)` | Most flexible, one more parameter to explain. |
-
-**Default until the business answers: A.** If B or C is chosen, the rule becomes `pricing_rules.margin_scope` (and `k`), a schema change for data model v1.2. **[business] This is the main question for Marcelo and the pilot companies.**
+The earlier alternatives of margin on the whole price or separate pass-through markup are superseded for the MVP. This RFC remains Draft because the Incoterm matrix, customs/FX/PTAX choices, rounding details and golden-quote evidence still need validation.
 
 ## 9. Open questions
 
 | # | Question | Owner | Default if unanswered |
 |---|---|---|---|
-| 1 | MVP is import-only | Marcelo | Yes |
+| 1 | MVP direction and modal scope | Pedro / product spec v1.3 | Resolved: imports and exports in FCL Hapag and AIR; charge only what the requesting customer owes |
 | 2 | Quote excludes taxes and duties | Marcelo | Yes |
 | 3 | Incoterm matrix in section 4 matches pilot practice | Pilot companies | As proposed |
-| 4 | Margin scope: A, B or C | Marcelo, pilot companies | A |
+| 4 | Markup scope for FCL Hapag and air | Pedro / product spec v1.3 | Resolved for MVP: eligible freight cost only; pass-through lines at cost |
 | 5 | One recommended price, or several carrier options | Marcelo | One price plus alternatives in the audit view |
 | 6 | Customs rate vs carrier rate for the CIF base | Pilot companies | Customs rate, flagged for confirmation |
 | 7 | PTAX bulletin and side | Marcelo | Previous closing, selling side |
-| 8 | W/M and air volumetric conventions | Pilot companies | 1 t = 1 m³; 167 kg per m³ |
+| 8 | Air volumetric factor; LCL W/M convention deferred | Pilot companies | Air: 166.67 kg per m³ for MVP; LCL out of scope |
 | 9 | Storage period assumption | Pilot companies | First period only |
 | 10 | Add an insurance line | Marcelo | No; insurance is an input only |
 | 11 | Half-up rounding | Marcelo | Half up |
 | 12 | What makes a tariff offer complete: must one carrier cover every required freight and origin group, or may groups from different parties combine (for example EXW origin charges from an origin agent plus ocean freight)? | Marcelo, pilot companies | Per carrier: an offer is usable only if that carrier covers every required freight and origin group; public terminal fees are carrier-independent; `INCOMPLETE` if no offer is usable. Never combine across carriers silently. |
+| 13 | Export Incoterm matrix: which freight, origin/export customs, terminal, destination and fixed charges are payable by the requesting exporter or importer for each supported Incoterm? | To confirm with pilot companies | Open; current section 4 matrix applies to imports only |
+| 14 | Export terminal and handling charges: which source, location and calculation basis apply instead of import CIF-band destination storage? | To confirm with pilot companies | Open; do not reuse import CIF formula automatically |
+| 15 | Export tariff coverage and direction routing: can Hapag return FCL export offers for the pilot routes, and which AIR export tariffs are available; how are ambiguous or reverse routes handled? | To confirm with pilot companies | Open; no unverified reverse-route rate |
+| 16 | Export quote currency, FX source/timing and any export-specific customs or tax treatment? | To confirm with pilot companies | Open; keep current BRL output only as an explicit proposal |
 
 ## 10. Impact
 
-- **Data model v1.2:** `charge_category` and `charge_code` on tariffs; `margin_scope` (and `k`) on pricing rules; `inputs_hash` and line `flags` on quotes; a rounding rule note in the schema comments; tariff versioning (`is_removed`, batch `activated_at`, quote `priced_at`) as defined in RFC-002 step 3 (tariff versioning).
+- **Data model v1.2:** `charge_category` and `charge_code` on tariffs; `min_markup_usd` on pricing rules for the FCL floor; `inputs_hash` and line `flags` on quotes; a rounding rule note in the schema comments; tariff versioning (`is_removed`, batch `activated_at`, quote `priced_at`) as defined in RFC-002 step 3 (tariff versioning). The superseded all-cost margin options do not require new `margin_scope` or `k` fields.
 - **ADR-004:** unchanged. The worker remains the only caller.
 - **ADR-008:** the money tests in that ADR implement sections 5 and 6.
 - **Connectors (RFC-003):** terminal bands and carrier FX must be exposed in a shape the lookups above can use.
 
 ## 11. Acceptance for moving to an ADR
 
-Questions 3, 4, 6 and 7 answered, and ten historical quotes from the pilot companies reproduced to the cent by a draft implementation against synthetic equivalents (ADR-008).
+Before this Draft RFC can become an ADR, questions 3, 6, 7 and the new export questions 13–16 must be answered. The per-modal cost markup and rounding must then be confirmed against pilot practice, and a draft implementation must reproduce ten historical quotes to the cent using synthetic equivalents (ADR-008). The golden-quote set must include representative import and export cases for both FCL Hapag and AIR.

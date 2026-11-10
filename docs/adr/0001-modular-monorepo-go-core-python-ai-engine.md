@@ -1,9 +1,9 @@
 # ADR-001: Modular monorepo with a Go core and a stateless Python ai-engine
 
-- **Status:** Approved (open items remain)
+- **Status:** Approved
 - **Date:** 2026-11-04
-- **Deciders:** Pedro (backend lead). Original review request: Marcelo and Amanda.
-- **Related:** ADR-002 (Go core stack), ADR-003 (Postgres hosting), ADR-004 (async jobs), RFC-003 (connectors and Devin loop)
+- **Deciders:** Pedro (backend lead). Reviewed and approved by Marcelo and Amanda.
+- **Related:** ADR-002 (Go core stack), ADR-003 (Postgres on Railway dev / Supabase prod, R2 storage), ADR-004 (async jobs), RFC-003 (connectors and Devin loop)
 
 ## Context
 
@@ -39,7 +39,7 @@ QuotePilot is a multi-tenant B2B SaaS. Three facts shape the architecture:
 
 ### Contracts first
 
-`packages/contracts/` is the single source of truth for the shapes exchanged between components (OpenAPI 3.0.3 and JSON Schema; see ADR-002):
+`packages/contracts/` is the single source of truth for the shapes exchanged between components (OpenAPI 3.0.3 and JSON Schema — 3.0.3 not 3.1, per ADR-002: `oapi-codegen` does not support 3.1):
 
 - core-api HTTP API (consumed by `web`)
 - core-api to ai-engine requests/responses (RFQ extraction, connector output, render requests)
@@ -95,8 +95,8 @@ quotepilot/
 
 **Reversibility.** `web` and `ai-engine` depend on `core-api` only through the contract. If the Go spike in ADR-002 fails its gate, the core can be reimplemented in Python (FastAPI) behind the same contract and the same two-process boundary, without touching `web` or `ai-engine`.
 
-## Open items
+## Resolved items (previously Open items, closed 2026-11-09/10)
 
-- PDF and email HTML render in `ai-engine` per product spec v1.2. The renderer library, templates and output-quality check still need Amanda's and Marcelo's confirmation in RFC-002; the RFC remains a draft.
-- Implement the approved ADR-006 embedding choice (`qwen/qwen3-embedding-8b`, 1024 dimensions) and record `embedding_model` in the data model. Vendor consent and evaluation remain open in RFC-004.
-- Service-to-service auth between `core-api` and `ai-engine` (private network plus a shared service token is the minimum).
+- Document rendering (resolved): runs in `apps/ai-engine/render/` with Jinja2 + WeasyPrint, producing PDF bytes and short branded HTML/text email bodies; HTML/CSS templates are owned by Marcelo and Amanda. No Node.js / React Email service. The output-quality check against Marcelo's design remains an RFC-002 verification step, not a choice.
+- Embeddings (resolved): `VECTOR(1024)` with an explicit `embedding_model` column on `private_tariffs`, and an exact scan after the `(organization_id, modal)` filter in the MVP (no ANN index). Provider is `qwen/qwen3-embedding-8b` per the approved ADR-006 matrix; consent and evaluation questions stay in RFC-004.
+- Service-to-service auth (resolved): private network plus a shared `X-Internal-Service-Key` header verified on all `ai-engine` routes — the `AI_ENGINE_SERVICE_TOKEN` bearer of ADR-005 section 10.

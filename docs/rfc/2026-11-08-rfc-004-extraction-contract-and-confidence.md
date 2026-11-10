@@ -54,7 +54,7 @@ Run on every response before anything is persisted. Any failure is recorded as a
 | **Quote is in the source:** `exact_quote` occurs in the email or attachment text after normalisation (Unicode NFKC, collapsed whitespace, case-folded) | Field amber, evidence unverified |
 | **Value is in the quote:** the number appears in the quote after number normalisation, treating `1.234,56` and `1,234.56` explicitly | Field amber; a locale-ambiguous number is always amber |
 | Cross-field: origin differs from destination; FAS, FOB, CFR and CIF are sea and inland waterway terms only (Incoterms 2020), so they are flagged with air | Amber with reason |
-| FCL has an equipment type; LCL or air has weight and volume | Required field missing |
+| FCL has an equipment type; AIR has weight and volume. The LCL check is deferred because LCL is outside MVP v1.3. | Required field missing |
 
 `core-api` needs its own copy of the **reference data** (UN/LOCODE, NCM, Incoterms). To avoid two copies drifting, the data is one versioned dataset under `packages/` that both runtimes consume, with a version recorded on every extraction. **Licence and currency of the UN/LOCODE and NCM sources are not verified here** and must be checked when the dataset is built.
 
@@ -70,7 +70,7 @@ A field's **status** is the source of truth. The numeric confidence is kept for 
 
 A quote is `READY` only if every required field is green, the pricing result is complete (not `INCOMPLETE`) and has no amber flags (RFC-001). Otherwise it is `NEEDS_REVIEW`, and no 1-click link is issued for it (ADR-005). This is the spec's "100% confidence turns green" rule expressed as a state rather than a number: the model never outputs a probability of exactly 1, so a threshold on the number alone would never turn anything green.
 
-`extraction_confidence` (`NUMERIC(5,4)`) is stored as the minimum auditor confidence across required fields, for ordering and dashboards, and is no longer what decides green. `auto_approve_threshold` in the pricing rules then acts on status: it must be reworded in the data model (v1.2).
+`extraction_confidence` (`NUMERIC(5,4)`) is stored as the minimum auditor confidence across required fields, for ordering and dashboards, and is no longer what decides green. `auto_approve_threshold` in the pricing rules then acts on status: it must be reworded in the v1.3 data-model follow-up.
 
 **Asymmetry.** A false green sends a wrong price to a customer; a false amber costs an analyst ten seconds. Thresholds are chosen so that, on the evaluation set, at least 99% of green fields are correct (proposal, to be agreed with Marcelo).
 
@@ -101,7 +101,7 @@ A quote is `READY` only if every required field is green, the pricing result is 
 
 ## 9. Impact
 
-- **Data model v1.2:** per-field status and reason codes; reference dataset version; correction log; `auto_approve_threshold` semantics; evidence verification flag.
+- **Data-model follow-up for v1.3:** per-field status and reason codes; reference dataset version; correction log; `auto_approve_threshold` semantics; evidence verification flag.
 - **`packages/contracts`:** `ExtractionResult` and shared hostile-payload examples (ADR-008).
 - **ADR-006:** the wording change in section 7 and a pointer to this RFC for the contract.
 - **ADR-008:** the evaluation and contract-test sections implement sections 4 and 6.

@@ -100,7 +100,7 @@ Decision: while still inside its own tenant transaction, pricing calls `platform
 
 1. Read the raw body and verify the Svix signature and timestamp before parsing anything. Reject on failure.
 2. For each recipient address in the event, normalise it (lower case, plus-tag removed) and call `platform_resolve_inbound_alias`.
-3. Exactly one organization matches: continue. More than one distinct organization (a message addressed to two tenants): quarantine by id and do not guess. None: record the message id and a counter at platform level, store nothing tenant-scoped, and answer 2xx so the sender does not retry forever. Confirm Resend's retry rules for non-2xx before relying on this.
+3. Exactly one organization matches: continue. More than one distinct organization (a message addressed to two tenants): quarantine by id and do not guess. None: record the message id and a counter at platform level, store nothing tenant-scoped, and answer 2xx so the sender does not retry. Resend (Svix) retries **any** non-2xx — no 4xx/5xx distinction — eight times over ~27 hours (immediate, 5s, 5m, 30m, 2h, 5h, 10h, +10h), so an error response for a permanently undeliverable message would replay it for a day; the documented way to abort a delivery explicitly is the `webhook-delivery: abort-message` response header. Duplicates are normal under retries, which the `(organization_id, resend_message_id)` idempotent insert in step 4 already covers.
 4. In `InTenantTx(organization_id)`: insert the RFQ with `UNIQUE (organization_id, resend_message_id)` and enqueue the ingest job with `InsertTx` (ADR-004). A duplicate delivery inserts and enqueues nothing.
 5. The inbound alias is immutable in the MVP, so an old address cannot start resolving to a different tenant.
 
@@ -120,7 +120,7 @@ The object key always comes from a row read under RLS, never from client input; 
 
 ### 10. Service-to-service: `core-api` to `ai-engine`
 
-Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in constant time, with two tokens accepted at once to allow rotation. The product spec v1.2 names `X-Internal-Service-Key` instead; this header and token-format conflict must be resolved before implementation. `ai-engine` never calls `core-api`; there are no callbacks. mTLS is out of scope for the MVP.
+Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, sent as the `X-Internal-Service-Key` header and verified on all `ai-engine` routes, compared in constant time, with two tokens accepted at once to allow rotation. `ai-engine` never calls `core-api`; there are no callbacks. mTLS is out of scope for the MVP.
 
 ## Threats and controls
 
@@ -140,7 +140,7 @@ Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in co
 
 1. **A `qp_platform` role with `BYPASSRLS`.** Simple, and the most dangerous object in the system: a second credential that can read every tenant. Rejected by ADR-003's reasoning.
 2. **RLS on the identity tables, driven by a "user context" setting.** Needs a second context variable and policies for lookups that, by definition, have no context yet (login by email, alias resolution). More moving parts for the same result.
-3. **Supabase Auth.** ADR-003 uses Supabase as plain production Postgres and Cloudflare R2 for storage. Adopting Supabase's auth schema and JWT-in-RLS pattern would put a second identity system next to ours and conflict with `InTenantTx`.
+3. **Supabase Auth.** ADR-003 uses Supabase as plain Postgres in production and Cloudflare R2 for object storage; development Postgres runs on Railway. Adopting its auth schema and JWT-in-RLS pattern would put a second identity system next to ours and conflict with `InTenantTx`.
 4. **Server-side sessions only, or JWT only.** Sessions-only gives up the stateless verify path the spec asked for; JWT-only cannot revoke. The short access token plus rotating refresh token covers both.
 5. **Passwords.** More surface (reset, storage, breach handling) for no benefit with four pilot companies. Magic link only.
 
@@ -160,7 +160,6 @@ Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, compared in co
 ## Open items
 
 - Confirm the role matrix with Marcelo and the pilot companies.
-- Resend retry behaviour for non-2xx responses to the webhook (decides the orphan-message handling in section 7).
 - Whether web and API share a registrable domain (CSRF design in section 4).
 - Rate limiting if `core-api` ever runs as more than one instance.
 - Where login-event audit records live and how long they are kept (LGPD).
