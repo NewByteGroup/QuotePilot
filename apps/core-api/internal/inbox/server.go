@@ -48,7 +48,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // inboundPayload is the spike's minimal webhook body. The real contract comes
-// from packages/contracts later; this exists to prove the verify→tx→insert path.
+// from packages/contracts later; this exists to prove the verify→tx→insert
+// path. Spike-only shortcut: organization_id rides in the payload — production
+// resolves the tenant through the ADR-005 platform path (alias lookup), never
+// trusting caller-supplied tenant ids.
 type inboundPayload struct {
 	OrganizationID   uuid.UUID       `json:"organization_id"`
 	ResendMessageID  string          `json:"resend_message_id"`
@@ -81,7 +84,10 @@ func (s *Server) handleResendInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"inserted":%t}`, inserted)
+	if _, err := fmt.Fprintf(w, `{"inserted":%t}`, inserted); err != nil {
+		s.logger.ErrorContext(r.Context(), "write response failed",
+			"correlation_id", payload.ResendMessageID, "error", err)
+	}
 }
 
 // parseInboundPayload validates the decoded body: a nil org or empty message
