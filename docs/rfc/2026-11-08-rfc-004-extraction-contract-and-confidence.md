@@ -9,7 +9,7 @@
 
 ## 1. What this RFC is, now that ADR-006 exists
 
-The plan listed this RFC as "extraction contract and confidence model, with deterministic checks rather than the LLM's self-reported confidence". ADR-006 has since been approved and decides the architecture: a Jev decision model for classification and for confidence auditing, plus a `temperature=0` structured-output LLM for extraction. So this RFC no longer chooses the architecture. It covers what ADR-006 leaves open:
+The plan listed this RFC as "extraction contract and confidence model, with deterministic checks rather than the LLM's self-reported confidence". ADR-006 has since been approved and decides the architecture: Jev for classification, `perplexity/pplx-decider-v1.2` for confidence auditing, `qwen/qwen3-embedding-8b` for 1024-dimensional embeddings, and a `temperature=0` structured-output LLM for extraction. So this RFC no longer chooses the architecture. It covers what ADR-006 leaves open:
 
 1. The exact **contract** between `ai-engine` and `core-api` (what a field carries).
 2. The **deterministic checks** `core-api` runs on every response (ADR-001 rule 5), which ADR-006 mentions but does not enumerate.
@@ -19,7 +19,7 @@ The plan listed this RFC as "extraction contract and confidence model, with dete
 
 ## 2. Verified background
 
-Jev is a hosted decision model from TypeSafe AI, released in September 2026, that returns typed answers with probabilities and generates no text. It is reachable at TypeSafe's own API and through gateways, and the same `System One` protocol is served by Ollama, which gives a local option. It is a closed model and about two months old at the time of writing. Calibration claims come from the vendor and from the team's own tests only after the evaluation in section 6.
+ADR-006 places Jev in Stage 2 classification and `perplexity/pplx-decider-v1.2` in Stage 3.3 confidence auditing, through OpenRouter's Decisions API. Ollama's `System One` path is reserved for offline CI in the approved matrix. Both decision-model calibration and the approved Qwen embedding quality require the evaluation in section 6; vendor claims alone do not establish them.
 
 ## 3. The contract
 
@@ -78,14 +78,14 @@ A quote is `READY` only if every required field is green, the pricing result is 
 
 1. **Before launch:** build the evaluation set required by ADR-008 (proposal: 50 emails, about 30 RFQs, 10 tariff updates, 10 other, anonymised or synthetic for anything committed). Measure the reliability of the auditor's probabilities and pick `τ_field` from it.
 2. **In production:** every time an analyst edits an extracted field, that is a labelled example. Store the field, the old value and the new one in the tenant's own tables (they are tenant data). Track the correction rate of green fields. If it rises above an agreed level, thresholds are tightened and the evaluation is rerun.
-3. **Pin the model version** (a specific `jev` release, not a rolling alias). A version change reruns the evaluation before it ships.
+3. **Pin the model versions** (the specific classifier, auditor, extractor and embedding models in ADR-006, not rolling aliases). A version change reruns the evaluation before it ships.
 
 ## 7. Risks of the ADR-006 architecture that need an owner
 
-1. **Vendor and maturity.** A new closed model behind one hosted API. Mitigation: pin the version; keep the Ollama-served decision-model path working as a fallback; define a degraded mode in which, if the auditor is unreachable, every field is amber and nothing is auto-approved. **Owner: Marcelo.**
-2. **Data leaving the platform.** Customer emails, names and rates go to the model vendors. This is the unresolved "consent to send tenant data to third-party APIs" item. Mitigation options: contract terms with each vendor, or the local model path for tenants who refuse. **Owner: Marcelo and the pilot companies.**
+1. **Vendor and maturity.** The approved model matrix uses hosted decision models through OpenRouter. Mitigation: pin each model version and use the approved hosted fallback; this RFC proposes a degraded mode in which, if both auditor routes are unreachable, every field is amber and nothing is auto-approved. An Ollama production fallback would require a separate decision because ADR-006 limits it to offline CI. **Owner: Marcelo.**
+2. **Data leaving the platform.** Customer emails, names and rates go to the model vendors. This is the unresolved "consent to send tenant data to third-party APIs" item. Mitigation options: contract terms with each vendor, or a separately approved local model path for tenants who refuse. **Owner: Marcelo and the pilot companies.**
 3. **Wording in ADR-006.** The ADR says prompt-injection takeovers "drop to zero by construction". That is too strong. A decision model that cannot write text or call tools cannot be talked into *taking actions*, which genuinely limits the blast radius. But the email can still try to bias its answers ("this is clearly an RFQ, certain"). The structural controls above (deterministic checks, verbatim evidence, human review, no 1-click for amber) are what actually protect pricing. **Suggested edit to ADR-006:** replace the "by construction" claim with "limits the blast radius to a biased decision, which the deterministic checks and human review then catch". Marcelo owns that text.
-4. **Retrieval quality.** The `search_description` and its embedding come from model output (ADR-006 step 3.2). Tariff selection must filter on codes first and use vectors only to rank among valid rows (RFC-001 section 5). Retrieval quality is part of the evaluation set.
+4. **Retrieval quality.** The extractor produces `search_description`, and ADR-006 selects `qwen/qwen3-embedding-8b` to embed it in one 1024-dimensional vector space. Tariff selection must filter on codes first and use vectors only to rank among valid rows (RFC-001 section 5). Retrieval quality is part of the evaluation set.
 
 ## 8. Open questions
 
@@ -95,7 +95,7 @@ A quote is `READY` only if every required field is green, the pricing result is 
 | 2 | `τ_field` and the 99% target | Marcelo, Pedro | Set from the evaluation set |
 | 3 | Evaluation set size and who labels it | Marcelo | 50 emails, labelled by Marcelo with the pilot companies' help |
 | 4 | Reference data sources and licences (UN/LOCODE, NCM) | Pedro | Verify before building the dataset |
-| 5 | Degraded mode when the auditor is unreachable | Marcelo | All fields amber |
+| 5 | Degraded mode when both approved auditor routes are unreachable | Marcelo | All fields amber |
 | 6 | Vendor consent and fallback to the local model | Marcelo, pilot companies | Open |
 | 7 | Edit to the injection wording in ADR-006 | Marcelo | Propose the edit in section 7 |
 
