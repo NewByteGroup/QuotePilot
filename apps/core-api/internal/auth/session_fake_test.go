@@ -97,19 +97,20 @@ func (r *stubRows) Scan(dest ...any) error {
 	return nil
 }
 
-// sessionQuerier is an in-memory platform.Querier for the session path: a
-// login-token table keyed by hash enforcing the function's single-use row
-// lock, a profiles table, an org-switcher list, call records and
-// per-function driver-error injection.
+// sessionQuerier is an in-memory platform.Querier for the session and /me
+// paths: a login-token table keyed by hash enforcing the function's
+// single-use row lock, a profiles table, an org-switcher list, call records
+// and per-function driver-error injection.
 type sessionQuerier struct {
-	now      func() time.Time
-	tokens   map[string]*tokenRec
-	profiles map[uuid.UUID]profileRec
-	members  map[string][]platform.Membership
-	fail     map[string]error
-	consumes []string
-	creates  []sessionCreate
-	listed   []string
+	now          func() time.Time
+	tokens       map[string]*tokenRec
+	profiles     map[uuid.UUID]profileRec
+	members      map[string][]platform.Membership
+	fail         map[string]error
+	consumes     []string
+	creates      []sessionCreate
+	listed       []string
+	profileCalls []uuid.UUID
 }
 
 var _ platform.Querier = (*sessionQuerier)(nil)
@@ -176,6 +177,7 @@ func (q *sessionQuerier) profileRow(args []any) pgx.Row {
 		if err := q.fail["get_user_profile"]; err != nil {
 			return err
 		}
+		q.profileCalls = append(q.profileCalls, args[0].(uuid.UUID))
 		p, ok := q.profiles[args[0].(uuid.UUID)]
 		if !ok {
 			return pgx.ErrNoRows

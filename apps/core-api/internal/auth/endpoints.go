@@ -137,11 +137,7 @@ func writeError(w http.ResponseWriter, status int, code authapi.ErrorCode) {
 // errUnimplemented answers a call to an endpoint whose PR has not landed —
 // the route is mounted (the contract mounts all six), so a stray call must
 // fail loudly through the uniform 500 rather than silently 200 or 204.
-var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PRs C5–C6")
-
-func (e *Endpoints) GetMe(context.Context, authapi.GetMeRequestObject) (authapi.GetMeResponseObject, error) {
-	return nil, errUnimplemented
-}
+var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PR C6")
 
 func (e *Endpoints) GetMeOrganization(context.Context, authapi.GetMeOrganizationRequestObject) (authapi.GetMeOrganizationResponseObject, error) {
 	return nil, errUnimplemented
