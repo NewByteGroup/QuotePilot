@@ -2,15 +2,12 @@ package pricing
 
 import (
 	"testing"
-	"time"
 )
 
 // Task 3 (spec §4 step 3): version resolution groups candidates by
 // natural key, keeps in-window rows from batches activated at or before
 // PricedAt, and lets the latest-activated row win; a tombstone winner
 // drops the whole natural key.
-
-func activatedAt(t time.Time) *time.Time { return &t }
 
 func TestResolveTariffs_SingleEligibleRowPasses(t *testing.T) {
 	row := tariffRow(testUUID1, testUUID2, "HAPAG", ChargeOceanFreight, "OCEAN_FREIGHT", "USD", "950.0000")

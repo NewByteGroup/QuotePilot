@@ -39,19 +39,22 @@ var bannedTokens = []string{
 
 func TestPurity_ImportsWhitelisted(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ImportsOnly)
+	entries, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatalf("glob: %v", err)
 	}
-	for name, pkg := range pkgs {
-		for fname, f := range pkg.Files {
-			for _, imp := range f.Imports {
-				path := strings.Trim(imp.Path.Value, `"`)
-				if !allowedImports[path] {
-					t.Errorf("%s/%s: import %q not on the pure-package whitelist", name, fname, path)
-				}
+	for _, e := range entries {
+		if strings.HasSuffix(e, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, e, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", e, err)
+		}
+		for _, imp := range f.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if !allowedImports[path] {
+				t.Errorf("%s: import %q not on the pure-package whitelist", e, path)
 			}
 		}
 	}
