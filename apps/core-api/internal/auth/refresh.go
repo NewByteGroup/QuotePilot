@@ -11,8 +11,8 @@ import (
 )
 
 // refreshCookieKey carries the raw qp_refresh cookie value
-// ExtractRefreshCookie plants for PostAuthRefresh — and, once C4 lands,
-// PostAuthLogout, which resolves the same cookie to its session family.
+// ExtractRefreshCookie plants for PostAuthRefresh and PostAuthLogout —
+// logout resolves the same cookie to its session family.
 var refreshCookieKey = ctxKey{"refresh-cookie"}
 
 // ExtractRefreshCookie is the StrictMiddlewareFunc that reads the

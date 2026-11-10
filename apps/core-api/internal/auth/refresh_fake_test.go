@@ -1,11 +1,12 @@
 package auth_test
 
-// Test doubles for the POST /auth/refresh proofs in refresh_test.go: an
-// in-memory platform.Querier modelling app.auth_sessions and
-// rotate_session's exact branch order (migration 0003), plus the
-// mounted-server rig. The real platform.Store runs over the fake, so the
-// SQL text, the NULL-ids reuse shape and the (rotated, found) mapping are
-// production's — only the transport is faked.
+// Test doubles for the POST /auth/refresh proofs in refresh_test.go and
+// the POST /auth/logout proofs in logout_test.go: an in-memory
+// platform.Querier modelling app.auth_sessions plus the exact branch
+// orders of rotate_session and revoke_session_family_by_hash (migration
+// 0003), plus the mounted-server rig. The real platform.Store runs over
+// the fake, so the SQL text, the NULL-ids reuse shape and the
+// (rotated, found) mapping are production's — only the transport is faked.
 
 import (
 	"context"
@@ -44,23 +45,27 @@ type rotateCall struct {
 	newExpiresAt  time.Time
 }
 
-// refreshQuerier is an in-memory platform.Querier for the refresh path: an
-// auth_sessions table keyed by hash, a call record and driver-error
-// injection. rotate_session is the only Query traffic on this path;
-// QueryRow exists solely to satisfy the interface — nothing may call it.
+// refreshQuerier is an in-memory platform.Querier for the refresh and
+// logout paths: an auth_sessions table keyed by hash, call records and
+// driver-error injection. rotate_session is the only Query traffic;
+// QueryRow serves revoke_session_family_by_hash — anything else fails.
 type refreshQuerier struct {
-	now       func() time.Time
-	sessions  map[string]*sessionRec
-	fail      map[string]error
-	rotations []rotateCall
+	now         func() time.Time
+	sessions    map[string]*sessionRec
+	fail        map[string]error
+	rotations   []rotateCall
+	revocations []string
 }
 
 var _ platform.Querier = (*refreshQuerier)(nil)
 
-func (q *refreshQuerier) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
-	return stubRow{scan: func(...any) error {
-		return fmt.Errorf("refreshQuerier: unexpected QueryRow sql %q", sql)
-	}}
+func (q *refreshQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	if !strings.Contains(sql, "revoke_session_family_by_hash") {
+		return stubRow{scan: func(...any) error {
+			return fmt.Errorf("refreshQuerier: unexpected QueryRow sql %q", sql)
+		}}
+	}
+	return q.revokeRow(args)
 }
 
 func (q *refreshQuerier) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
@@ -110,6 +115,37 @@ func (q *refreshQuerier) rotate(args []any) pgx.Rows {
 	}
 	q.sessions[call.newHash] = successor
 	return &stubRows{rows: [][]any{{&successor.id, &successor.userID, true}}}
+}
+
+// revokeRow replays app.revoke_session_family_by_hash (migration 0003):
+// the presented hash resolves to its family — an unknown one returns false
+// — and every still-live member is stamped revoked_at in the same call,
+// answering the UPDATE's FOUND, so an already-dead family returns false in
+// the same shape an unknown hash does. The kill is expiry-blind like the
+// function's: a dead generation still resolves and condemns its family.
+func (q *refreshQuerier) revokeRow(args []any) pgx.Row {
+	return stubRow{scan: func(dest ...any) error {
+		if err := q.fail["revoke_session_family_by_hash"]; err != nil {
+			return err
+		}
+		hash := args[0].(string)
+		q.revocations = append(q.revocations, hash)
+		rec, ok := q.sessions[hash]
+		if !ok {
+			*(dest[0].(*bool)) = false
+			return nil
+		}
+		now := q.now()
+		found := false
+		for _, s := range q.sessions {
+			if s.familyID == rec.familyID && s.revokedAt == nil {
+				s.revokedAt = &now
+				found = true
+			}
+		}
+		*(dest[0].(*bool)) = found
+		return nil
+	}}
 }
 
 // refreshRig is a mounted auth surface plus the test's windows into it.
@@ -162,6 +198,19 @@ func (r *refreshRig) plantGeneration(t *testing.T, userID, familyID uuid.UUID, e
 func (r *refreshRig) postRefresh(t *testing.T, cookie *http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	r.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// postLogout is postRefresh's twin for the logout route — same mounted
+// mux, same nil-means-absent cookie convention.
+func (r *refreshRig) postLogout(t *testing.T, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	if cookie != nil {
 		req.AddCookie(cookie)
 	}
