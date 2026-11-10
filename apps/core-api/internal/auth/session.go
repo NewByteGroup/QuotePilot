@@ -142,6 +142,9 @@ func (e *Endpoints) mintSession(ctx context.Context, userID uuid.UUID) (string, 
 // every route receives it, SameSite=Lax so top-level navigations still carry
 // it. Secure rides cfg.CookieSecure — false only for local http.
 func (e *Endpoints) accessCookie(value string) *http.Cookie {
+	// #nosec G124 -- HttpOnly and SameSite are literal; Secure is
+	// intentionally config-driven (CookieSecure=false only for local http),
+	// and the exact attribute set is pinned by session_test.go.
 	return &http.Cookie{
 		Name:     accessCookieName,
 		Value:    value,
@@ -157,6 +160,8 @@ func (e *Endpoints) accessCookie(value string) *http.Cookie {
 // the session endpoints and SameSite=Strict pins it to first-party requests
 // (spec section 4's tightening over ADR-005).
 func (e *Endpoints) refreshCookie(value string) *http.Cookie {
+	// #nosec G124 -- same contract as accessCookie: HttpOnly/SameSite are
+	// literal, Secure follows CookieSecure, and tests pin the exact flags.
 	return &http.Cookie{
 		Name:     refreshCookieName,
 		Value:    value,
