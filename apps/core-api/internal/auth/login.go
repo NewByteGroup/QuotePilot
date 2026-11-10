@@ -136,13 +136,48 @@ func (e *Endpoints) deliverMagicLink(ctx context.Context, email string) error {
 // sendMagicLink delivers the link off the response path: the mail RTT must
 // never distinguish a provisioned address from an unknown one (uniform-200
 // spec section 8). WithoutCancel detaches request cancellation while keeping
-// request values; the send is bounded by its own timeout and a failure is
+// request values; the whole delivery is bounded by magicSendBudget and a
+// failed attempt is retried with backoff — a transient provider outage must
+// not strand a token its owner never received. A permanently failed send is
 // logged, never surfaced — the client already has its uniform answer.
 func (e *Endpoints) sendMagicLink(ctx context.Context, email, link string) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, magicSendBudget)
 	defer cancel()
-	if err := e.mailer.SendMagicLink(ctx, email, link); err != nil {
-		slog.Default().WarnContext(ctx, "auth: magic link send failed", "error", err)
+	for attempt := 1; ; attempt++ {
+		err := e.mailer.SendMagicLink(ctx, email, link)
+		if err == nil {
+			return
+		}
+		slog.Default().WarnContext(ctx, "auth: magic link send failed",
+			"correlation_id", platform.CorrelationID(ctx), "attempt", attempt, "error", err)
+		if attempt == magicSendAttempts || !sleepCtx(ctx, magicSendBackoff(attempt)) {
+			return
+		}
+	}
+}
+
+// magicSendBudget bounds the whole detached delivery — retries included —
+// so a wedged provider cannot pin a goroutine past a request's lifetime.
+// magicSendAttempts caps retries; magicSendBackoff spaces them (1s, 2s).
+const (
+	magicSendBudget   = 30 * time.Second
+	magicSendAttempts = 3
+)
+
+// magicSendBackoff spaces retries linearly; a real queue (River, ADR-004)
+// is where durable delivery belongs once cmd/server exists.
+func magicSendBackoff(attempt int) time.Duration {
+	return time.Duration(attempt) * time.Second
+}
+
+// sleepCtx waits d or until ctx ends — false means the budget expired and
+// the caller should stop retrying.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-time.After(d):
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

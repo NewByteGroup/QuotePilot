@@ -78,10 +78,17 @@ func NewServer(endpoints *Endpoints) http.Handler {
 const maxJSONBody = 8 << 10
 
 // limitBody caps request bodies before the generated binder reads them —
-// an oversized body dies as a uniform 400 inside the wrapper, spending no
-// limiter budget and bounded parse effort.
+// an oversized body dies as a uniform 400, spending no limiter budget and
+// bounded parse effort. The declared length is checked up front so a short
+// object riding before megabytes of trailing data cannot slip past:
+// MaxBytesReader bounds only what is read, and the binder decodes a single
+// value without ever reading the tail.
 func limitBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxJSONBody {
+			writeError(w, http.StatusBadRequest, authapi.ErrorCodeBadRequest)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 		next.ServeHTTP(w, r)
 	})
