@@ -317,7 +317,17 @@ Related upgrade guard: 0002 also refuses to run on a v1 database that
 holds `inbound_messages` receipts whose `organization_id` matches no
 organization — a v1 receipt's org id is unverifiable against a registry
 that did not exist, so backfill-or-quarantine is an explicit operator
-decision, never silent data loss or a `NOT VALID` escape hatch.
+decision, never silent data loss or a `NOT VALID` escape hatch. The guard
+lives inside a DO block that relaxes RLS **transaction-locally**: FK
+validation runs under the invoker's row security, and FORCE RLS would
+otherwise let `qp_migrator` stamp `convalidated` over rows it cannot see
+(verified live — an invisible orphan let a plain `ADD CONSTRAINT`
+succeed). The block disables RLS, adds the constraint under a real
+validation scan (translating failure into a deliberate, actionable
+error), then re-enables and re-forces; any raise rolls the migration back
+with the temporary disable. The CI text guard accepts `DISABLE` only when
+the same file re-enables+forces afterwards — `DROP POLICY` and `NO FORCE`
+remain unconditionally forbidden.
 
 ## 6. Enum types (`CREATE TYPE` in `app`)
 

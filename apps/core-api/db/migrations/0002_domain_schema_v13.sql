@@ -582,31 +582,32 @@ REVOKE DELETE ON app.private_tariff_batches FROM qp_app;
 -- error if we let it get that far. A v1 receipt's organization_id is
 -- unverifiable against a registry that did not exist when it was written:
 -- backfilling the org or quarantining the receipt is an explicit operator
--- decision, never the migration's. So the DO block fails loudly and legibly
--- instead — NOT VALID would leave orphans permanently unenforced, and
--- deleting the rows would silently drop receipts. FORCE RLS applies to
--- qp_migrator too: an unscoped SELECT sees zero rows, so the guard disables
--- RLS inside this transaction to read the real table (a raise rolls the
--- whole migration back; success restores both flags before the ALTER).
+-- decision, never the migration's. NOT VALID would leave orphans
+-- permanently unenforced, and deleting the rows would silently drop
+-- receipts.
+--
+-- The validation must see real rows: FORCE RLS applies to qp_migrator
+-- too, and FK validation runs under the invoker's row security — with no
+-- tenant context it sees zero rows and would stamp convalidated=true over
+-- hidden orphans (verified live). So this DO block disables RLS
+-- transaction-locally, adds the constraint under a real validation scan
+-- (translating a failure into the deliberate error below), then restores
+-- ENABLE + FORCE before the statement ends. Any raise rolls the whole
+-- migration transaction back, taking the temporary disable with it.
 -- +goose StatementBegin
 DO $$
 BEGIN
     EXECUTE 'ALTER TABLE app.inbound_messages DISABLE ROW LEVEL SECURITY';
-    IF EXISTS (
-        SELECT 1 FROM app.inbound_messages i
-        WHERE NOT EXISTS (SELECT 1 FROM app.organizations o WHERE o.id = i.organization_id)
-    ) THEN
+    BEGIN
+        EXECUTE 'ALTER TABLE app.inbound_messages
+            ADD CONSTRAINT inbound_messages_organization_id_fkey
+            FOREIGN KEY (organization_id) REFERENCES app.organizations (id) ON DELETE CASCADE';
+    EXCEPTION WHEN foreign_key_violation THEN
         RAISE EXCEPTION 'inbound_messages holds receipts for organizations that do not exist; reconcile them (backfill organizations or quarantine the receipts) before upgrading to v1.3 — refusing to upgrade rather than silently drop receipts';
-    END IF;
+    END;
     EXECUTE 'ALTER TABLE app.inbound_messages ENABLE ROW LEVEL SECURITY';
     EXECUTE 'ALTER TABLE app.inbound_messages FORCE ROW LEVEL SECURITY';
 END $$;
--- +goose StatementEnd
-
--- +goose StatementBegin
-ALTER TABLE app.inbound_messages
-    ADD CONSTRAINT inbound_messages_organization_id_fkey
-    FOREIGN KEY (organization_id) REFERENCES app.organizations (id) ON DELETE CASCADE;
 -- +goose StatementEnd
 
 -- Pre-existing spike hole closed here: goose_db_version is created by goose

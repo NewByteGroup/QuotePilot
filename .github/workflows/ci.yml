@@ -583,6 +583,13 @@ jobs:
 
       # Cheap text guard; the real RLS-presence proof is roles.sql [M] (re-run
       # below) and the ADR-008 schema lint once the Go suite lands.
+      # DROP POLICY and NO FORCE are unconditional red flags. DISABLE is
+      # permitted only transaction-locally — e.g. the 0002 upgrade guard,
+      # which must relax RLS so the FK validation scan can see rows FORCE
+      # RLS hides from qp_migrator — and only when the SAME file re-enables
+      # and re-forces afterwards. The pairing check is mechanical;
+      # reviewers must still verify the disable lives inside one
+      # transaction with its restore.
       - name: Guard against dropped policies and weakened RLS
         run: |
           shopt -s nullglob
@@ -591,11 +598,21 @@ jobs:
             echo "stub: no migrations yet — nothing to guard"
             exit 0
           fi
-          if grep -niE 'DROP[[:space:]]+POLICY|DISABLE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY|NO[[:space:]]+FORCE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY' "${files[@]}"; then
+          if grep -niE 'DROP[[:space:]]+POLICY|NO[[:space:]]+FORCE[[:space:]]+ROW[[:space:]]+LEVEL[[:space:]]+SECURITY' "${files[@]}"; then
             echo "migrations: a migration drops a tenant policy or weakens RLS — forbidden (AGENTS.md rule 4, ADR-003)"
             exit 1
           fi
-          echo "no RLS-weakening statements found"
+          for f in "${files[@]}"; do
+            if ! awk 'BEGIN{IGNORECASE=1}
+                /DISABLE +ROW +LEVEL +SECURITY/ { disabled=NR }
+                disabled && /ENABLE +ROW +LEVEL +SECURITY/ { if (NR > disabled) enabled=1 }
+                disabled && /FORCE +ROW +LEVEL +SECURITY/  { if (NR > disabled) forced=1 }
+                END { exit (disabled && !(enabled && forced)) ? 1 : 0 }' "$f"; then
+              echo "migrations: $f disables RLS without re-enabling and re-forcing it in the same file — forbidden"
+              exit 1
+            fi
+          done
+          echo "no unpaired RLS-weakening statements found"
 
       # With real tables in place, roles.sql [M] proves every organization_id
       # table has ENABLE + FORCE RLS — the part grep cannot prove.

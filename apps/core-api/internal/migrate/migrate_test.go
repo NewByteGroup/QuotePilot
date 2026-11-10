@@ -48,13 +48,13 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	// before the drop; WITH (FORCE) covers any straggler anyway.
 	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
 	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
-	defer super.Close()
+	defer func() { _ = super.Close() }()
 
 	provisionV1Database(t, ctx, superDSN, dbName)
 	setupGoose(t)
 
 	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
-	defer migDB.Close()
+	defer func() { _ = migDB.Close() }()
 	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 1), "throwaway DB must reach version 1")
 
 	// A v1 receipt for an org that will never exist: under v1,
@@ -63,7 +63,7 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	orphanOrg := uuid.New()
 	msgID := "orphan-" + uuid.NewString()
 	appDB := openDB(t, dsnFor(t, appDSN, dbName))
-	defer appDB.Close()
+	defer func() { _ = appDB.Close() }()
 	writeOrphanReceipt(t, ctx, appDB, orphanOrg,
 		`INSERT INTO app.inbound_messages (organization_id, resend_message_id) VALUES ($1, $2)`,
 		msgID)
@@ -116,10 +116,10 @@ func provisionV1Database(t *testing.T, ctx context.Context, superDSN, dbName str
 	t.Helper()
 	super := openDB(t, superDSN)
 	execDB(t, ctx, super, fmt.Sprintf(`GRANT CONNECT ON DATABASE %q TO qp_migrator, qp_app`, dbName))
-	super.Close()
+	_ = super.Close()
 
 	newDB := openDB(t, dsnFor(t, superDSN, dbName))
-	defer newDB.Close()
+	defer func() { _ = newDB.Close() }()
 	for _, stmt := range []string{
 		`CREATE SCHEMA extensions`,
 		`CREATE EXTENSION IF NOT EXISTS vector SCHEMA extensions`,
@@ -202,7 +202,7 @@ func dropDatabase(t *testing.T, superDSN, dbName string) {
 		t.Logf("dropDatabase: open super dsn: %v", err)
 		return
 	}
-	defer super.Close()
+	defer func() { _ = super.Close() }()
 	if _, err := super.ExecContext(context.Background(),
 		fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, dbName)); err != nil {
 		t.Logf("dropDatabase %s: %v", dbName, err)
