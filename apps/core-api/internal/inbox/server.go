@@ -81,9 +81,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // under RFC-002: unmatched and multi-org messages are logged, not yet
 // persisted in a platform quarantine/counter; body, headers and attachment
 // bytes are fetched through the Receiving/Attachments APIs by the ingest
-// job (the webhook is metadata only), and `data.created_at` is not yet
-// persisted — the insert has no received_at param, so the column default
-// now() applies until the data-model change lands it.
+// job (the webhook is metadata only). `data.created_at` persists as
+// inbound_messages.received_at — the audit trail records Resend's receipt
+// time, not our processing time.
 
 // handleResendInbound runs the ADR-005 section 7 pipeline: verify, resolve
 // tenants from the recipients, then either store under the single matched
@@ -123,6 +123,10 @@ func (s *Server) verifiedPayload(w http.ResponseWriter, r *http.Request) (authap
 	}
 	payload, err := parseInboundPayload(body)
 	if err != nil {
+		// Every validation failure is permanent for THIS body — retries
+		// replay it unchanged, so abort instead of burning Svix's ~27h
+		// retry window (a misconfigured endpoint is the expected case).
+		w.Header().Set(abortDeliveryHeader, abortDeliveryValue)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return authapi.ResendEmailReceived{}, false
 	}
@@ -200,11 +204,16 @@ func parseInboundPayload(body []byte) (authapi.ResendEmailReceived, error) {
 // validateInboundPayload enforces the fields the handler depends on: the
 // email.received discriminator (anything else means a misconfigured
 // endpoint, so 400 rather than a silent store or a retry loop), at least
-// one recipient to resolve (bounded by maxRecipients) and an email_id to
-// dedupe on.
+// one recipient to resolve (bounded by maxRecipients), an email_id to
+// dedupe on, and created_at for the received_at audit column. Other
+// schema-required fields (from, subject) are tolerated absent — the
+// handler never reads them.
 func validateInboundPayload(p authapi.ResendEmailReceived) error {
 	if p.Type != authapi.EmailReceived {
 		return fmt.Errorf("type must be %q, got %q", authapi.EmailReceived, p.Type)
+	}
+	if p.Data.CreatedAt.IsZero() {
+		return errors.New("data.created_at must be a non-empty RFC 3339 timestamp")
 	}
 	if len(p.Data.To) == 0 {
 		return fmt.Errorf("data.to must list at least one recipient address, got %v", p.Data.To)
@@ -234,6 +243,9 @@ func (s *Server) storeInbound(ctx context.Context, org uuid.UUID, p authapi.Rese
 			OrganizationID:  pgtype.UUID{Bytes: org, Valid: true},
 			ResendMessageID: p.Data.EmailID,
 			Subject:         p.Data.Subject,
+			// Resend's receipt timestamp, not our processing time — the
+			// audit trail orders on when the RFQ arrived.
+			ReceivedAt: pgtype.Timestamptz{Time: p.Data.CreatedAt, Valid: true},
 			// The Resend payload carries no declared value: the column is
 			// NOT NULL DEFAULT 0, so insert zero until the data-model
 			// change decides where the value comes from (RFC-002).

@@ -435,6 +435,9 @@ components:
     # 2026-11-16): the webhook carries METADATA ONLY — body and headers come
     # from the Received emails API, attachment bytes from the Attachments
     # API whose download_url expires after one hour (RFC-002).
+    # `additionalProperties: false` documents the contract for readers;
+    # Go's encoding/json decodes tolerantly (Resend may add fields), so the
+    # handler enforces only the keys it depends on.
     ResendEmailReceived:
       type: object
       additionalProperties: false
