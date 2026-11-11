@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -285,4 +286,40 @@ func TestStoreListMembershipsForEmail(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got)
 	assert.NotNil(t, got, "an unknown email is an empty slice, never nil")
+}
+
+// TestStoreGetCurrentOrganization proves the tenant-scoped accessor end to
+// end: inside InTenantReadTx the GUC resolves the org row — branding
+// included — while the same call on the bare pool yields (zero, false, nil).
+// The row exists only through the function; qp_app holds no grant on
+// app.organizations itself.
+func TestStoreGetCurrentOrganization(t *testing.T) {
+	db := testenv.Open(t)
+	ctx := context.Background()
+
+	orgID := uuid.New()
+	slug := testenv.SeedOrganization(t, orgID, "store-curorg")
+	_, err := testenv.MigratorPool(t).Exec(ctx,
+		`UPDATE app.organizations SET branding_json = $2 WHERE id = $1`,
+		orgID, `{"primary":"#0a84ff"}`)
+	require.NoError(t, err)
+
+	var got platform.Organization
+	var found bool
+	require.NoError(t, db.InTenantReadTx(ctx, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		got, found, err = platform.NewStore(tx).GetCurrentOrganization(ctx)
+		return err
+	}))
+	require.True(t, found, "inside the tenant tx the GUC must resolve the org row")
+	assert.Equal(t, orgID, got.ID)
+	assert.Equal(t, "Test "+slug, got.Name)
+	assert.Equal(t, slug, got.Slug)
+	assert.Equal(t, slug+"@in.test", got.InboundEmailAlias)
+	assert.JSONEq(t, `{"primary":"#0a84ff"}`, string(got.Branding))
+
+	// Same call outside a tenant context: the NULL composite is the miss.
+	_, found, err = platform.NewStore(db.Pool()).GetCurrentOrganization(ctx)
+	require.NoError(t, err)
+	assert.False(t, found, "no tenant context must be (zero, false, nil), not an error")
 }

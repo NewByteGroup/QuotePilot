@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +27,18 @@ type Membership struct {
 	Name  string
 	Slug  string
 	Role  string
+}
+
+// Organization is the resolved tenant's registry row as
+// app.get_current_organization() returns it (spec section 8). Branding is
+// carried raw: the jsonb blob belongs to the caller, so the store neither
+// parses nor validates it — handlers decode into their own contract shape.
+type Organization struct {
+	ID                uuid.UUID
+	Name              string
+	Slug              string
+	InboundEmailAlias string
+	Branding          json.RawMessage
 }
 
 // Store wraps the migration-0003 function family in typed methods (spec
@@ -295,4 +308,62 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 		return nil, fmt.Errorf("platform: list_memberships_for_email rows: %w", err)
 	}
 	return out, nil
+}
+
+// GetCurrentOrganization reads the resolved tenant's registry row through
+// app.get_current_organization() — the migration-0002 accessor that scopes on
+// the app.current_organization_id GUC, so a row can only come back inside
+// InTenantTx/InTenantReadTx. Outside a tenant context the function emits an
+// all-NULL composite row, which maps to (zero, false, nil) like every other
+// miss in this family — callers inside a correctly-scoped tx treat found=false
+// as contract drift, never as "org does not exist".
+//
+//	var org platform.Organization
+//	var found bool
+//	err := runner.InTenantReadTx(ctx, orgID, func(ctx context.Context, tx pgx.Tx) error {
+//		var err error
+//		org, found, err = platform.NewStore(tx).GetCurrentOrganization(ctx)
+//		return err
+//	})
+func (s *Store) GetCurrentOrganization(ctx context.Context) (Organization, bool, error) {
+	var row orgRow
+	err := s.q.QueryRow(ctx, `
+		SELECT id, name, slug, inbound_email_alias, branding_json
+		FROM app.get_current_organization()`).
+		Scan(&row.id, &row.name, &row.slug, &row.alias, &row.branding)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, false, nil
+	}
+	if err != nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: %w", err)
+	}
+	return row.organization()
+}
+
+// orgRow is the nullable composite app.get_current_organization() emits:
+// all-NULL outside a tenant context (a miss), NULL-free inside one — a NULL
+// column beside a non-NULL id is driver contract drift, not a missing org.
+type orgRow struct {
+	id                *uuid.UUID
+	name, slug, alias *string
+	branding          json.RawMessage
+}
+
+// organization maps the scanned row onto the Organization result;
+// found=false is the all-NULL composite the function emits outside a
+// tenant context.
+func (r orgRow) organization() (Organization, bool, error) {
+	if r.id == nil {
+		return Organization{}, false, nil
+	}
+	if r.name == nil || r.slug == nil || r.alias == nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: null column in row %s", *r.id)
+	}
+	return Organization{
+		ID:                *r.id,
+		Name:              *r.name,
+		Slug:              *r.slug,
+		InboundEmailAlias: *r.alias,
+		Branding:          r.branding,
+	}, true, nil
 }

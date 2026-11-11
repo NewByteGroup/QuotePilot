@@ -3,12 +3,12 @@ package auth
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
 )
 
 // InTxFunc runs fn against a Store bound to one transaction: an endpoint
@@ -24,11 +24,14 @@ type InTxFunc func(context.Context, func(*platform.Store) error) error
 // Endpoints implements authapi.StrictServerInterface for the six-route
 // auth/session surface (spec section 8). Dependencies are concrete types so
 // tests drive the real Store and Limiter logic behind a stubbed Querier and
-// FakeMailSender — the seams are the platform package's own interfaces.
+// FakeMailSender — the seams are the platform package's own interfaces, and
+// the runner seam is the one tenantdb exports (inbox and jobs already hold
+// the same interface).
 type Endpoints struct {
 	cfg          *platform.Config
 	store        *platform.Store
 	inTx         InTxFunc
+	runner       tenantdb.TenantRunner
 	mailer       platform.MailSender
 	ipLimiter    *platform.Limiter
 	emailLimiter *platform.Limiter
@@ -37,8 +40,10 @@ type Endpoints struct {
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)
 
-// NewEndpoints binds the auth surface to its dependencies. The two limiters
-// are the spec section 8.1 pair — production wires them as
+// NewEndpoints binds the auth surface to its dependencies. runner is the
+// tenant transaction GET /me/organization reads through — the only route on
+// this surface that enters a tenant tx. The two limiters are the spec
+// section 8.1 pair — production wires them as
 // platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, time.Now)
 // and the LoginEmailCapacity twin; tests inject small capacities on a fake
 // clock. inTx is the atomic-write seam (production: store.InStoreTx — the
@@ -46,11 +51,12 @@ var _ authapi.StrictServerInterface = (*Endpoints)(nil)
 // shared with the limiters so token expiry and bucket refill read one time
 // source.
 //
-//	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, mailer, ipLimiter, emailLimiter, time.Now)
+//	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, db, mailer, ipLimiter, emailLimiter, time.Now)
 func NewEndpoints(
 	cfg *platform.Config,
 	store *platform.Store,
 	inTx InTxFunc,
+	runner tenantdb.TenantRunner,
 	mailer platform.MailSender,
 	ipLimiter, emailLimiter *platform.Limiter,
 	now func() time.Time,
@@ -59,6 +65,7 @@ func NewEndpoints(
 		cfg:          cfg,
 		store:        store,
 		inTx:         inTx,
+		runner:       runner,
 		mailer:       mailer,
 		ipLimiter:    ipLimiter,
 		emailLimiter: emailLimiter,
@@ -132,13 +139,4 @@ func writeError(w http.ResponseWriter, status int, code authapi.ErrorCode) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(authapi.Error{Error: code})
-}
-
-// errUnimplemented answers a call to an endpoint whose PR has not landed —
-// the route is mounted (the contract mounts all six), so a stray call must
-// fail loudly through the uniform 500 rather than silently 200 or 204.
-var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PR C6")
-
-func (e *Endpoints) GetMeOrganization(context.Context, authapi.GetMeOrganizationRequestObject) (authapi.GetMeOrganizationResponseObject, error) {
-	return nil, errUnimplemented
 }

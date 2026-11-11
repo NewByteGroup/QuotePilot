@@ -196,7 +196,7 @@ func newRig(t *testing.T, mailer platform.MailSender, ipCap, emailCap int) *rig 
 	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
 	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		store, directInTx(store), mailer,
+		store, directInTx(store), &neverRunner{t}, mailer,
 		platform.NewLimiter(ipCap, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(emailCap, platform.LimitWindow, clock.Now),
 		clock.Now)
@@ -447,32 +447,6 @@ func TestLoginEmailRateLimit(t *testing.T) {
 	assert.Len(t, mailer.Sent(), 3)
 }
 
-// TestUnimplementedEndpointsFailLoud pins the stub contract: the contract
-// mounts all six routes, so the one still unimplemented must fail loudly
-// through the uniform 500 — never a silent 200 or 204.
-func TestUnimplementedEndpointsFailLoud(t *testing.T) {
-	r := newRig(t, &platform.FakeMailSender{}, platform.LoginIPCapacity, platform.LoginEmailCapacity)
-
-	cases := []struct {
-		method string
-		path   string
-		body   string
-	}{
-		{http.MethodGet, "/me/organization", ``},
-	}
-	for _, tc := range cases {
-		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
-			rec := httptest.NewRecorder()
-			r.handler.ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusInternalServerError, rec.Code)
-			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
-		})
-	}
-	assert.Empty(t, r.q.finds, "a stub must never reach the store")
-}
-
 // TestLoginWithoutClientIPMiddlewareFailsLoud pins the mis-mount guard: if
 // ExtractClientIP is dropped from the strict middlewares, login must not fall
 // back to a shared "" limiter bucket — the missing context is the loud 500.
@@ -481,7 +455,7 @@ func TestLoginWithoutClientIPMiddlewareFailsLoud(t *testing.T) {
 	cfg := &platform.Config{WebURL: "https://web.test", LoginTTL: 15 * time.Minute}
 	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
 	store := platform.NewStore(q)
-	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), &platform.FakeMailSender{},
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), &neverRunner{t}, &platform.FakeMailSender{},
 		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
 		clock.Now)
@@ -504,7 +478,7 @@ func TestLoginTrimsTrailingSlashOnWebURL(t *testing.T) {
 	cfg := &platform.Config{WebURL: "https://web.test/", LoginTTL: 15 * time.Minute}
 	mailer := &platform.FakeMailSender{}
 	store := platform.NewStore(q)
-	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), mailer,
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), &neverRunner{t}, mailer,
 		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
 		clock.Now)
