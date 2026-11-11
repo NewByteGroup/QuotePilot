@@ -83,7 +83,7 @@ func (e *Endpoints) runExchange(
 	if !ok {
 		return nil, nil
 	}
-	profile, memberships, err := e.loadSessionPayload(ctx, tx, userID)
+	profile, memberships, err := e.loadProfile(ctx, tx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -132,13 +132,16 @@ func (e *Endpoints) sessionResponse(grant *sessionGrant) authapi.PostAuthSession
 	}
 }
 
-// loadSessionPayload reads the 200 body the switcher needs: the user's own
-// profile plus the four-column membership list keyed on that profile's email
-// (spec section 3.3 — one lookup carries id, name, slug and role). A consume
-// that succeeded names a real user — the token row's FK protects it — so a
-// missing profile is driver contract drift, answered 500 through the error
-// path rather than an empty 200.
-func (e *Endpoints) loadSessionPayload(
+// loadProfile reads the caller-identity pair every identity answer needs:
+// the user's own profile plus the four-column membership list keyed on that
+// profile's email (spec section 3.3 — one lookup carries id, name, slug and
+// role). POST /auth/session nests them under `profile`; GET /me flattens
+// them onto the top level — the platform read is one, only the API shape
+// differs. A credential that names a user implies its row exists — the
+// login-token and session rows both carry the users FK — so a missing
+// profile is driver contract drift, answered 500 through the error path
+// rather than an empty 200.
+func (e *Endpoints) loadProfile(
 	ctx context.Context,
 	tx *platform.Store,
 	userID uuid.UUID,
@@ -148,7 +151,7 @@ func (e *Endpoints) loadSessionPayload(
 		return authapi.UserProfile{}, nil, fmt.Errorf("auth: get user profile: %w", err)
 	}
 	if !ok {
-		return authapi.UserProfile{}, nil, fmt.Errorf("auth: get user profile: no row for consumed user %s", userID)
+		return authapi.UserProfile{}, nil, fmt.Errorf("auth: get user profile: no row for user %s", userID)
 	}
 	rows, err := tx.ListMembershipsForEmail(ctx, email)
 	if err != nil {

@@ -448,7 +448,7 @@ func TestLoginEmailRateLimit(t *testing.T) {
 }
 
 // TestUnimplementedEndpointsFailLoud pins the stub contract: the contract
-// mounts all six routes, so the two still unimplemented must fail loudly
+// mounts all six routes, so the one still unimplemented must fail loudly
 // through the uniform 500 — never a silent 200 or 204.
 func TestUnimplementedEndpointsFailLoud(t *testing.T) {
 	r := newRig(t, &platform.FakeMailSender{}, platform.LoginIPCapacity, platform.LoginEmailCapacity)
@@ -458,7 +458,6 @@ func TestUnimplementedEndpointsFailLoud(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodGet, "/me", ``},
 		{http.MethodGet, "/me/organization", ``},
 	}
 	for _, tc := range cases {
