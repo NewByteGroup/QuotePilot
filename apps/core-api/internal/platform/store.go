@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -28,6 +29,18 @@ type Membership struct {
 	Role  string
 }
 
+// Organization is the resolved tenant's registry row as
+// app.get_current_organization() returns it (spec section 8). Branding is
+// carried raw: the jsonb blob belongs to the caller, so the store neither
+// parses nor validates it — handlers decode into their own contract shape.
+type Organization struct {
+	ID                uuid.UUID
+	Name              string
+	Slug              string
+	InboundEmailAlias string
+	Branding          json.RawMessage
+}
+
 // Store wraps the migration-0003 function family in typed methods (spec
 // section 6). NULL results and empty sets become (zero, false, nil) so
 // callers never handle pgx NULLs — the indistinguishability spec section 7
@@ -43,6 +56,39 @@ type Store struct {
 //
 //	store := platform.NewStore(pool)
 func NewStore(q Querier) *Store { return &Store{q: q} }
+
+// InStoreTx runs fn against a Store bound to one transaction: every write
+// fn performs commits together or rolls back together — the contract
+// /auth/session needs so a mid-exchange failure cannot strand a consumed
+// magic link. A pool-backed Store opens a fresh transaction; a Store
+// already bound to a pgx.Tx nests via savepoint (pgx's Begin on a tx),
+// which keeps the same all-or-nothing contract; a fake Querier without
+// Begin returns an error the caller maps to its uniform failure path.
+//
+//	err := store.InStoreTx(ctx, func(tx *platform.Store) error {
+//		userID, ok, err := tx.ConsumeLoginToken(ctx, hash)
+//		...
+//	})
+func (s *Store) InStoreTx(ctx context.Context, fn func(*Store) error) error {
+	beginner, ok := s.q.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return fmt.Errorf("platform: InStoreTx: querier %T has no Begin", s.q)
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("platform: InStoreTx: begin: %w", err)
+	}
+	// Unconditional rollback — the tenantdb.tenantTx idiom: covers panic AND
+	// runtime.Goexit, is ErrTxClosed after a successful Commit, and runs on a
+	// cancel-free context so a dead caller context cannot abort it.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err := fn(&Store{q: tx}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
 
 // FindUserByEmail resolves the sole email→id lookup (spec section 3.2:
 // there is no self-signup, so this is the only path). An unknown email is
@@ -217,6 +263,26 @@ func (s *Store) GetMembership(ctx context.Context, userID, orgID uuid.UUID) (rol
 	return *r, true, nil
 }
 
+// ResolveInboundOrg maps one Resend inbound recipient to its organization
+// through app.resolve_inbound_org (ADR-005 section 7): the function
+// normalizes case, angle brackets and plus-tags, then tries the org's
+// inbound_email_alias before the pinned <slug>@in.quotepilot.app fallback.
+// A NULL return — malformed or unmatched recipient — is ok=false, not an
+// error; only driver failures propagate.
+//
+//	orgID, ok, err := store.ResolveInboundOrg(ctx, "Quotes+tag@in.quotepilot.app")
+func (s *Store) ResolveInboundOrg(ctx context.Context, recipient string) (uuid.UUID, bool, error) {
+	var id *uuid.UUID
+	err := s.q.QueryRow(ctx, `SELECT app.resolve_inbound_org($1)`, recipient).Scan(&id)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: resolve_inbound_org: %w", err)
+	}
+	if id == nil {
+		return uuid.Nil, false, nil
+	}
+	return *id, true, nil
+}
+
 // GetUserProfile returns the GET /me identity row. An unknown user is the
 // empty set, hence ok=false — not an error. full_name is nullable in the
 // schema; NULL maps to "".
@@ -262,4 +328,62 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 		return nil, fmt.Errorf("platform: list_memberships_for_email rows: %w", err)
 	}
 	return out, nil
+}
+
+// GetCurrentOrganization reads the resolved tenant's registry row through
+// app.get_current_organization() — the migration-0002 accessor that scopes on
+// the app.current_organization_id GUC, so a row can only come back inside
+// InTenantTx/InTenantReadTx. Outside a tenant context the function emits an
+// all-NULL composite row, which maps to (zero, false, nil) like every other
+// miss in this family — callers inside a correctly-scoped tx treat found=false
+// as contract drift, never as "org does not exist".
+//
+//	var org platform.Organization
+//	var found bool
+//	err := runner.InTenantReadTx(ctx, orgID, func(ctx context.Context, tx pgx.Tx) error {
+//		var err error
+//		org, found, err = platform.NewStore(tx).GetCurrentOrganization(ctx)
+//		return err
+//	})
+func (s *Store) GetCurrentOrganization(ctx context.Context) (Organization, bool, error) {
+	var row orgRow
+	err := s.q.QueryRow(ctx, `
+		SELECT id, name, slug, inbound_email_alias, branding_json
+		FROM app.get_current_organization()`).
+		Scan(&row.id, &row.name, &row.slug, &row.alias, &row.branding)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Organization{}, false, nil
+	}
+	if err != nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: %w", err)
+	}
+	return row.organization()
+}
+
+// orgRow is the nullable composite app.get_current_organization() emits:
+// all-NULL outside a tenant context (a miss), NULL-free inside one — a NULL
+// column beside a non-NULL id is driver contract drift, not a missing org.
+type orgRow struct {
+	id                *uuid.UUID
+	name, slug, alias *string
+	branding          json.RawMessage
+}
+
+// organization maps the scanned row onto the Organization result;
+// found=false is the all-NULL composite the function emits outside a
+// tenant context.
+func (r orgRow) organization() (Organization, bool, error) {
+	if r.id == nil {
+		return Organization{}, false, nil
+	}
+	if r.name == nil || r.slug == nil || r.alias == nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: null column in row %s", *r.id)
+	}
+	return Organization{
+		ID:                *r.id,
+		Name:              *r.name,
+		Slug:              *r.slug,
+		InboundEmailAlias: *r.alias,
+		Branding:          r.branding,
+	}, true, nil
 }
