@@ -12,7 +12,6 @@ must not reach logs (ADR-001).
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from typing import Self
 import httpx
 from pydantic import ValidationError
 
+from connectors._common import parse_timeout_seconds
 from connectors.hapag_lloyd.errors import (
     HapagApiError,
     HapagAuthError,
@@ -136,11 +136,17 @@ class HapagLloydClient:
                 "expected the Client-ID/Client-Secret pair issued by an "
                 "api-portal.hlag.com application subscription"
             )
-        timeout = _timeout_from_env(source.get(_ENV_TIMEOUT))
+        timeout = parse_timeout_seconds(
+            source.get(_ENV_TIMEOUT),
+            env_name=_ENV_TIMEOUT,
+            default=DEFAULT_TIMEOUT_SECONDS,
+            error_type=HapagConfigError,
+        )
         return cls(
             client_id=source[_ENV_CLIENT_ID],
             client_secret=source[_ENV_CLIENT_SECRET],
-            base_url=source.get(_ENV_BASE_URL, PROD_BASE_URL),
+            # ``or`` so an exported-but-empty HAPAG_BASE_URL= still means prod.
+            base_url=source.get(_ENV_BASE_URL) or PROD_BASE_URL,
             timeout_seconds=timeout,
             transport=transport,
             http_client=http_client,
@@ -204,22 +210,6 @@ class HapagLloydClient:
         traceback: TracebackType | None,
     ) -> None:
         await self.aclose()
-
-
-def _timeout_from_env(raw: str | None) -> float:
-    if not raw:
-        return DEFAULT_TIMEOUT_SECONDS
-    try:
-        timeout = float(raw)
-    except ValueError as exc:
-        raise HapagConfigError(
-            f"{_ENV_TIMEOUT} must be a number of seconds, got {raw!r}"
-        ) from exc
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise HapagConfigError(
-            f"{_ENV_TIMEOUT} must be a finite number > 0, got {raw!r}"
-        )
-    return timeout
 
 
 def _validated_offers(response: httpx.Response) -> OfferResponse:

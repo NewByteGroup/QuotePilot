@@ -22,7 +22,6 @@ tenant content must not reach logs (ADR-001).
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Mapping
 from types import TracebackType
@@ -31,6 +30,7 @@ from typing import Self
 import httpx
 from pydantic import ValidationError
 
+from connectors._common import parse_timeout_seconds
 from connectors.openrouter.errors import (
     OpenRouterApiError,
     OpenRouterAuthError,
@@ -43,6 +43,7 @@ from connectors.openrouter.models import (
     ChatCompletionResponse,
     DecideRequest,
     DecideResponse,
+    EmbeddingItem,
     EmbeddingRequest,
     EmbeddingResponse,
     ErrorEnvelope,
@@ -138,9 +139,15 @@ class OpenRouterClient:
             )
         return cls(
             api_key=source[_ENV_API_KEY],
-            base_url=source.get(_ENV_BASE_URL, PROD_BASE_URL),
-            decisions_url=source.get(_ENV_DECISIONS_URL, PROD_DECISIONS_URL),
-            timeout_seconds=_timeout_from_env(source.get(_ENV_TIMEOUT)),
+            # ``or`` so exported-but-empty URL vars still mean production.
+            base_url=source.get(_ENV_BASE_URL) or PROD_BASE_URL,
+            decisions_url=source.get(_ENV_DECISIONS_URL) or PROD_DECISIONS_URL,
+            timeout_seconds=parse_timeout_seconds(
+                source.get(_ENV_TIMEOUT),
+                env_name=_ENV_TIMEOUT,
+                default=DEFAULT_TIMEOUT_SECONDS,
+                error_type=OpenRouterConfigError,
+            ),
             transport=transport,
             http_client=http_client,
         )
@@ -215,15 +222,29 @@ class OpenRouterClient:
             OpenRouterApiError: non-2xx response (error body parsed when
                 it matches the ``{"error": {...}}`` envelope).
             OpenRouterAuthError: 401/403 — check the API key.
-            OpenRouterSchemaError: success body violating the schema, or a
-                vector whose length differs from ``expected_dimensions``.
+            OpenRouterConfigError: ``request.dimensions`` set but different
+                from ``expected_dimensions``.
+            OpenRouterSchemaError: success body violating the schema, an
+                item count/index mismatch against the inputs, or a vector
+                whose length differs from ``expected_dimensions``.
             OpenRouterTransportError: DNS/TLS/timeout/protocol failure.
         """
-        raw = await self._post("embeddings", request, operation="embeddings")
+        if request.dimensions is not None and request.dimensions != expected_dimensions:
+            raise OpenRouterConfigError(
+                f"EmbeddingRequest.dimensions={request.dimensions} conflicts "
+                f"with expected_dimensions={expected_dimensions}; set it to "
+                "the validated size or leave it unset"
+            )
+        # Always ask the model for exactly what will be validated: MRL
+        # models like qwen3-embedding-8b truncate to ``dimensions`` on
+        # request, and silence means the full-size vector comes back.
+        outbound = request.model_copy(update={"dimensions": expected_dimensions})
+        raw = await self._post("embeddings", outbound, operation="embeddings")
         if not _is_success(raw):
             raise _to_api_error(raw, operation="embeddings")
         response = _validated(raw, EmbeddingResponse, "embeddings")
-        for item in response.data:
+        data = _aligned_items(response.data, request.input)
+        for item in data:
             if len(item.embedding) != expected_dimensions:
                 raise OpenRouterSchemaError(
                     f"POST embeddings returned a {len(item.embedding)}-dim "
@@ -231,7 +252,7 @@ class OpenRouterClient:
                     f"expected {expected_dimensions} dims — check the "
                     "configured embedding model"
                 )
-        return response
+        return response.model_copy(update={"data": data})
 
     async def _post(
         self, url: str, request: OpenRouterModel, *, operation: str
@@ -271,20 +292,40 @@ def _is_success(response: httpx.Response) -> bool:
     return 200 <= response.status_code < 300
 
 
-def _timeout_from_env(raw: str | None) -> float:
-    if not raw:
-        return DEFAULT_TIMEOUT_SECONDS
-    try:
-        timeout = float(raw)
-    except ValueError as exc:
-        raise OpenRouterConfigError(
-            f"{_ENV_TIMEOUT} must be a number of seconds, got {raw!r}"
-        ) from exc
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise OpenRouterConfigError(
-            f"{_ENV_TIMEOUT} must be a finite number > 0, got {raw!r}"
+def _aligned_items(
+    data: list[EmbeddingItem], request_input: str | list[str]
+) -> list[EmbeddingItem]:
+    """Check ``data`` aligns with ``request_input`` and return it in input order.
+
+    The response ``data`` array is untrusted: it must carry exactly one item
+    per input text. For batches, every item must also carry an ``index`` and
+    the indexes must be a permutation of ``0..count-1`` — the caller always
+    receives items sorted into input order. A single input may omit
+    ``index`` upstream.
+    """
+    expected_count = 1 if isinstance(request_input, str) else len(request_input)
+    if len(data) != expected_count:
+        raise OpenRouterSchemaError(
+            f"POST embeddings returned {len(data)} item(s) for "
+            f"{expected_count} input text(s); expected one vector per input"
         )
-    return timeout
+    if expected_count == 1:
+        return data
+    indexed: list[tuple[int, EmbeddingItem]] = []
+    for item in data:
+        if item.index is None:
+            raise OpenRouterSchemaError(
+                "POST embeddings returned an item without an index in a "
+                f"{expected_count}-input batch; cannot align vectors to inputs"
+            )
+        indexed.append((item.index, item))
+    indexes = [index for index, _ in indexed]
+    if sorted(indexes) != list(range(expected_count)):
+        raise OpenRouterSchemaError(
+            f"POST embeddings returned item indexes {indexes}; expected a "
+            f"permutation of 0..{expected_count - 1} for {expected_count} inputs"
+        )
+    return [item for _, item in sorted(indexed, key=lambda pair: pair[0])]
 
 
 def _validated[ResponseT: OpenRouterModel](

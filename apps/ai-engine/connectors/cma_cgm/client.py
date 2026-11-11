@@ -16,7 +16,6 @@ must not reach logs (ADR-001).
 
 from __future__ import annotations
 
-import math
 import os
 import time
 from base64 import b64encode
@@ -28,6 +27,7 @@ from typing import Self
 import httpx
 from pydantic import ValidationError
 
+from connectors._common import parse_timeout_seconds
 from connectors.cma_cgm.errors import (
     CmaCgmApiError,
     CmaCgmAuthError,
@@ -185,9 +185,15 @@ class CmaCgmClient:
         return cls(
             client_id=source[_ENV_CLIENT_ID],
             client_secret=source[_ENV_CLIENT_SECRET],
-            base_url=source.get(_ENV_BASE_URL, PROD_BASE_URL),
-            token_url=source.get(_ENV_TOKEN_URL, PROD_TOKEN_URL),
-            timeout_seconds=_timeout_from_env(source.get(_ENV_TIMEOUT)),
+            # ``or`` so exported-but-empty URL vars still mean production.
+            base_url=source.get(_ENV_BASE_URL) or PROD_BASE_URL,
+            token_url=source.get(_ENV_TOKEN_URL) or PROD_TOKEN_URL,
+            timeout_seconds=parse_timeout_seconds(
+                source.get(_ENV_TIMEOUT),
+                env_name=_ENV_TIMEOUT,
+                default=DEFAULT_TIMEOUT_SECONDS,
+                error_type=CmaCgmConfigError,
+            ),
             transport=transport,
             http_client=http_client,
             clock=clock,
@@ -321,22 +327,6 @@ class CmaCgmClient:
         traceback: TracebackType | None,
     ) -> None:
         await self.aclose()
-
-
-def _timeout_from_env(raw: str | None) -> float:
-    if not raw:
-        return DEFAULT_TIMEOUT_SECONDS
-    try:
-        timeout = float(raw)
-    except ValueError as exc:
-        raise CmaCgmConfigError(
-            f"{_ENV_TIMEOUT} must be a number of seconds, got {raw!r}"
-        ) from exc
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise CmaCgmConfigError(
-            f"{_ENV_TIMEOUT} must be a finite number > 0, got {raw!r}"
-        )
-    return timeout
 
 
 def _validated_items(response: httpx.Response) -> list[SpotResultItem]:

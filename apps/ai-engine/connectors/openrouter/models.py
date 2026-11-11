@@ -248,10 +248,18 @@ class ChatCompletionResponse(OpenRouterModel):
 
 
 class EmbeddingRequest(OpenRouterModel):
-    """Request body of ``POST /embeddings``; ``input`` is one or many texts."""
+    """Request body of ``POST /embeddings``; ``input`` is one or many texts.
+
+    ``dimensions`` is the OpenAI-compatible dimension hint for MRL models
+    (Matryoshka Representation Learning): when set, the model truncates
+    each vector to that many dims. ``embed()`` overwrites it with the
+    caller's ``expected_dimensions`` so the request always asks for the
+    size the response will be validated against.
+    """
 
     model: str
     input: str | list[str]
+    dimensions: int | None = None
 
 
 class EmbeddingItem(OpenRouterModel):

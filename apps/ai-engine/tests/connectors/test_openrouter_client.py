@@ -194,13 +194,14 @@ def test_embed_posts_input_list_with_auth_and_validates_dims() -> None:
     assert json.loads(sent.content) == {
         "model": "qwen/qwen3-embedding-8b",
         "input": ["2x40GP Santos to Hamburg", "FAK 36000 KG"],
+        "dimensions": EMBEDDING_DIMS,
     }
     assert len(result.data) == 2
     assert all(len(item.embedding) == EMBEDDING_DIMS for item in result.data)
 
 
 def test_embed_accepts_single_string_input() -> None:
-    transport = _good_transport()
+    transport = _good_transport(embeddings_body=_embeddings_body([_embedding_item(0)]))
     client = _client(transport)
     request = EmbeddingRequest(model="qwen/qwen3-embedding-8b", input="one single text")
 
@@ -241,6 +242,124 @@ def test_embed_rejects_wrong_dimensions() -> None:
 
     assert "4-dim" in str(excinfo.value)
     assert "1024" in str(excinfo.value)
+
+
+def _embeddings_body(data: list[dict[str, Any]]) -> str:
+    return json.dumps(
+        {
+            "object": "list",
+            "data": data,
+            "model": "qwen/qwen3-embedding-8b",
+            "usage": {"prompt_tokens": 4, "total_tokens": 4},
+        }
+    )
+
+
+def _embedding_item(index: int | None, fill: float = 0.01) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "object": "embedding",
+        "embedding": [fill] * EMBEDDING_DIMS,
+    }
+    if index is not None:
+        item["index"] = index
+    return item
+
+
+def test_embed_asks_model_for_the_validated_dimension_count() -> None:
+    # qwen3-embedding-8b is natively 4096-dim; the MRL hint must go on the
+    # wire or the response-length check can never see a 1024-dim vector.
+    body = _embeddings_body(
+        [
+            {"object": "embedding", "index": 0, "embedding": [0.001] * 1024},
+            {"object": "embedding", "index": 1, "embedding": [0.002] * 1024},
+        ]
+    )
+    transport = _good_transport(embeddings_body=body)
+    client = _client(transport)
+
+    asyncio.run(client.embed(_embed_request(), expected_dimensions=1024))
+
+    sent = json.loads(transport.embeddings_requests[0].content)
+    assert sent["dimensions"] == 1024
+
+
+def test_embed_rejects_request_dimensions_conflicting_with_expected() -> None:
+    transport = _good_transport()
+    client = _client(transport)
+    request = EmbeddingRequest(
+        model="qwen/qwen3-embedding-8b",
+        input=["a", "b"],
+        dimensions=4096,
+    )
+
+    with pytest.raises(OpenRouterConfigError) as excinfo:
+        asyncio.run(client.embed(request, expected_dimensions=1024))
+
+    assert "4096" in str(excinfo.value)
+    assert "1024" in str(excinfo.value)
+    assert len(transport.embeddings_requests) == 0
+
+
+def test_embed_rejects_fewer_items_than_inputs() -> None:
+    transport = _good_transport(embeddings_body=_embeddings_body([_embedding_item(0)]))
+    client = _client(transport)
+
+    with pytest.raises(OpenRouterSchemaError) as excinfo:
+        asyncio.run(client.embed(_embed_request(), expected_dimensions=EMBEDDING_DIMS))
+
+    assert "1 item(s) for 2 input" in str(excinfo.value)
+
+
+def test_embed_rejects_duplicate_indexes() -> None:
+    transport = _good_transport(
+        embeddings_body=_embeddings_body([_embedding_item(0), _embedding_item(0)])
+    )
+    client = _client(transport)
+
+    with pytest.raises(OpenRouterSchemaError) as excinfo:
+        asyncio.run(client.embed(_embed_request(), expected_dimensions=EMBEDDING_DIMS))
+
+    assert "[0, 0]" in str(excinfo.value)
+
+
+def test_embed_returns_batch_sorted_into_input_order() -> None:
+    first = {"object": "embedding", "index": 0, "embedding": [0.1] * EMBEDDING_DIMS}
+    second = {"object": "embedding", "index": 1, "embedding": [0.2] * EMBEDDING_DIMS}
+    transport = _good_transport(embeddings_body=_embeddings_body([second, first]))
+    client = _client(transport)
+
+    result = asyncio.run(
+        client.embed(_embed_request(), expected_dimensions=EMBEDDING_DIMS)
+    )
+
+    assert [item.index for item in result.data] == [0, 1]
+    assert result.data[0].embedding == [0.1] * EMBEDDING_DIMS
+    assert result.data[1].embedding == [0.2] * EMBEDDING_DIMS
+
+
+def test_embed_rejects_missing_index_in_batch() -> None:
+    transport = _good_transport(
+        embeddings_body=_embeddings_body([_embedding_item(0), _embedding_item(None)])
+    )
+    client = _client(transport)
+
+    with pytest.raises(OpenRouterSchemaError) as excinfo:
+        asyncio.run(client.embed(_embed_request(), expected_dimensions=EMBEDDING_DIMS))
+
+    assert "without an index" in str(excinfo.value)
+
+
+def test_embed_accepts_missing_index_for_single_input() -> None:
+    transport = _good_transport(
+        embeddings_body=_embeddings_body([_embedding_item(None)])
+    )
+    client = _client(transport)
+    request = EmbeddingRequest(model="qwen/qwen3-embedding-8b", input="one text")
+
+    result = asyncio.run(client.embed(request, expected_dimensions=EMBEDDING_DIMS))
+
+    assert len(result.data) == 1
+    assert len(result.data[0].embedding) == EMBEDDING_DIMS
 
 
 def test_decide_401_raises_auth_error_with_parsed_body() -> None:
@@ -414,6 +533,30 @@ def test_from_env_uses_url_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert transport.decisions_requests[0].headers["authorization"] == (
         "Bearer env-key"
     )
+
+
+def test_from_env_blank_optional_urls_fall_back_to_production() -> None:
+    # .env.example exports OPENROUTER_BASE_URL= / OPENROUTER_DECISIONS_URL=
+    # empty; blank must behave like unset, not override the prod default.
+    transport = _good_transport()
+    client = OpenRouterClient.from_env(
+        env={
+            "OPENROUTER_API_KEY": "env-key",
+            "OPENROUTER_BASE_URL": "",
+            "OPENROUTER_DECISIONS_URL": "",
+        },
+        transport=transport,
+    )
+
+    async def _run() -> None:
+        await client.decide(_decide_request())
+        await client.chat_completion(_chat_request())
+
+    asyncio.run(_run())
+
+    assert str(transport.decisions_requests[0].url) == PROD_DECISIONS_URL
+    assert str(transport.chat_requests[0].url) == f"{PROD_BASE_URL}/chat/completions"
+    asyncio.run(client.aclose())
 
 
 @pytest.mark.parametrize("bad_timeout", ["abc", "-1", "0", "nan", "inf"])

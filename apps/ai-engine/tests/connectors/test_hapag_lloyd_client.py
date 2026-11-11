@@ -200,6 +200,25 @@ def test_from_env_builds_client(monkeypatch: pytest.MonkeyPatch) -> None:
     asyncio.run(client.aclose())
 
 
+def test_from_env_blank_base_url_falls_back_to_production() -> None:
+    # .env.example exports HAPAG_BASE_URL= empty; blank must behave like
+    # unset, not override the production default.
+    transport = FakeHapagTransport(body="{}")
+    client = HapagLloydClient.from_env(
+        env={
+            "HAPAG_CLIENT_ID": "env-id",
+            "HAPAG_CLIENT_SECRET": "env-secret",
+            "HAPAG_BASE_URL": "",
+        },
+        transport=transport,
+    )
+
+    asyncio.run(client.get_offers(_request()))
+
+    assert str(transport.requests[0].url) == f"{PROD_BASE_URL}/prices"
+    asyncio.run(client.aclose())
+
+
 @pytest.mark.parametrize("bad_timeout", ["abc", "-1", "0", "nan", "inf"])
 def test_from_env_rejects_bad_timeout(
     monkeypatch: pytest.MonkeyPatch, bad_timeout: str

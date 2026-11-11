@@ -341,6 +341,27 @@ def test_from_env_uses_default_timeout(
     asyncio.run(client.aclose())
 
 
+def test_from_env_blank_optional_urls_fall_back_to_production() -> None:
+    # .env.example exports CMA_CGM_BASE_URL= / CMA_CGM_TOKEN_URL= empty;
+    # blank must behave like unset, not override the production defaults.
+    transport = _good_transport()
+    client = CmaCgmClient.from_env(
+        env={
+            "CMA_CGM_CLIENT_ID": "env-id",
+            "CMA_CGM_CLIENT_SECRET": "env-secret",
+            "CMA_CGM_BASE_URL": "",
+            "CMA_CGM_TOKEN_URL": "",
+        },
+        transport=transport,
+    )
+
+    asyncio.run(client.search_offers(_request()))
+
+    assert str(transport.token_requests[0].url) == PROD_TOKEN_URL
+    assert str(transport.search_requests[0].url) == f"{PROD_BASE_URL}/spotOn/search"
+    asyncio.run(client.aclose())
+
+
 @pytest.mark.parametrize("bad_timeout", ["abc", "-1", "0", "nan", "inf"])
 def test_from_env_rejects_bad_timeout(
     monkeypatch: pytest.MonkeyPatch, bad_timeout: str

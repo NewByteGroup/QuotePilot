@@ -228,6 +228,23 @@ def test_from_env_accepts_timeout_override(
     asyncio.run(client.aclose())
 
 
+def test_from_env_blank_base_url_falls_back_to_production() -> None:
+    # .env.example exports FIRECRAWL_BASE_URL= empty; blank must behave
+    # like unset, not override the production default.
+    transport = FakeFirecrawlTransport(
+        body=fixture_text("firecrawl", "old", "scrape_response_ok.json")
+    )
+    client = FirecrawlClient.from_env(
+        env={"FIRECRAWL_API_KEY": "env-key", "FIRECRAWL_BASE_URL": ""},
+        transport=transport,
+    )
+
+    asyncio.run(client.scrape_markdown(PAGE_URL))
+
+    assert str(transport.requests[0].url) == f"{PROD_BASE_URL}/scrape"
+    asyncio.run(client.aclose())
+
+
 @pytest.mark.parametrize("bad_timeout", ["abc", "-1", "0", "nan", "inf"])
 def test_from_env_rejects_bad_timeout(
     monkeypatch: pytest.MonkeyPatch, bad_timeout: str
