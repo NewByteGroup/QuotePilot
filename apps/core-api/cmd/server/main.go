@@ -59,7 +59,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	inboxServer, err := buildInbox(db)
+	inboxServer, err := buildInbox(db, store)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func newMailer(cfg *platform.Config) (platform.MailSender, error) {
 // configured. Empty skips the mount — a secretless webhook cannot verify
 // anything, so the route must not exist; a malformed secret is a boot
 // failure, because silently running without inbound mail is worse.
-func buildInbox(db *tenantdb.DB) (http.Handler, error) {
+func buildInbox(db *tenantdb.DB, store *platform.Store) (http.Handler, error) {
 	secret := os.Getenv("RESEND_WEBHOOK_SECRET")
 	if secret == "" {
 		slog.Warn("server: RESEND_WEBHOOK_SECRET unset — inbound webhook not mounted")
@@ -134,7 +134,7 @@ func buildInbox(db *tenantdb.DB) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
-	return inbox.NewServer(db, verifier, slog.Default()), nil
+	return inbox.NewServer(db, store, verifier, slog.Default()), nil
 }
 
 // buildMux composes the surfaces with per-route middleware. Correlation is
