@@ -50,6 +50,8 @@ The planned import-and-export quote MVP covers FCL and AIR for costs payable by 
 | Wording of the prompt-injection claim in ADR-006 (RFC-004 section 7) | Suggest "limits the blast radius" | Marcelo |
 | How failing page content reaches Devin, given a public repo (RFC-003) | Minimal excerpt on a branch, subject to terms of use | Pedro and Amanda |
 | Railway/Supabase plans, connection limits and account ownership (ADR-003) | Production Supabase region is `sa-east-1`; provider topology is fixed, provisioning details remain open | Pedro with the team |
+| `Workers Builds: quotepilot` failing on every PR (ADR-007) | Cloudflare's Workers Builds git integration watches this repo, but `apps/web` is still a stub — no `wrangler.toml`/`package.json` exists to build, so the check fails even on docs-only PRs. Fix is Cloudflare-side: disconnect the build or repoint it once a real worker/Pages project exists. Not repo-fixable | Amanda |
+| Durable magic-link delivery (ADR-005, River) | Detached sends are now drained on shutdown (PR #31), but a mid-send crash still loses the link — the user re-requests, acceptable MVP UX. A River job cannot carry the tokened URL: job args are readable as `qp_app`, which would put live credentials at rest and undo the hash-only storage model. The real fix is an outbox table holding the rendered link, written in the same tx as the token hash, drained by a worker with delete-on-send — needs schema, so it is Pedro's call | Pedro |
 
 ## Suggested order
 
