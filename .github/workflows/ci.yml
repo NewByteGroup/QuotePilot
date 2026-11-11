@@ -112,8 +112,9 @@ jobs:
             || compgen -G 'mypy.ini' > /dev/null || compgen -G '.mypy.ini' > /dev/null; then
             python -m pip install --quiet 'mypy==1.19.1'
             # Type checking needs the project's runtime deps (pydantic.mypy
-            # plugin, httpx imports); editable install mirrors the test step.
-            python -m pip install --quiet -e . || echo "notice: editable install failed; type check runs against the checkout"
+            # plugin, httpx imports) and dev extras (pytest is imported by the
+            # tests mypy checks); editable install mirrors the test step.
+            python -m pip install --quiet -e '.[dev]' || echo "notice: editable install failed; type check runs against the checkout"
             mypy .
           elif grep -q '^\[tool\.pyright\]' pyproject.toml 2>/dev/null || [ -f pyrightconfig.json ]; then
             python -m pip install --quiet 'pyright==1.1.414'  # pip wrapper bundles node
