@@ -47,9 +47,10 @@ func NewStore(q Querier) *Store { return &Store{q: q} }
 // InStoreTx runs fn against a Store bound to one transaction: every write
 // fn performs commits together or rolls back together — the contract
 // /auth/session needs so a mid-exchange failure cannot strand a consumed
-// magic link. Only a pool-backed Store can run it; a Store already bound
-// to a transaction (or a fake Querier without Begin) returns an error the
-// caller maps to its uniform failure path.
+// magic link. A pool-backed Store opens a fresh transaction; a Store
+// already bound to a pgx.Tx nests via savepoint (pgx's Begin on a tx),
+// which keeps the same all-or-nothing contract; a fake Querier without
+// Begin returns an error the caller maps to its uniform failure path.
 //
 //	err := store.InStoreTx(ctx, func(tx *platform.Store) error {
 //		userID, ok, err := tx.ConsumeLoginToken(ctx, hash)
