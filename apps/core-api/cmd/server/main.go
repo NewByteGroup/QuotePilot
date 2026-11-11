@@ -55,7 +55,10 @@ func run(ctx context.Context) error {
 	}
 	defer db.Close()
 	store := platform.NewStore(db.Pool())
-	authServer := buildAuth(&cfg, db, store)
+	endpoints, err := buildEndpoints(&cfg, db, store)
+	if err != nil {
+		return err
+	}
 	inboxServer, err := buildInbox(db)
 	if err != nil {
 		return err
@@ -64,7 +67,8 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return serve(ctx, newServer(&cfg, store, authServer, inboxServer), riverClient)
+	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
+	return serve(ctx, srv, endpoints.WaitDetached, riverClient)
 }
 
 // newServer assembles the bounded http.Server — every timeout is set so a
@@ -82,29 +86,38 @@ func newServer(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv ht
 	}
 }
 
-// buildAuth composes the contract's six-route surface: the generated
-// router (auth.NewServer mounts the ctx-planting middleware pair itself),
-// the Store over the qp_app pool, the mailer and the spec section 8.1
-// limiter pair sharing one clock with the token TTLs.
-func buildAuth(cfg *platform.Config, db *tenantdb.DB, store *platform.Store) http.Handler {
-	endpoints := auth.NewEndpoints(
-		cfg, store, store.InStoreTx, db, newMailer(cfg),
+// buildEndpoints composes the contract's six-route surface: the Store over
+// the qp_app pool, the mailer and the spec section 8.1 limiter pair sharing
+// one clock with the token TTLs. The returned Endpoints carries the
+// detached-send counter serve drains on shutdown (auth.NewServer mounts
+// the ctx-planting middleware pair itself).
+func buildEndpoints(cfg *platform.Config, db *tenantdb.DB, store *platform.Store) (*auth.Endpoints, error) {
+	mailer, err := newMailer(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return auth.NewEndpoints(
+		cfg, store, store.InStoreTx, db, mailer,
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, time.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, time.Now),
 		time.Now,
-	)
-	return auth.NewServer(endpoints)
+	), nil
 }
 
 // newMailer picks the sender: a configured Resend pair means real mail;
-// both empty selects the dev LogMailSender — config.validate guarantees
-// the pair never arrives half-set.
-func newMailer(cfg *platform.Config) platform.MailSender {
+// both empty requires the explicit AUTH_DEV_MAILER opt-in for the
+// LogMailSender — a deploy that forgets the pair must fail boot, never
+// serve sign-in links into anyone's log tail (config.validate guarantees
+// the pair never arrives half-set).
+func newMailer(cfg *platform.Config) (platform.MailSender, error) {
 	if cfg.ResendAPIKey != "" {
-		return platform.NewResendMailSender(cfg.ResendAPIKey, cfg.MagicFrom)
+		return platform.NewResendMailSender(cfg.ResendAPIKey, cfg.MagicFrom), nil
 	}
-	slog.Warn("server: RESEND_API_KEY unset — magic links go to the log (dev sender)")
-	return platform.NewLogMailSender(slog.Default())
+	if os.Getenv("AUTH_DEV_MAILER") == "true" {
+		slog.Warn("server: AUTH_DEV_MAILER on — magic links go to the log (dev only)")
+		return platform.NewLogMailSender(slog.Default()), nil
+	}
+	return nil, errors.New("server: no mail path — set RESEND_API_KEY and AUTH_MAGIC_FROM, or AUTH_DEV_MAILER=true for local dev")
 }
 
 // buildInbox mounts the Resend inbound webhook only when its Svix secret is
@@ -172,10 +185,24 @@ func startJobs(ctx context.Context, db *tenantdb.DB) (*river.Client[pgx.Tx], err
 	return client, nil
 }
 
+// httpServer is the slice of *http.Server serve drives — the seam tests
+// inject a fake through.
+type httpServer interface {
+	ListenAndServe() error
+	Shutdown(context.Context) error
+}
+
+// jobStopper is the slice of *river.Client serve drains.
+type jobStopper interface {
+	Stop(context.Context) error
+	StopAndCancel(context.Context) error
+}
+
 // serve runs until the signal context closes or the server itself dies,
-// then drains HTTP and River inside one shared grace window — requests
-// first (a finishing request may still enqueue in-tx), workers second.
-func serve(ctx context.Context, srv *http.Server, client *river.Client[pgx.Tx]) error {
+// then drains. A listener that dies on its own (bind failure) still owes
+// the River client its stop — the deferred pool close must not race a
+// running client.
+func serve(ctx context.Context, srv httpServer, detached func(context.Context) bool, jobs jobStopper) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
@@ -183,9 +210,7 @@ func serve(ctx context.Context, srv *http.Server, client *river.Client[pgx.Tx]) 
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
-		// A dead listener (bind failure) still owes the River client its
-		// stop — the deferred pool close must not race a running client.
-		_ = client.StopAndCancel(context.Background())
+		_ = jobs.StopAndCancel(context.Background())
 		return err
 	case <-ctx.Done():
 	}
@@ -193,9 +218,20 @@ func serve(ctx context.Context, srv *http.Server, client *river.Client[pgx.Tx]) 
 	// A second signal during the drain should kill, not be swallowed by the
 	// still-subscribed NotifyContext.
 	signal.Reset(os.Interrupt, syscall.SIGTERM)
+	return drain(srv, detached, jobs)
+}
+
+// drain owns the ordered shutdown inside one shared grace window: HTTP
+// requests first (a finishing login may still have a detached send in
+// flight), the detached sends themselves, then the workers.
+func drain(srv httpServer, detached func(context.Context) bool, jobs jobStopper) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	return errors.Join(srv.Shutdown(shutCtx), client.Stop(shutCtx))
+	httpErr := srv.Shutdown(shutCtx)
+	if !detached(shutCtx) {
+		slog.Warn("server: detached sends still running at window end — links may be lost")
+	}
+	return errors.Join(httpErr, jobs.Stop(shutCtx))
 }
 
 // listenAddr reads PORT (the PaaS convention) with a dev default so a bare
