@@ -1,0 +1,7 @@
+{
+  "type": "about:blank",
+  "title": "Unauthorized",
+  "status": 401,
+  "detail": "User not authenticated or recognized",
+  "globalTransactionId": "9d1b0d3a-8f9f-4a2c-9d21-9f6f0d51a222"
+}
