@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "data": {
+    "metadata": {
+      "statusCode": 200,
+      "title": "Page without markdown"
+    }
+  }
+}

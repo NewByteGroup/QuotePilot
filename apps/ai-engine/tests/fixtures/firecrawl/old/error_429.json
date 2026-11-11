@@ -1,0 +1,5 @@
+{
+  "success": false,
+  "code": "RATE_LIMIT_EXCEEDED",
+  "error": "Rate limit exceeded: too many requests"
+}
