@@ -263,6 +263,26 @@ func (s *Store) GetMembership(ctx context.Context, userID, orgID uuid.UUID) (rol
 	return *r, true, nil
 }
 
+// ResolveInboundOrg maps one Resend inbound recipient to its organization
+// through app.resolve_inbound_org (ADR-005 section 7): the function
+// normalizes case, angle brackets and plus-tags, then tries the org's
+// inbound_email_alias before the pinned <slug>@in.quotepilot.app fallback.
+// A NULL return — malformed or unmatched recipient — is ok=false, not an
+// error; only driver failures propagate.
+//
+//	orgID, ok, err := store.ResolveInboundOrg(ctx, "Quotes+tag@in.quotepilot.app")
+func (s *Store) ResolveInboundOrg(ctx context.Context, recipient string) (uuid.UUID, bool, error) {
+	var id *uuid.UUID
+	err := s.q.QueryRow(ctx, `SELECT app.resolve_inbound_org($1)`, recipient).Scan(&id)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: resolve_inbound_org: %w", err)
+	}
+	if id == nil {
+		return uuid.Nil, false, nil
+	}
+	return *id, true, nil
+}
+
 // GetUserProfile returns the GET /me identity row. An unknown user is the
 // empty set, hence ok=false — not an error. full_name is nullable in the
 // schema; NULL maps to "".

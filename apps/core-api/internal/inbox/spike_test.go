@@ -23,6 +23,7 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox/inboxdb"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/testenv"
 )
 
@@ -67,9 +68,11 @@ func TestSpikeInTenantTxSqlcDecimal(t *testing.T) {
 	}))
 }
 
-// TestSpikeWebhook is gate criterion 5: a valid Svix signature inserts
-// idempotently on (organization_id, resend_message_id); an invalid one is a
-// 401 before any DB write.
+// TestSpikeWebhook is gate criterion 5 plus the ADR-005 section 7 path: a
+// valid Svix signature resolves the tenant from `to` through
+// resolve_inbound_org, then inserts idempotently on
+// (organization_id, resend_message_id); an invalid one is a 401 before any
+// DB write.
 func TestSpikeWebhook(t *testing.T) {
 	db := testenv.Open(t)
 	ctx := context.Background()
@@ -81,13 +84,14 @@ func TestSpikeWebhook(t *testing.T) {
 	signer, err := svix.NewWebhook(secret)
 	require.NoError(t, err)
 
-	srv := httptest.NewServer(inbox.NewServer(db, verifier, testLogger))
+	org := uuid.New()
+	alias := testenv.SeedOrganization(t, org, "inbox-webhook") + "@in.test"
+
+	srv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier, testLogger))
 	defer srv.Close()
 
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "inbox-webhook")
 	payload, err := json.Marshal(map[string]any{
-		"organization_id":    org.String(),
+		"to":                 []string{alias},
 		"resend_message_id":  "resend-spike-1",
 		"subject":            "RFQ: 20 boxes Shenzhen",
 		"declared_value_usd": "99.95",

@@ -323,3 +323,43 @@ func TestStoreGetCurrentOrganization(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, found, "no tenant context must be (zero, false, nil), not an error")
 }
+
+// TestStoreResolveInboundOrg covers every branch of app.resolve_inbound_org
+// (ADR-005 section 7) as qp_app: exact-alias match, the pinned
+// <slug>@in.quotepilot.app fallback, plus-tag and angle-bracket
+// normalization, the malformed double-@ refusal and the plain miss. Misses
+// are (nil, false, nil) — never an error, so the webhook can answer a drop
+// without retrying.
+func TestStoreResolveInboundOrg(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	orgID := uuid.New()
+	slug := testenv.SeedOrganization(t, orgID, "store-resolve")
+
+	for name, c := range resolveCases(slug, orgID) {
+		got, ok, err := store.ResolveInboundOrg(ctx, c.recipient)
+		require.NoError(t, err, name)
+		require.Equal(t, c.wantOK, ok, name)
+		require.Equal(t, c.wantOrg, got, name)
+	}
+}
+
+// resolveCase is one resolve_inbound_org outcome: recipient in, (org, ok)
+// expected out.
+type resolveCase struct {
+	recipient string
+	wantOrg   uuid.UUID
+	wantOK    bool
+}
+
+// resolveCases enumerates the function's six branches against a seeded org.
+func resolveCases(slug string, orgID uuid.UUID) map[string]resolveCase {
+	return map[string]resolveCase{
+		"exact alias":       {slug + "@in.test", orgID, true},
+		"slug fallback":     {slug + "@in.quotepilot.app", orgID, true},
+		"plus tag stripped": {slug + "+invoice@in.test", orgID, true},
+		"angle brackets":    {"Quotes <" + slug + "@in.test>", orgID, true},
+		"double at refused": {slug + "@in.test@evil.test", uuid.Nil, false},
+		"unknown alias":     {"nobody@in.test", uuid.Nil, false},
+	}
+}
