@@ -310,7 +310,24 @@ def _aligned_items(
             f"{expected_count} input text(s); expected one vector per input"
         )
     if expected_count == 1:
+        if data[0].index not in (None, 0):
+            raise OpenRouterSchemaError(
+                f"POST embeddings returned index {data[0].index} for one "
+                "input; expected index 0 or no index"
+            )
         return data
+    return _permutation_sorted(data, expected_count)
+
+
+def _permutation_sorted(
+    data: list[EmbeddingItem], expected_count: int
+) -> list[EmbeddingItem]:
+    """Return batch items in input order.
+
+    Every item must carry an ``index`` and the indexes must be a
+    permutation of ``0..count-1`` — anything else means the vectors cannot
+    be mapped back to their inputs.
+    """
     indexed: list[tuple[int, EmbeddingItem]] = []
     for item in data:
         if item.index is None:

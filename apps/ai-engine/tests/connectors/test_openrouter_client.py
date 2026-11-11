@@ -362,6 +362,15 @@ def test_embed_accepts_missing_index_for_single_input() -> None:
     assert len(result.data[0].embedding) == EMBEDDING_DIMS
 
 
+def test_embed_rejects_nonzero_index_for_single_input() -> None:
+    transport = _good_transport(embeddings_body=_embeddings_body([_embedding_item(1)]))
+    client = _client(transport)
+    request = EmbeddingRequest(model="qwen/qwen3-embedding-8b", input="one text")
+
+    with pytest.raises(OpenRouterSchemaError):
+        asyncio.run(client.embed(request, expected_dimensions=EMBEDDING_DIMS))
+
+
 def test_decide_401_raises_auth_error_with_parsed_body() -> None:
     transport = _good_transport(
         decisions_status=401,
