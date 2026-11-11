@@ -330,6 +330,41 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 	return out, nil
 }
 
+// CreateMailOutbox queues one magic-link send beside its login token — the
+// migration-0004 half of durable delivery, meant to run in the same
+// transaction as CreateLoginToken and the River enqueue so a token is never
+// minted without its send. The link is a live credential bounded by the
+// token's TTL; the row lives only until TakeMailOutbox claims it.
+//
+//	outboxID, err := store.CreateMailOutbox(ctx, tokenID, link)
+func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.q.QueryRow(ctx,
+		`SELECT app.create_mail_outbox($1, $2)`, tokenID, link).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("platform: create_mail_outbox: %w", err)
+	}
+	return id, nil
+}
+
+// TakeMailOutbox claims one pending send. The function's DELETE ...
+// RETURNING hands the link out exactly once — take-once semantics make
+// double-delivery impossible — so a second take, or an id that was never
+// queued, is ("", false, nil), never an error.
+//
+//	link, ok, err := store.TakeMailOutbox(ctx, outboxID)
+func (s *Store) TakeMailOutbox(ctx context.Context, id uuid.UUID) (string, bool, error) {
+	var link *string
+	err := s.q.QueryRow(ctx, `SELECT app.take_mail_outbox($1)`, id).Scan(&link)
+	if err != nil {
+		return "", false, fmt.Errorf("platform: take_mail_outbox: %w", err)
+	}
+	if link == nil {
+		return "", false, nil
+	}
+	return *link, true, nil
+}
+
 // GetCurrentOrganization reads the resolved tenant's registry row through
 // app.get_current_organization() — the migration-0002 accessor that scopes on
 // the app.current_organization_id GUC, so a row can only come back inside

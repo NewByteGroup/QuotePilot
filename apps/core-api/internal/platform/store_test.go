@@ -363,3 +363,41 @@ func resolveCases(slug string, orgID uuid.UUID) map[string]resolveCase {
 		"unknown alias":     {"nobody@in.test", uuid.Nil, false},
 	}
 }
+
+// TestStoreMailOutboxLifecycle proves the durable-send contract (migration
+// 0004): create returns the outbox id, take hands the link out exactly once
+// — take-once DELETE ... RETURNING makes double-delivery impossible — an
+// absent id collapses to ("", false, nil), and the function refuses an
+// empty link_url, which would queue a send that can never deliver.
+func TestStoreMailOutboxLifecycle(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	userID := seedUser(t, uniqueEmail("store-outbox"), "Outbox User")
+	tokenID, err := store.CreateLoginToken(ctx, userID, freshHash(t), time.Now().Add(15*time.Minute))
+	require.NoError(t, err)
+
+	link := "https://app.quotepilot.test/auth/exchange?token=" + uuid.NewString()
+	outboxID, err := store.CreateMailOutbox(ctx, tokenID, link)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, outboxID)
+
+	gotLink, ok := takeOutbox(t, store, outboxID)
+	require.True(t, ok)
+	assert.Equal(t, link, gotLink)
+
+	_, ok = takeOutbox(t, store, outboxID)
+	assert.False(t, ok, "take-once: the row is gone after the first take")
+	_, ok = takeOutbox(t, store, uuid.New())
+	assert.False(t, ok, "an absent id is (\"\", false, nil), never an error")
+	_, err = store.CreateMailOutbox(ctx, tokenID, "")
+	require.Error(t, err, "an empty link_url must be refused")
+}
+
+// takeOutbox runs one TakeMailOutbox and asserts the error leg away, so the
+// lifecycle test reads as (link, ok) pairs only.
+func takeOutbox(t *testing.T, store *platform.Store, id uuid.UUID) (string, bool) {
+	t.Helper()
+	link, ok, err := store.TakeMailOutbox(context.Background(), id)
+	require.NoError(t, err)
+	return link, ok
+}
