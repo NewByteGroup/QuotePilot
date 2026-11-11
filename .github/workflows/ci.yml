@@ -111,6 +111,9 @@ jobs:
           if grep -q '^\[tool\.mypy\]' pyproject.toml 2>/dev/null \
             || compgen -G 'mypy.ini' > /dev/null || compgen -G '.mypy.ini' > /dev/null; then
             python -m pip install --quiet 'mypy==1.19.1'
+            # Type checking needs the project's runtime deps (pydantic.mypy
+            # plugin, httpx imports); editable install mirrors the test step.
+            python -m pip install --quiet -e . || echo "notice: editable install failed; type check runs against the checkout"
             mypy .
           elif grep -q '^\[tool\.pyright\]' pyproject.toml 2>/dev/null || [ -f pyrightconfig.json ]; then
             python -m pip install --quiet 'pyright==1.1.414'  # pip wrapper bundles node
@@ -194,10 +197,11 @@ jobs:
             echo "stub: no Python toolchain yet — check activates when apps/ai-engine/pyproject.toml or requirements*.txt lands"
             exit 0
           fi
-          # pytest 8.4.2 / pytest-cov 7.1.0 — pinned. Project deps come from the
+          # pytest 9.0.3 / pytest-cov 7.1.0 — pinned (9.0.3 fixes
+          # CVE-2025-71176 tmpdir handling). Project deps come from the
           # manifest itself; the editable install is best-effort so tests can
           # still run against the checkout if packaging is not ready yet.
-          python -m pip install --quiet 'pytest==8.4.2' 'pytest-cov==7.1.0'
+          python -m pip install --quiet 'pytest==9.0.3' 'pytest-cov==7.1.0'
           cd apps/ai-engine
           for req in requirements*.txt; do
             [ -f "$req" ] && python -m pip install --quiet -r "$req"
