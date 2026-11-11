@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "Invalid API key provided",
+    "code": 401,
+    "metadata": { "provider_name": null }
+  }
+}

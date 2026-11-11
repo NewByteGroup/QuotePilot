@@ -1,0 +1,41 @@
+{
+  "model": "typesafe/jev-1.14",
+  "state": {
+    "subject": "Invoice total does not match the quote",
+    "body": "The quote QP-2026-0142 showed USD 4,250 all-in but the invoice landed at USD 4,520. The surge charge line is missing on the quote.",
+    "metadata": {
+      "sender": "ops@forwarder.example",
+      "attachments": ["quote.pdf", "invoice.pdf"]
+    }
+  },
+  "questions": {
+    "is_bug": {
+      "type": "noul",
+      "instructions": "Does this message report a defect or unexpected behavior in QuotePilot?",
+      "criteria": {
+        "true": "reports a defect, wrong output or unexpected behavior",
+        "false": "question, feature request or normal usage"
+      }
+    },
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should own this ticket?",
+      "criteria": {
+        "payments": "billing, invoices, refunds and charge lines",
+        "frontend": "UI bugs and display issues"
+      }
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "How urgently does this ticket need attention?",
+      "criteria": ["low", "mid", "high"]
+    },
+    "region": {
+      "type": "box",
+      "instructions": "Draw a box around the wrong amount in the attached screenshot."
+    }
+  },
+  "session_id": "session-test-0001",
+  "user": "ops@forwarder.example",
+  "trace": { "request_id": "req-test-0042" }
+}

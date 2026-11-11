@@ -1,0 +1,17 @@
+{
+  "departureDate": "2026-12-05",
+  "locationCodificationType": "UNLOCODE",
+  "portOfLoading": "BRSSZ",
+  "portOfDischarge": "DEHAM",
+  "commodityCode": "FAK",
+  "requestedEquipments": [
+    {
+      "equipmentGroupIsoCode": "40GP",
+      "numberOfContainers": 2,
+      "weightPerContainer": 18000
+    }
+  ],
+  "hazardous": false,
+  "shipperOwnedContainer": false,
+  "decidingParty": "0000123456"
+}

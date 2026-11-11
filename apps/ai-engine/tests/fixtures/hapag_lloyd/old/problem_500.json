@@ -1,0 +1,7 @@
+{
+  "type": "about:blank",
+  "title": "Internal Server Error",
+  "status": 500,
+  "detail": "Upstream pricing engine unavailable",
+  "globalTransactionId": "9d1b0d3a-8f9f-4a2c-9d21-9f6f0d51a333"
+}

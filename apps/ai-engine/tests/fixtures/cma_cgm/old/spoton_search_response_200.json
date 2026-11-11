@@ -1,0 +1,212 @@
+[
+  {
+    "offerId": "6bdac5a3-5a28-447d-b9cb-9eb1c9be2025.6bdac5a3-5a28-447d-b9cb-9eb1c9be2025",
+    "offerType": "ExactRouting",
+    "solutionNumber": 1,
+    "solutionDescription": "Service South Atlantic Express / direct",
+    "scheduleNumber": 1,
+    "transitTime": 28,
+    "totalCarbonFootprint": 1.82,
+    "departureDate": "2026-12-07T14:00:00Z",
+    "arrivalDate": "2027-01-04T06:00:00Z",
+    "routingLegs": [
+      {
+        "legNumber": 1,
+        "carbonFootprint": 1.82,
+        "departureDate": "2026-12-07T14:00:00Z",
+        "arrivalDate": "2027-01-04T06:00:00Z",
+        "portCutOffDate": "2026-12-06T12:00:00Z",
+        "vgmCutOffDate": "2026-12-06T10:00:00Z",
+        "bookingCutOffDate": "2026-12-05T18:00:00Z",
+        "service": { "code": "SAE", "name": "South Atlantic Express" },
+        "vesselName": "CMA CGM PUGET",
+        "feeder": false,
+        "voyageReference": "0SAE1W1MA",
+        "legFrom": {
+          "place": {
+            "name": "Santos",
+            "internalCode": "BRSSZ",
+            "locationCodifications": [
+              { "codificationType": "UN/Locode", "codification": "BRSSZ" }
+            ]
+          },
+          "port": true,
+          "placeCountry": { "code": "BR", "name": "Brazil" },
+          "terminal": { "code": "BTP", "name": "BRASIL TERMINAL PORTUARIO" }
+        },
+        "legTo": {
+          "place": {
+            "name": "Hamburg",
+            "internalCode": "DEHAM",
+            "locationCodifications": [
+              { "codificationType": "UN/Locode", "codification": "DEHAM" }
+            ]
+          },
+          "port": true,
+          "placeCountry": { "code": "DE", "name": "Germany" },
+          "terminal": { "code": "CTB", "name": "HHLA CONTAINER TERMINAL BURCHARDKAI" }
+        }
+      }
+    ],
+    "ddsmConditions": [
+      {
+        "movementType": { "code": "I", "name": "Import" },
+        "tariff": {
+          "code": "DEM",
+          "name": "Demurrage",
+          "tariffOrigin": { "code": "EXP", "name": "DDSM Exceptions" },
+          "validityDateFrom": "2026-12-07",
+          "validityDateTo": "2027-01-04"
+        },
+        "conditionsByEquipment": [
+          {
+            "equipmentGroupIsoCode": "40GP",
+            "freeDays": { "number": 7, "calculationType": "Calendar" }
+          }
+        ]
+      }
+    ],
+    "allocation": [
+      {
+        "equipmentGroupIsoCode": ["40GP"],
+        "allocation": true,
+        "nbOfContainersAvailable": 12,
+        "partialAllocation": false
+      }
+    ],
+    "potentialFees": [{ "feeType": "Cancellation fees" }],
+    "quoteLine": {
+      "shippingCompany": "0001",
+      "validityFrom": "2026-11-10",
+      "validityTo": "2026-12-07",
+      "decidingParties": [
+        {
+          "businessDecidingPartyCode": "0000123456",
+          "businessDecidingPartyName": "FORWARDER EXAMPLE",
+          "businessDecidingPartyCountry": "BR",
+          "businessDecidingPartyCity": "Santos"
+        }
+      ],
+      "spotEquipments": [
+        {
+          "equipmentGroupIsoCode": "40GP",
+          "availableRate": true,
+          "numberOfContainerRequested": 2,
+          "maxNetWeight": 28
+        }
+      ],
+      "routing": {
+        "receiptPlace": { "name": "Santos", "internalCode": "BRSSZ" },
+        "portOfLoading": { "name": "Santos", "internalCode": "BRSSZ" },
+        "portOfDischarge": { "name": "Hamburg", "internalCode": "DEHAM" },
+        "deliveryPlace": { "name": "Hamburg", "internalCode": "DEHAM" },
+        "routinginformation": "direct service"
+      },
+      "commodity": {
+        "commodityGroup": true,
+        "code": "FAK",
+        "name": "Freight all kinds"
+      },
+      "surcharges": {
+        "simulationDate": "2026-11-10",
+        "matchingSurchargesPerEquipmentTypes": [
+          {
+            "equipmentGroupIsoCode": "40GP",
+            "allInRate": 2350,
+            "basicOceanFreightRate": 1950,
+            "currency": { "code": "USD", "name": "US Dollar" },
+            "matchingCargoSurcharges": [
+              {
+                "charge": { "code": "BAF03", "name": "Bunker surcharge NOS" },
+                "chargeCurrency": { "code": "USD", "name": "US Dollar" },
+                "amount": 19.99,
+                "surcharge": true,
+                "includedInBasicFreight": true,
+                "paymentMethod": { "code": "P", "name": "Prepaid" }
+              },
+              {
+                "charge": { "code": "THC20", "name": "Terminal handling origin" },
+                "chargeCurrency": { "code": "USD", "name": "US Dollar" },
+                "amount": 380.11,
+                "surcharge": true,
+                "includedInBasicFreight": false,
+                "paymentMethod": { "code": "P", "name": "Prepaid" }
+              }
+            ]
+          }
+        ],
+        "matchingBlSurcharges": [
+          {
+            "charge": { "code": "DDF01", "name": "Documentation fee" },
+            "chargeCurrency": { "code": "USD", "name": "US Dollar" },
+            "amount": 75.5,
+            "surcharge": true,
+            "fixedByPricer": false,
+            "paymentMethod": { "code": "P", "name": "Prepaid" }
+          }
+        ],
+        "matchingSurchargesDefinedAsComments": [
+          {
+            "charge": { "code": "OWS01", "name": "Overweight surcharge" },
+            "chargeDefinedAsCommentTxt": "Overweight surcharge applies for 20' containers over 20 TONS gross weight."
+          }
+        ]
+      }
+    }
+  },
+  {
+    "offerId": "7cd4e5b4-6b39-558e-c4de-0fc2d0cf3136.7cd4e5b4-6b39-558e-c4de-0fc2d0cf3136",
+    "offerType": "AlternateRouting",
+    "solutionNumber": 2,
+    "scheduleNumber": 2,
+    "transitTime": 33,
+    "departureDate": "2026-12-12T20:00:00Z",
+    "arrivalDate": "2027-01-14T09:00:00Z",
+    "routingLegs": [
+      {
+        "legNumber": 1,
+        "departureDate": "2026-12-12T20:00:00Z",
+        "arrivalDate": "2027-01-14T09:00:00Z",
+        "service": { "code": "SA2", "name": "South Atlantic 2" },
+        "vesselName": "CMA CGM LIBERTY",
+        "feeder": false,
+        "voyageReference": "0SA22E1MA",
+        "legFrom": {
+          "place": { "name": "Santos", "internalCode": "BRSSZ" },
+          "port": true
+        },
+        "legTo": {
+          "place": { "name": "Rotterdam", "internalCode": "NLRTM" },
+          "port": true
+        }
+      }
+    ],
+    "quoteLine": {
+      "shippingCompany": "0001",
+      "validityFrom": "2026-11-10",
+      "validityTo": "2026-12-12",
+      "spotEquipments": [
+        {
+          "equipmentGroupIsoCode": "40GP",
+          "availableRate": true,
+          "numberOfContainerRequested": 2
+        }
+      ],
+      "surcharges": {
+        "simulationDate": "2026-11-10",
+        "matchingSurchargesPerEquipmentTypes": [
+          {
+            "equipmentGroupIsoCode": "40GP",
+            "allInRate": 2190,
+            "basicOceanFreightRate": 1750,
+            "currency": { "code": "USD" }
+          }
+        ]
+      }
+    }
+  },
+  {
+    "code": "INQ_TRN",
+    "description": "SpotOn not deployed yet on this trade"
+  }
+]

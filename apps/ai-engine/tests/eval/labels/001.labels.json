@@ -1,0 +1,21 @@
+{
+  "email": "rfq/001-santos-hamburg-fcl.eml.md",
+  "classification": "RFQ",
+  "expected": {
+    "incoterm": "FOB",
+    "modal": "FCL",
+    "origin_locode": "BRSSZ",
+    "origin_text": "Santos",
+    "dest_locode": "DEHAM",
+    "dest_text": "Hamburg",
+    "equipment_or_unit": "40HC",
+    "quantity": "2",
+    "gross_weight_kg": "18000",
+    "cargo_value_amount": "45000",
+    "cargo_value_currency": "USD",
+    "ncm": "87089990",
+    "ready_date": "2026-11-20"
+  },
+  "required_missing": ["volume_m3"],
+  "notes": "synthetic; BR decimal/thousands separators (18.000 kg, 45.000,00) and dd/mm/yyyy date exercise the locale-ambiguous-number checks"
+}

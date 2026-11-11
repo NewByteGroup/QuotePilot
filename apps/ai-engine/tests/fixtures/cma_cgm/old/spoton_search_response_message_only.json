@@ -1,0 +1,10 @@
+[
+  {
+    "code": "INQ_SPN",
+    "description": "SpotOn offer not available for your search criteria"
+  },
+  {
+    "code": "INQ_BLK",
+    "description": "Forbidden commodity"
+  }
+]

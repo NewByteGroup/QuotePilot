@@ -1,0 +1,49 @@
+{
+  "carrierPriceRequestReference": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "offers": [
+    {
+      "carrierOfferRequestReference": "24595eb0-5cfc-4381-9c3a-cedc1975e9aa",
+      "productIdentifier": "QUICK_QUOTES",
+      "placeOfReceipt": "BRSSZ",
+      "placeOfDelivery": "DEHAM",
+      "portOfLoading": "BRSSZ",
+      "portOfLoadingDateTime": "2026-12-05T14:00:00.000Z",
+      "portOfDischarge": "DEHAM",
+      "portOfDischargeDateTime": "2026-12-28T19:00:00.000Z",
+      "receiptTypeAtOrigin": "CY",
+      "deliveryTypeAtDestination": "CY",
+      "transitTime": 27,
+      "termsAndConditions": [],
+      "legs": [],
+      "equipments": [
+        {
+          "requestedEquipment": {
+            "requestedEquipmentSizeType": "22G1",
+            "requestedEquipmentUnits": 2,
+            "isNonOperatingReefer": false,
+            "shippersOwnedContainer": false
+          },
+          "rates": [
+            {
+              "chargeTypeCode": "SEA",
+              "currency": "USD",
+              "unitOfMeasure": "CONTAINER",
+              "subjectToGri": false,
+              "included": true,
+              "chargeable": true,
+              "exclusiveRate": false,
+              "locationProposal": "MAIN_CARRIAGE",
+              "modeOfTransport": "VESSEL",
+              "motDirectionIndicator": "LOCAL",
+              "rateBaseType": "CONTAINER",
+              "seaFreightIndicator": true
+            }
+          ]
+        }
+      ],
+      "potentialQuotationValidFrom": "2026-12-05",
+      "potentialQuotationValidTo": "2026-12-28",
+      "potentialQuotationExpiryDate": "2026-12-01"
+    }
+  ]
+}
