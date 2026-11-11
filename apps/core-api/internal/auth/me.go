@@ -20,6 +20,8 @@ import (
 // Authenticate; it fails closed with the same 401 the middleware emits —
 // ResolveTenant answers the identical bug the same way, because a request
 // that skipped authentication is unauthenticated, not a server fault.
+//
+//	resp, err := endpoints.GetMe(ctx, authapi.GetMeRequestObject{})
 func (e *Endpoints) GetMe(
 	ctx context.Context,
 	_ authapi.GetMeRequestObject,
