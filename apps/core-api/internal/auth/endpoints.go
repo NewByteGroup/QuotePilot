@@ -11,6 +11,16 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 )
 
+// InTxFunc runs fn against a Store bound to one transaction: an endpoint
+// whose flow must commit several writes atomically hands its whole body to
+// it — fn's error abandons the transaction, a nil return commits it.
+// Production passes store.InStoreTx; the fake rigs pass a direct call (the
+// in-memory Querier has no Begin), which drives the same flow without a
+// real BEGIN — real-Postgres tests prove the atomicity itself.
+//
+//	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, mailer, ipLimiter, emailLimiter, time.Now)
+type InTxFunc func(context.Context, func(*platform.Store) error) error
+
 // Endpoints implements authapi.StrictServerInterface for the six-route
 // auth/session surface (spec section 8). Dependencies are concrete types so
 // tests drive the real Store and Limiter logic behind a stubbed Querier and
@@ -18,6 +28,7 @@ import (
 type Endpoints struct {
 	cfg          *platform.Config
 	store        *platform.Store
+	inTx         InTxFunc
 	mailer       platform.MailSender
 	ipLimiter    *platform.Limiter
 	emailLimiter *platform.Limiter
@@ -30,13 +41,16 @@ var _ authapi.StrictServerInterface = (*Endpoints)(nil)
 // are the spec section 8.1 pair — production wires them as
 // platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, time.Now)
 // and the LoginEmailCapacity twin; tests inject small capacities on a fake
-// clock. now is shared with the limiters so token expiry and bucket refill
-// read one time source.
+// clock. inTx is the atomic-write seam (production: store.InStoreTx — the
+// magic-link exchange is one transaction, not a sequence of commits). now is
+// shared with the limiters so token expiry and bucket refill read one time
+// source.
 //
-//	endpoints := auth.NewEndpoints(cfg, store, mailer, ipLimiter, emailLimiter, time.Now)
+//	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, mailer, ipLimiter, emailLimiter, time.Now)
 func NewEndpoints(
 	cfg *platform.Config,
 	store *platform.Store,
+	inTx InTxFunc,
 	mailer platform.MailSender,
 	ipLimiter, emailLimiter *platform.Limiter,
 	now func() time.Time,
@@ -44,6 +58,7 @@ func NewEndpoints(
 	return &Endpoints{
 		cfg:          cfg,
 		store:        store,
+		inTx:         inTx,
 		mailer:       mailer,
 		ipLimiter:    ipLimiter,
 		emailLimiter: emailLimiter,
@@ -121,11 +136,7 @@ func writeError(w http.ResponseWriter, status int, code authapi.ErrorCode) {
 // errUnimplemented answers a call to an endpoint whose PR has not landed —
 // the route is mounted (the contract mounts all six), so a stray call must
 // fail loudly through the uniform 500 rather than silently 200 or 204.
-var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PRs C2–C6")
-
-func (e *Endpoints) PostAuthSession(context.Context, authapi.PostAuthSessionRequestObject) (authapi.PostAuthSessionResponseObject, error) {
-	return nil, errUnimplemented
-}
+var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PRs C3–C6")
 
 func (e *Endpoints) PostAuthRefresh(context.Context, authapi.PostAuthRefreshRequestObject) (authapi.PostAuthRefreshResponseObject, error) {
 	return nil, errUnimplemented

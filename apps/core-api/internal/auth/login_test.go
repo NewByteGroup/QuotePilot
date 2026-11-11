@@ -194,8 +194,9 @@ func newRig(t *testing.T, mailer platform.MailSender, ipCap, emailCap int) *rig 
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cfg := &platform.Config{WebURL: "https://web.test", LoginTTL: 15 * time.Minute}
 	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
+	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		platform.NewStore(q), mailer,
+		store, directInTx(store), mailer,
 		platform.NewLimiter(ipCap, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(emailCap, platform.LimitWindow, clock.Now),
 		clock.Now)
@@ -447,7 +448,7 @@ func TestLoginEmailRateLimit(t *testing.T) {
 }
 
 // TestUnimplementedEndpointsFailLoud pins the stub contract: the contract
-// mounts all six routes, so the five this PR does not implement must fail
+// mounts all six routes, so the four this PR does not implement must fail
 // loudly through the uniform 500 — never a silent 200 or 204 (a 204 on
 // logout would claim a revocation that did not happen).
 func TestUnimplementedEndpointsFailLoud(t *testing.T) {
@@ -458,7 +459,6 @@ func TestUnimplementedEndpointsFailLoud(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodPost, "/auth/session", `{"token":"abc"}`},
 		{http.MethodPost, "/auth/refresh", `{}`},
 		{http.MethodPost, "/auth/logout", `{}`},
 		{http.MethodGet, "/me", ``},
@@ -484,7 +484,8 @@ func TestLoginWithoutClientIPMiddlewareFailsLoud(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cfg := &platform.Config{WebURL: "https://web.test", LoginTTL: 15 * time.Minute}
 	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
-	endpoints := auth.NewEndpoints(cfg, platform.NewStore(q), &platform.FakeMailSender{},
+	store := platform.NewStore(q)
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), &platform.FakeMailSender{},
 		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
 		clock.Now)
@@ -506,7 +507,8 @@ func TestLoginTrimsTrailingSlashOnWebURL(t *testing.T) {
 	q := &loginQuerier{users: map[string]uuid.UUID{"ada@test.dev": uuid.New()}, fail: map[string]error{}}
 	cfg := &platform.Config{WebURL: "https://web.test/", LoginTTL: 15 * time.Minute}
 	mailer := &platform.FakeMailSender{}
-	endpoints := auth.NewEndpoints(cfg, platform.NewStore(q), mailer,
+	store := platform.NewStore(q)
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), mailer,
 		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
 		clock.Now)
