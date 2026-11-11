@@ -27,6 +27,8 @@ import (
 // with no Set-Cookie at all — the same rule refresh's 500 follows: clearing
 // on a failed revoke would log the client out of a family that is still
 // live.
+//
+//	resp, err := endpoints.PostAuthLogout(ctx, authapi.PostAuthLogoutRequestObject{})
 func (e *Endpoints) PostAuthLogout(
 	ctx context.Context,
 	_ authapi.PostAuthLogoutRequestObject,
@@ -60,6 +62,8 @@ type logoutNoContent struct {
 
 // VisitPostAuthLogoutResponse emits the cleared pair before the bare 204 —
 // the same ordering rule as refreshOK: headers precede WriteHeader.
+//
+//	err := resp.VisitPostAuthLogoutResponse(w)
 func (r logoutNoContent) VisitPostAuthLogoutResponse(w http.ResponseWriter) error {
 	http.SetCookie(w, r.access)
 	http.SetCookie(w, r.refresh)
