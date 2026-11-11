@@ -44,6 +44,7 @@ The planned import-and-export quote MVP covers FCL and AIR for costs payable by 
 | LCL classification outside the v1.3 pricing MVP (ADR-006/RFC-004) | Approved classifier still has an LCL hint; no LCL quote may be priced in the MVP | Marcelo and Pedro |
 | PDF and email HTML renderer/template details (RFC-002) | Rendering in `ai-engine/render` with Jinja2 + WeasyPrint is resolved; templates still need Marcelo and Amanda's detail work plus the RFC-002 output-quality check | Amanda and Marcelo |
 | Outbound sender identity (RFC-002) | Shared verified domain with the company as display name and `Reply-To` | Amanda and Marcelo |
+| Inbound tenant resolution (RFC-002, ADR-005 section 7) | **Required before production:** the webhook must resolve the tenant from the inbound `to:` address via `resolve_inbound_org`/`inbound_email_alias`. The shipped spike trusts `organization_id` from the (Svix-signed) body as an MVP shortcut — caller-supplied tenant ids must never select a tenant, signed or not | Pedro |
 | Embedding evaluation (RFC-004) | ADR-006 approves `qwen/qwen3-embedding-8b` at 1024 dimensions; retrieval quality still needs evaluation | Pedro and Marcelo |
 | Consent to send tenant data to third-party APIs, including the decision-model vendor (RFC-004) | Unknown | Pilot companies |
 | Wording of the prompt-injection claim in ADR-006 (RFC-004 section 7) | Suggest "limits the blast radius" | Marcelo |

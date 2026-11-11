@@ -49,9 +49,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // inboundPayload is the spike's minimal webhook body. The real contract comes
 // from packages/contracts later; this exists to prove the verify→tx→insert
-// path. Spike-only shortcut: organization_id rides in the payload — production
-// resolves the tenant through the ADR-005 platform path (alias lookup), never
-// trusting caller-supplied tenant ids.
+// path. Spike-only shortcut (MVP, tracked in docs/adr-rfc-plan.md under
+// RFC-002): organization_id rides in the payload. Production must instead
+// resolve the tenant from the inbound `to:` address through the ADR-005
+// platform path — resolve_inbound_org(alias) over inbound_email_alias — and
+// must never trust a caller-supplied tenant id, signed or not.
 type inboundPayload struct {
 	OrganizationID   uuid.UUID       `json:"organization_id"`
 	ResendMessageID  string          `json:"resend_message_id"`
