@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "Rate limit exceeded: 50 requests per minute",
+    "code": 429,
+    "metadata": { "retry_after_seconds": 20 }
+  }
+}

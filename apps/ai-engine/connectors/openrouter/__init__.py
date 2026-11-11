@@ -1,0 +1,91 @@
+"""OpenRouter connector (decisions, chat completions, embeddings).
+
+Public surface: ``OpenRouterClient`` plus the request/response models it
+exchanges across the three surfaces from the ADR-006 model matrix.
+Everything here is untrusted-input aware: responses are schema-validated
+and ``usage.cost`` arrives as ``Decimal``.
+"""
+
+from connectors.openrouter.client import (
+    DEFAULT_TIMEOUT_SECONDS,
+    PROD_BASE_URL,
+    PROD_DECISIONS_URL,
+    OpenRouterClient,
+)
+from connectors.openrouter.errors import (
+    OpenRouterApiError,
+    OpenRouterAuthError,
+    OpenRouterConfigError,
+    OpenRouterError,
+    OpenRouterSchemaError,
+    OpenRouterTransportError,
+)
+from connectors.openrouter.models import (
+    Answer,
+    BoxAnswer,
+    BoxGeometry,
+    BoxQuestion,
+    ChatChoice,
+    ChatChoiceMessage,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    ChatUsage,
+    ChoiceAnswer,
+    ChoiceQuestion,
+    DecideRequest,
+    DecideResponse,
+    DecideUsage,
+    EmbeddingItem,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    EmbeddingUsage,
+    ErrorBody,
+    ErrorEnvelope,
+    NoulAnswer,
+    NoulQuestion,
+    OpenRouterModel,
+    Question,
+    ScoreAnswer,
+    ScoreQuestion,
+)
+
+__all__ = [
+    "DEFAULT_TIMEOUT_SECONDS",
+    "PROD_BASE_URL",
+    "PROD_DECISIONS_URL",
+    "Answer",
+    "BoxAnswer",
+    "BoxGeometry",
+    "BoxQuestion",
+    "ChatChoice",
+    "ChatChoiceMessage",
+    "ChatCompletionRequest",
+    "ChatCompletionResponse",
+    "ChatMessage",
+    "ChatUsage",
+    "ChoiceAnswer",
+    "ChoiceQuestion",
+    "DecideRequest",
+    "DecideResponse",
+    "DecideUsage",
+    "EmbeddingItem",
+    "EmbeddingRequest",
+    "EmbeddingResponse",
+    "EmbeddingUsage",
+    "ErrorBody",
+    "ErrorEnvelope",
+    "NoulAnswer",
+    "NoulQuestion",
+    "OpenRouterApiError",
+    "OpenRouterAuthError",
+    "OpenRouterClient",
+    "OpenRouterConfigError",
+    "OpenRouterError",
+    "OpenRouterModel",
+    "OpenRouterSchemaError",
+    "OpenRouterTransportError",
+    "Question",
+    "ScoreAnswer",
+    "ScoreQuestion",
+]
