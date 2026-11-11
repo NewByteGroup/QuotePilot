@@ -138,6 +138,7 @@ func (e *Endpoints) clearedPair() (access, refresh *http.Cookie) {
 	// MaxAge differ here, which is exactly the browser-delete contract.
 	access = e.accessCookie("")
 	access.MaxAge = -1
+	// #nosec G124 -- same justification as the access cookie above.
 	refresh = e.refreshCookie("")
 	refresh.MaxAge = -1
 	return access, refresh
