@@ -23,4 +23,6 @@ Devin may only change `connectors/**` and `tests/**`.
 
 ## Commands
 
-- `make test-ai` (from the repo root): runs pytest (stub for now).
+- `pip install -e ".[dev]"` — one-time env setup (or `uv pip install -e ".[dev]"`).
+- `make test-ai` (from the repo root, or `make test` here): `pytest` with coverage.
+- `make lint`: `ruff format --check`, `ruff check`, `mypy` (strict).
