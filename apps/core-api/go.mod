@@ -1,6 +1,6 @@
 module github.com/NewByteGroup/QuotePilot/apps/core-api
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1

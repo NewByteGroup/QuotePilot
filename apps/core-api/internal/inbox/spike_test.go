@@ -47,6 +47,7 @@ func TestSpikeInTenantTxSqlcDecimal(t *testing.T) {
 			ResendMessageID:  "msg-decimal-1",
 			Subject:          "decimal roundtrip",
 			DeclaredValueUsd: amount,
+			ReceivedAt:       pgtype.Timestamptz{Time: time.Now(), Valid: true},
 		})
 		require.NoError(t, err)
 		require.Equal(t, int64(1), rows, "first insert must report one row")
