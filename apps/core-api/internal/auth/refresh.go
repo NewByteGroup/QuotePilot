@@ -134,6 +134,8 @@ func (e *Endpoints) refreshUnauthenticated() authapi.PostAuthRefreshResponseObje
 // drift apart — with an empty value and MaxAge=-1, which serializes as
 // "Max-Age=0": the browser-side delete.
 func (e *Endpoints) clearedPair() (access, refresh *http.Cookie) {
+	// #nosec G124 -- the builders' flag set is pinned by test; only Value and
+	// MaxAge differ here, which is exactly the browser-delete contract.
 	access = e.accessCookie("")
 	access.MaxAge = -1
 	refresh = e.refreshCookie("")
