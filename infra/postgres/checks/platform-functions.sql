@@ -129,7 +129,9 @@ BEGIN
     ('app.revoke_session(uuid)'),
     ('app.revoke_session_family_by_hash(text)'),
     ('app.get_membership(uuid, uuid)'),
-    ('app.get_user_profile(uuid)')
+    ('app.get_user_profile(uuid)'),
+    ('app.create_mail_outbox(uuid, text)'),
+    ('app.take_mail_outbox(uuid)')
   ) AS f(fn)
   WHERE to_regprocedure(f.fn) IS NOT NULL
     AND NOT has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
@@ -157,7 +159,9 @@ BEGIN
         ('app.revoke_session(uuid)'),
         ('app.revoke_session_family_by_hash(text)'),
         ('app.get_membership(uuid, uuid)'),
-        ('app.get_user_profile(uuid)')
+        ('app.get_user_profile(uuid)'),
+        ('app.create_mail_outbox(uuid, text)'),
+        ('app.take_mail_outbox(uuid)')
       ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_app EXECUTE surface in app must equal the tenant-function allowlist; extra: %', bad;
@@ -172,7 +176,8 @@ BEGIN
     ('app.users'),
     ('app.organization_memberships'),
     ('app.auth_login_tokens'),
-    ('app.auth_sessions')
+    ('app.auth_sessions'),
+    ('app.auth_mail_outbox')
   ) AS t(tbl)
   CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) AS p(priv)
   WHERE to_regclass(t.tbl) IS NOT NULL

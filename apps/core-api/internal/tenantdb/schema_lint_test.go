@@ -35,6 +35,7 @@ var tenantPolicyAllowlist = []string{"organization_memberships"}
 // edited on purpose (ADR-008 section 3).
 var platformTablesNoRLS = []string{
 	"auth_login_tokens",
+	"auth_mail_outbox",
 	"auth_sessions",
 	"connectors",
 	"goose_db_version",
@@ -49,7 +50,7 @@ var platformTablesNoRLS = []string{
 // the only path in (spec section 3, tenant-resolution spec section 3.2).
 var layerATables = []string{
 	"organizations", "users", "organization_memberships",
-	"auth_login_tokens", "auth_sessions",
+	"auth_login_tokens", "auth_sessions", "auth_mail_outbox",
 }
 
 // layerCTables keep SELECT but no writes for qp_app (spec section 5).
@@ -75,6 +76,8 @@ var tenantFunctions = []string{
 	"app.revoke_session_family_by_hash(text)",
 	"app.get_membership(uuid, uuid)",
 	"app.get_user_profile(uuid)",
+	"app.create_mail_outbox(uuid, text)",
+	"app.take_mail_outbox(uuid)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;
