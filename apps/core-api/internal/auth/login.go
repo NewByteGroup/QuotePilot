@@ -129,7 +129,11 @@ func (e *Endpoints) deliverMagicLink(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
-	go e.sendMagicLink(context.WithoutCancel(ctx), email, magicLinkURL(e.cfg.WebURL, token))
+	e.detached.Add(1)
+	go func() {
+		defer e.detached.Done()
+		e.sendMagicLink(context.WithoutCancel(ctx), email, magicLinkURL(e.cfg.WebURL, token))
+	}()
 	return nil
 }
 

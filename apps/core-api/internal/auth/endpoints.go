@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
@@ -36,6 +37,10 @@ type Endpoints struct {
 	ipLimiter    *platform.Limiter
 	emailLimiter *platform.Limiter
 	now          func() time.Time
+	// detached counts in-flight detached work (the off-response magic-link
+	// send today) so cmd/server's shutdown window can drain it instead of
+	// stranding a stored token its owner never received.
+	detached sync.WaitGroup
 }
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)
@@ -115,6 +120,24 @@ func limitBody(next http.Handler) http.Handler {
 		r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// WaitDetached blocks until every detached delivery finishes or ctx
+// expires — cmd/server calls it inside the shutdown window after
+// http.Server.Shutdown, so a sign-in mail is never killed mid-send while
+// its token already sits stored. false means the window expired with
+// sends still running.
+//
+//	if !endpoints.WaitDetached(shutCtx) { /* sends still running */ }
+func (e *Endpoints) WaitDetached(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() { e.detached.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // writeBadRequest turns a JSON-bind failure into the uniform 400 (spec

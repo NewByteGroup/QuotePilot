@@ -24,7 +24,9 @@ const resendTimeout = 10 * time.Second
 
 // MailSender delivers the magic-link email. Production uses
 // ResendMailSender; tests use FakeMailSender (mail_fake.go). The login
-// token travels inside the url argument — implementations must not log it.
+// token travels inside the url argument — implementations must not log it,
+// except LogMailSender (mail_log.go): the dev-only sender whose entire
+// purpose is surfacing the link where no mailbox exists.
 type MailSender interface {
 	SendMagicLink(ctx context.Context, to, url string) error
 }
