@@ -326,34 +326,44 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 //		return err
 //	})
 func (s *Store) GetCurrentOrganization(ctx context.Context) (Organization, bool, error) {
-	var (
-		id                *uuid.UUID
-		name, slug, alias *string
-		branding          json.RawMessage
-	)
+	var row orgRow
 	err := s.q.QueryRow(ctx, `
 		SELECT id, name, slug, inbound_email_alias, branding_json
 		FROM app.get_current_organization()`).
-		Scan(&id, &name, &slug, &alias, &branding)
+		Scan(&row.id, &row.name, &row.slug, &row.alias, &row.branding)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, false, nil
 	}
 	if err != nil {
 		return Organization{}, false, fmt.Errorf("platform: get_current_organization: %w", err)
 	}
-	if id == nil {
+	return row.organization()
+}
+
+// orgRow is the nullable composite app.get_current_organization() emits:
+// all-NULL outside a tenant context (a miss), NULL-free inside one — a NULL
+// column beside a non-NULL id is driver contract drift, not a missing org.
+type orgRow struct {
+	id                *uuid.UUID
+	name, slug, alias *string
+	branding          json.RawMessage
+}
+
+// organization maps the scanned row onto the Organization result;
+// found=false is the all-NULL composite the function emits outside a
+// tenant context.
+func (r orgRow) organization() (Organization, bool, error) {
+	if r.id == nil {
 		return Organization{}, false, nil
 	}
-	// name/slug/alias are NOT NULL columns; a NULL alongside a non-NULL id is
-	// driver contract drift, answered as an error rather than a nil deref.
-	if name == nil || slug == nil || alias == nil {
-		return Organization{}, false, fmt.Errorf("platform: get_current_organization: null column in row %s", *id)
+	if r.name == nil || r.slug == nil || r.alias == nil {
+		return Organization{}, false, fmt.Errorf("platform: get_current_organization: null column in row %s", *r.id)
 	}
 	return Organization{
-		ID:                *id,
-		Name:              *name,
-		Slug:              *slug,
-		InboundEmailAlias: *alias,
-		Branding:          branding,
+		ID:                *r.id,
+		Name:              *r.name,
+		Slug:              *r.slug,
+		InboundEmailAlias: *r.alias,
+		Branding:          r.branding,
 	}, true, nil
 }

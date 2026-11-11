@@ -23,25 +23,41 @@ import (
 // An absent org or role context means the route was mis-mounted without the
 // chain's tail; it fails closed with the same 401 the middleware emits —
 // me.go's rule: a request that skipped authentication is unauthenticated,
-// not a server fault. (Org and role are planted together, so the role check
-// can only trip on a partial mount that cannot be built through the public
-// chain today — it is checked anyway so a future planter that separates them
-// still denies.)
+// not a server fault.
+//
+//	resp, err := endpoints.GetMeOrganization(ctx, authapi.GetMeOrganizationRequestObject{})
 func (e *Endpoints) GetMeOrganization(
 	ctx context.Context,
 	_ authapi.GetMeOrganizationRequestObject,
 ) (authapi.GetMeOrganizationResponseObject, error) {
-	orgID, ok := platform.OrgID(ctx)
+	orgID, ok := meOrgContext(ctx)
 	if !ok {
-		return meOrgUnauthenticated(), nil
-	}
-	if _, ok := platform.Role(ctx); !ok {
 		return meOrgUnauthenticated(), nil
 	}
 	org, err := e.currentOrganization(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
+	return orgResponse(org)
+}
+
+// meOrgContext reads the pair ResolveTenant planted; ok=false means the
+// route was mis-mounted. Org and role are planted together, so a missing
+// role can only come from a partial mount the public chain cannot build
+// today — it is checked anyway so a future planter that separates them
+// still denies.
+func meOrgContext(ctx context.Context) (uuid.UUID, bool) {
+	orgID, ok := platform.OrgID(ctx)
+	if !ok {
+		return uuid.Nil, false
+	}
+	_, ok = platform.Role(ctx)
+	return orgID, ok
+}
+
+// orgResponse maps the registry row onto the contract shape; branding_json
+// decodes through orgBranding's drift checks.
+func orgResponse(org platform.Organization) (authapi.GetMeOrganizationResponseObject, error) {
 	branding, err := orgBranding(org.Branding)
 	if err != nil {
 		return nil, err
