@@ -130,7 +130,8 @@ func TestSchemaEnforcementAuthLookup(t *testing.T) {
 		`SELECT * FROM app.get_user_profile(gen_random_uuid())`,
 		`SELECT * FROM app.list_memberships_for_email('x@test.dev')`,
 		`SELECT app.create_mail_outbox(gen_random_uuid(), 'https://x.test/l')`,
-		`SELECT app.take_mail_outbox(gen_random_uuid())`,
+		`SELECT app.read_mail_outbox(gen_random_uuid())`,
+		`SELECT app.delete_mail_outbox(gen_random_uuid())`,
 	} {
 		_, err := admin.Pool().Exec(ctx, call)
 		require.Error(t, err, "qp_admin must not EXECUTE %s", call)

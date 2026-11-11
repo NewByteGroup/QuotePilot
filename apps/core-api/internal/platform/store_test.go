@@ -1,6 +1,6 @@
 package platform_test
 
-// Store accessors over the real migration-0003 function family (spec
+// Store accessors over the real Layer A function family (spec
 // 2026-11-10-tenant-resolution-api sections 5 and 9): found/not-found for
 // every accessor plus the rotate three-outcome mapping, all as qp_app with
 // Layer A rows seeded as qp_migrator — qp_app holds no table privilege on
@@ -365,10 +365,11 @@ func resolveCases(slug string, orgID uuid.UUID) map[string]resolveCase {
 }
 
 // TestStoreMailOutboxLifecycle proves the durable-send contract (migration
-// 0004): create returns the outbox id, take hands the link out exactly once
-// — take-once DELETE ... RETURNING makes double-delivery impossible — an
-// absent id collapses to ("", false, nil), and the function refuses an
-// empty link_url, which would queue a send that can never deliver.
+// 0004): create returns the outbox id, read is idempotent so a retried
+// worker sees the same link, delete is the post-send receipt, and an
+// absent id collapses to ("", false, nil). Empty and whitespace-only
+// link_urls are refused — either would queue a send that can never
+// deliver.
 func TestStoreMailOutboxLifecycle(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()
@@ -381,23 +382,34 @@ func TestStoreMailOutboxLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, uuid.Nil, outboxID)
 
-	gotLink, ok := takeOutbox(t, store, outboxID)
+	gotLink, ok := readOutbox(t, store, outboxID)
 	require.True(t, ok)
 	assert.Equal(t, link, gotLink)
 
-	_, ok = takeOutbox(t, store, outboxID)
-	assert.False(t, ok, "take-once: the row is gone after the first take")
-	_, ok = takeOutbox(t, store, uuid.New())
+	_, ok = readOutbox(t, store, outboxID)
+	assert.True(t, ok, "read is idempotent — a retried worker sees the same link")
+	deleted, err := store.DeleteMailOutbox(ctx, outboxID)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+
+	_, ok = readOutbox(t, store, outboxID)
+	assert.False(t, ok, "delete-on-send: the row is gone after the receipt")
+	_, ok = readOutbox(t, store, uuid.New())
 	assert.False(t, ok, "an absent id is (\"\", false, nil), never an error")
-	_, err = store.CreateMailOutbox(ctx, tokenID, "")
-	require.Error(t, err, "an empty link_url must be refused")
+	deleted, err = store.DeleteMailOutbox(ctx, uuid.New())
+	require.NoError(t, err)
+	assert.False(t, deleted, "deleting an absent row is false, not an error")
+	for _, bad := range []string{"", "   "} {
+		_, err = store.CreateMailOutbox(ctx, tokenID, bad)
+		require.Error(t, err, "a blank link_url must be refused, got %q", bad)
+	}
 }
 
-// takeOutbox runs one TakeMailOutbox and asserts the error leg away, so the
+// readOutbox runs one ReadMailOutbox and asserts the error leg away, so the
 // lifecycle test reads as (link, ok) pairs only.
-func takeOutbox(t *testing.T, store *platform.Store, id uuid.UUID) (string, bool) {
+func readOutbox(t *testing.T, store *platform.Store, id uuid.UUID) (string, bool) {
 	t.Helper()
-	link, ok, err := store.TakeMailOutbox(context.Background(), id)
+	link, ok, err := store.ReadMailOutbox(context.Background(), id)
 	require.NoError(t, err)
 	return link, ok
 }

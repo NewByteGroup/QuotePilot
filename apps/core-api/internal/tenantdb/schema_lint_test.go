@@ -77,7 +77,8 @@ var tenantFunctions = []string{
 	"app.get_membership(uuid, uuid)",
 	"app.get_user_profile(uuid)",
 	"app.create_mail_outbox(uuid, text)",
-	"app.take_mail_outbox(uuid)",
+	"app.read_mail_outbox(uuid)",
+	"app.delete_mail_outbox(uuid)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;

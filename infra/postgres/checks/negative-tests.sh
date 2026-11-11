@@ -229,6 +229,7 @@ run_case_if "$ROLES_SQL" "app.get_user_profile(uuid)"                 "93 anon E
 run_case_if "$ROLES_SQL" "app.consume_login_token(text)"              "94 anon SELECT auth_sessions"         "[H1]" 'GRANT SELECT ON app.auth_sessions TO anon;'
 run_case_if "$ROLES_SQL" "app.consume_login_token(text)"              "95 PUBLIC SELECT auth_login_tokens"   "[H4]" 'GRANT SELECT ON app.auth_login_tokens TO PUBLIC;'
 run_case_if "$PLATFORM_SQL" "app.revoke_session_family_by_hash(text)" "96 qp_admin EXECUTE revoke_session_family_by_hash" "[N]" 'GRANT EXECUTE ON FUNCTION app.revoke_session_family_by_hash(text) TO qp_admin;'
+run_case_if "$PLATFORM_SQL" "app.read_mail_outbox(uuid)"              "97 qp_app SELECT on auth_mail_outbox"  "[N]" 'GRANT SELECT ON app.auth_mail_outbox TO qp_app;'
 
 echo
 echo "negative tests: $passed passed, $failed failed, $skipped skipped"

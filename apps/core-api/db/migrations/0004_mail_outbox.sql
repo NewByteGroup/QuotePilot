@@ -12,22 +12,26 @@
 -- link_url is a live credential: the URL embeds the unhashed login token,
 -- so reading this table is equivalent to minting a session. That is the
 -- same exposure class qp_app already holds via EXECUTE on
--- app.create_login_token — it can mint a token for any user — and the
--- at-rest copy is bounded two ways: the embedded token dies with
--- auth_login_tokens.expires_at (the login TTL), and delete-on-take
--- (take_mail_outbox) removes the row at first claim, so the table ever
--- holds only pending sends. A River job arg carries the outbox id, never
--- the link: river_job args are qp_app-readable at rest, so a URL there
--- would be a second live-credential copy outside this retention story.
+-- app.create_login_token — it can mint a token for any user; honestly,
+-- EXECUTE on create_session is strictly stronger — and the at-rest copy
+-- is bounded two ways: the embedded token dies with
+-- auth_login_tokens.expires_at (the login TTL), and delete-on-send keeps
+-- the table holding only pending sends. A River job arg carries the
+-- outbox id, never the link: river_job args are qp_app-readable at rest,
+-- so a URL there would be a second live-credential copy outside this
+-- retention story. A compromised qp_app could still harvest pending links
+-- through read_mail_outbox — the honest residual, bounded by TTL and
+-- pending-send volume.
 
 -- +goose Up
 
 -- =========================================================================
 -- 1. The outbox table. No RLS and no qp_app grant — functions only, the
 -- Layer A pattern. login_token_id is NO ACTION like the 0003 FK: the token
--- row is the audit record and an unclaimed link dies with it. No index —
--- delete-on-take keeps the table at pending-send size, so a sweeper's
--- sequential scan costs nothing.
+-- row is the audit record, and an undelivered outbox row blocks its
+-- deletion rather than orphaning. No index — delete-on-send keeps the
+-- table at pending-send size, so a sweeper's sequential scan costs
+-- nothing.
 -- =========================================================================
 -- +goose StatementBegin
 CREATE TABLE app.auth_mail_outbox (
@@ -41,8 +45,16 @@ REVOKE ALL ON app.auth_mail_outbox FROM qp_app;
 -- +goose StatementEnd
 
 -- =========================================================================
--- 2. The outbox function family: create then take-once. Same grant split
--- as the 0003 auth family — qp_app only, nothing for qp_admin or PUBLIC.
+-- 2. The outbox function family: create, read, delete-on-send. Same grant
+-- split as the 0003 auth family — qp_app only, nothing for qp_admin or
+-- PUBLIC. Delivery is at-least-once by design: the worker reads the link,
+-- sends, then deletes — River retries a failed send naturally because the
+-- row only disappears after Resend accepts. The one residual is a crash
+-- between send and delete, which resends the SAME link — harmless, the
+-- link is identical and the token is single-use on consume. The
+-- alternatives were rejected: delete-on-take loses the link silently on a
+-- post-take crash (a NULL take completes the job), and job args carrying
+-- the URL would put a second live credential in river_job.
 -- =========================================================================
 
 -- create_mail_outbox: the login path's write — executed in the same
@@ -75,24 +87,39 @@ REVOKE EXECUTE ON FUNCTION app.create_mail_outbox(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.create_mail_outbox(uuid, text) TO qp_app;
 -- +goose StatementEnd
 
--- take_mail_outbox: the worker's claim. DELETE ... RETURNING makes the
--- handoff atomic and take-once — a retried or double-run worker cannot
--- send the same link twice. NULL covers absent ids indistinguishably
--- (never queued or already taken): the caller cannot oracle which, and
--- does not need to. LANGUAGE sql carries the contract in one statement.
+-- read_mail_outbox: the worker's claim. A NULL answer means the job is
+-- done — the row was already sent and deleted, or never queued — and
+-- says nothing else by design.
 -- +goose StatementBegin
-CREATE FUNCTION app.take_mail_outbox(p_id uuid) RETURNS text
+CREATE FUNCTION app.read_mail_outbox(p_id uuid) RETURNS text
+    LANGUAGE sql
+    SECURITY DEFINER
+    SET search_path = app
+AS $fn$
+    SELECT m.link_url FROM app.auth_mail_outbox AS m
+    WHERE m.id = p_id;
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION app.read_mail_outbox(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.read_mail_outbox(uuid) TO qp_app;
+-- +goose StatementEnd
+
+-- delete_mail_outbox: the delivery receipt, executed only after a
+-- successful send. Returns whether a row existed — a missing row is
+-- already the goal, so the caller treats false as done, not error.
+-- +goose StatementBegin
+CREATE FUNCTION app.delete_mail_outbox(p_id uuid) RETURNS boolean
     LANGUAGE sql
     SECURITY DEFINER
     SET search_path = app
 AS $fn$
     DELETE FROM app.auth_mail_outbox AS m
     WHERE m.id = p_id
-    RETURNING m.link_url;
+    RETURNING true;
 $fn$;
 
-REVOKE EXECUTE ON FUNCTION app.take_mail_outbox(uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.take_mail_outbox(uuid) TO qp_app;
+REVOKE EXECUTE ON FUNCTION app.delete_mail_outbox(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.delete_mail_outbox(uuid) TO qp_app;
 -- +goose StatementEnd
 
 -- =========================================================================
@@ -100,7 +127,8 @@ GRANT EXECUTE ON FUNCTION app.take_mail_outbox(uuid) TO qp_app;
 -- Functions first (their bodies depend on the table), then the table.
 -- =========================================================================
 -- +goose StatementBegin
-DROP FUNCTION app.take_mail_outbox(uuid);
+DROP FUNCTION app.delete_mail_outbox(uuid);
+DROP FUNCTION app.read_mail_outbox(uuid);
 DROP FUNCTION app.create_mail_outbox(uuid, text);
 -- +goose StatementEnd
 

@@ -12,9 +12,9 @@ import (
 )
 
 // Querier is the narrow slice of pgx the Store needs; *pgxpool.Pool and
-// pgx.Tx both satisfy it. Every query runs as qp_app against the
-// migration-0003 SECURITY DEFINER family — the only path to the Layer A
-// auth tables (spec section 5: qp_app holds no table privilege on them).
+// pgx.Tx both satisfy it. Every query runs as qp_app against the Layer A
+// SECURITY DEFINER family (migrations 0003+) — the only path to the auth
+// tables (spec section 5: qp_app holds no table privilege on them).
 type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -41,7 +41,7 @@ type Organization struct {
 	Branding          json.RawMessage
 }
 
-// Store wraps the migration-0003 function family in typed methods (spec
+// Store wraps the Layer A function family in typed methods (spec
 // section 6). NULL results and empty sets become (zero, false, nil) so
 // callers never handle pgx NULLs — the indistinguishability spec section 7
 // requires is preserved by returning found=false, never an error, for an
@@ -334,7 +334,8 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 // migration-0004 half of durable delivery, meant to run in the same
 // transaction as CreateLoginToken and the River enqueue so a token is never
 // minted without its send. The link is a live credential bounded by the
-// token's TTL; the row lives only until TakeMailOutbox claims it.
+// token's TTL; the row lives only until DeleteMailOutbox follows a
+// successful send.
 //
 //	outboxID, err := store.CreateMailOutbox(ctx, tokenID, link)
 func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link string) (uuid.UUID, error) {
@@ -347,22 +348,36 @@ func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link st
 	return id, nil
 }
 
-// TakeMailOutbox claims one pending send. The function's DELETE ...
-// RETURNING hands the link out exactly once — take-once semantics make
-// double-delivery impossible — so a second take, or an id that was never
-// queued, is ("", false, nil), never an error.
+// ReadMailOutbox returns one pending send's link. Idempotent reads are the
+// point: a River retry re-reads the row its predecessor crashed before
+// deleting, so delivery is at-least-once and a resent link is the SAME
+// link. ok=false means the job is done — already sent, or never queued —
+// never an error.
 //
-//	link, ok, err := store.TakeMailOutbox(ctx, outboxID)
-func (s *Store) TakeMailOutbox(ctx context.Context, id uuid.UUID) (string, bool, error) {
+//	link, ok, err := store.ReadMailOutbox(ctx, outboxID)
+func (s *Store) ReadMailOutbox(ctx context.Context, id uuid.UUID) (string, bool, error) {
 	var link *string
-	err := s.q.QueryRow(ctx, `SELECT app.take_mail_outbox($1)`, id).Scan(&link)
+	err := s.q.QueryRow(ctx, `SELECT app.read_mail_outbox($1)`, id).Scan(&link)
 	if err != nil {
-		return "", false, fmt.Errorf("platform: take_mail_outbox: %w", err)
+		return "", false, fmt.Errorf("platform: read_mail_outbox: %w", err)
 	}
 	if link == nil {
 		return "", false, nil
 	}
 	return *link, true, nil
+}
+
+// DeleteMailOutbox is the delivery receipt: called only after the send
+// succeeds. Idempotent — ok=false just means the row is already gone.
+//
+//	deleted, err := store.DeleteMailOutbox(ctx, outboxID)
+func (s *Store) DeleteMailOutbox(ctx context.Context, id uuid.UUID) (bool, error) {
+	var deleted *bool
+	err := s.q.QueryRow(ctx, `SELECT app.delete_mail_outbox($1)`, id).Scan(&deleted)
+	if err != nil {
+		return false, fmt.Errorf("platform: delete_mail_outbox: %w", err)
+	}
+	return deleted != nil, nil
 }
 
 // GetCurrentOrganization reads the resolved tenant's registry row through
