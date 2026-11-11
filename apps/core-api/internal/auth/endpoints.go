@@ -67,18 +67,19 @@ func NewEndpoints(
 }
 
 // NewServer mounts the endpoints exactly as production will (authapi/doc.go):
-// the strict handler carries ExtractClientIP plus the two strict hooks, and
-// the std wrapper carries the binding-failure hook, so every rejection is one
-// of the spec section 7 {"error": ...} bodies — never http.Error text. The
-// returned handler routes all six contract paths itself and caps JSON bodies
-// before the generated binder can read them; cmd/server mounts it alongside
-// the inbox surface.
+// the strict handler carries the ctx-planting pair (ExtractClientIP for the
+// login limiter, ExtractRefreshCookie for the refresh/logout cookie) plus
+// the two strict hooks, and the std wrapper carries the binding-failure
+// hook, so every rejection is one of the spec section 7 {"error": ...}
+// bodies — never http.Error text. The returned handler routes all six
+// contract paths itself and caps JSON bodies before the generated binder
+// can read them; cmd/server mounts it alongside the inbox surface.
 //
 //	http.ListenAndServe(addr, auth.NewServer(endpoints))
 func NewServer(endpoints *Endpoints) http.Handler {
 	strict := authapi.NewStrictHandlerWithOptions(
 		endpoints,
-		[]authapi.StrictMiddlewareFunc{ExtractClientIP},
+		[]authapi.StrictMiddlewareFunc{ExtractClientIP, ExtractRefreshCookie},
 		authapi.StrictHTTPServerOptions{
 			RequestErrorHandlerFunc:  writeBadRequest,
 			ResponseErrorHandlerFunc: writeInternal,
@@ -136,11 +137,7 @@ func writeError(w http.ResponseWriter, status int, code authapi.ErrorCode) {
 // errUnimplemented answers a call to an endpoint whose PR has not landed —
 // the route is mounted (the contract mounts all six), so a stray call must
 // fail loudly through the uniform 500 rather than silently 200 or 204.
-var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PRs C3–C6")
-
-func (e *Endpoints) PostAuthRefresh(context.Context, authapi.PostAuthRefreshRequestObject) (authapi.PostAuthRefreshResponseObject, error) {
-	return nil, errUnimplemented
-}
+var errUnimplemented = errors.New("auth: endpoint not implemented yet — lands in PRs C4–C6")
 
 func (e *Endpoints) PostAuthLogout(context.Context, authapi.PostAuthLogoutRequestObject) (authapi.PostAuthLogoutResponseObject, error) {
 	return nil, errUnimplemented
