@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/shopspring/decimal"
 
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox/inboxdb"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
 )
@@ -70,19 +71,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// inboundPayload is the webhook body. The tenant never arrives in it: `to`
-// is resolved through resolve_inbound_org (ADR-005 section 7), so a signed
-// or forged caller cannot pick an organization. The real Resend
-// email.received contract comes from packages/contracts later; this minimal
-// shape proves verify→resolve→tx→insert. MVP gaps tracked in
-// docs/adr-rfc-plan.md under RFC-002: unmatched and multi-org messages are
-// logged, not yet persisted in a platform quarantine/counter.
-type inboundPayload struct {
-	To               []string        `json:"to"`
-	ResendMessageID  string          `json:"resend_message_id"`
-	Subject          string          `json:"subject"`
-	DeclaredValueUSD decimal.Decimal `json:"declared_value_usd"`
-}
+// The webhook body decodes into authapi.ResendEmailReceived — Resend's
+// documented email.received envelope, fixed in
+// packages/contracts/openapi/core-api.yaml (schemas only: the route stays
+// hand-mounted because Svix verifies the RAW body before any binding). The
+// tenant never arrives in it: `data.to` is resolved through
+// resolve_inbound_org (ADR-005 section 7), so a signed or forged caller
+// cannot pick an organization. MVP gaps tracked in docs/adr-rfc-plan.md
+// under RFC-002: unmatched and multi-org messages are logged, not yet
+// persisted in a platform quarantine/counter; body, headers and attachment
+// bytes are fetched through the Receiving/Attachments APIs by the ingest
+// job (the webhook is metadata only), and `data.created_at` is not yet
+// persisted — the insert has no received_at param, so the column default
+// now() applies until the data-model change lands it.
 
 // handleResendInbound runs the ADR-005 section 7 pipeline: verify, resolve
 // tenants from the recipients, then either store under the single matched
@@ -92,10 +93,10 @@ func (s *Server) handleResendInbound(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	orgs, err := s.resolveOrgs(r.Context(), payload.To)
+	orgs, err := s.resolveOrgs(r.Context(), payload.Data.To)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "inbound tenant resolution failed",
-			"correlation_id", payload.ResendMessageID, "error", err)
+			"correlation_id", payload.Data.EmailID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -110,20 +111,20 @@ func (s *Server) handleResendInbound(w http.ResponseWriter, r *http.Request) {
 // Svix signature before anything else (an unauthenticated caller must not
 // reach the database — gate criterion 5), then body validation. false means
 // the denial is already written.
-func (s *Server) verifiedPayload(w http.ResponseWriter, r *http.Request) (inboundPayload, bool) {
+func (s *Server) verifiedPayload(w http.ResponseWriter, r *http.Request) (authapi.ResendEmailReceived, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
 	if err != nil {
 		http.Error(w, "unreadable or oversized body (max 1 MiB)", http.StatusBadRequest)
-		return inboundPayload{}, false
+		return authapi.ResendEmailReceived{}, false
 	}
 	if err := s.verifier.Verify(body, r.Header); err != nil {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return inboundPayload{}, false
+		return authapi.ResendEmailReceived{}, false
 	}
 	payload, err := parseInboundPayload(body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return inboundPayload{}, false
+		return authapi.ResendEmailReceived{}, false
 	}
 	return payload, true
 }
@@ -154,10 +155,10 @@ func (s *Server) resolveOrgs(ctx context.Context, recipients []string) ([]uuid.U
 // Recipients and match count are logged for ops; the quarantine row and
 // unmatched counter the ADR reserves need schema and are tracked under
 // RFC-002.
-func (s *Server) drop(w http.ResponseWriter, r *http.Request, p inboundPayload, orgs []uuid.UUID) {
+func (s *Server) drop(w http.ResponseWriter, r *http.Request, p authapi.ResendEmailReceived, orgs []uuid.UUID) {
 	s.logger.WarnContext(r.Context(), "inbound message dropped — no unique tenant match",
-		"correlation_id", p.ResendMessageID,
-		"recipients", p.To,
+		"correlation_id", p.Data.EmailID,
+		"recipients", p.Data.To,
 		"matched_orgs", len(orgs))
 	w.Header().Set(abortDeliveryHeader, abortDeliveryValue)
 	s.writeResult(w, r, p, `{"inserted":false,"dropped":true}`)
@@ -165,11 +166,11 @@ func (s *Server) drop(w http.ResponseWriter, r *http.Request, p inboundPayload, 
 
 // store performs the idempotent insert inside the tenant transaction and
 // answers the result envelope.
-func (s *Server) store(w http.ResponseWriter, r *http.Request, p inboundPayload, org uuid.UUID) {
+func (s *Server) store(w http.ResponseWriter, r *http.Request, p authapi.ResendEmailReceived, org uuid.UUID) {
 	inserted, err := s.storeInbound(r.Context(), org, p)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "inbound store failed",
-			"correlation_id", p.ResendMessageID, "error", err)
+			"correlation_id", p.Data.EmailID, "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -178,44 +179,46 @@ func (s *Server) store(w http.ResponseWriter, r *http.Request, p inboundPayload,
 
 // writeResult emits the JSON result envelope; a write failure is logged,
 // never retried — the delivery is already decided.
-func (s *Server) writeResult(w http.ResponseWriter, r *http.Request, p inboundPayload, body string) {
+func (s *Server) writeResult(w http.ResponseWriter, r *http.Request, p authapi.ResendEmailReceived, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	if _, err := w.Write([]byte(body)); err != nil {
 		s.logger.ErrorContext(r.Context(), "write response failed",
-			"correlation_id", p.ResendMessageID, "error", err)
+			"correlation_id", p.Data.EmailID, "error", err)
 	}
 }
 
 // parseInboundPayload validates the decoded body; every failure maps to a
 // 400, never a DB call.
-func parseInboundPayload(body []byte) (inboundPayload, error) {
-	var p inboundPayload
+func parseInboundPayload(body []byte) (authapi.ResendEmailReceived, error) {
+	var p authapi.ResendEmailReceived
 	if err := json.Unmarshal(body, &p); err != nil {
 		return p, fmt.Errorf("invalid json payload: %w", err)
 	}
-	return p, p.validate()
+	return p, validateInboundPayload(p)
 }
 
-// validate enforces the fields the handler depends on: at least one
-// recipient to resolve (bounded by maxRecipients), a message id to dedupe
-// on, a non-negative amount.
-func (p inboundPayload) validate() error {
-	if len(p.To) == 0 {
-		return fmt.Errorf("to must list at least one recipient address, got %v", p.To)
+// validateInboundPayload enforces the fields the handler depends on: the
+// email.received discriminator (anything else means a misconfigured
+// endpoint, so 400 rather than a silent store or a retry loop), at least
+// one recipient to resolve (bounded by maxRecipients) and an email_id to
+// dedupe on.
+func validateInboundPayload(p authapi.ResendEmailReceived) error {
+	if p.Type != authapi.EmailReceived {
+		return fmt.Errorf("type must be %q, got %q", authapi.EmailReceived, p.Type)
 	}
-	if len(p.To) > maxRecipients {
-		return fmt.Errorf("to lists %d recipients, max %d", len(p.To), maxRecipients)
+	if len(p.Data.To) == 0 {
+		return fmt.Errorf("data.to must list at least one recipient address, got %v", p.Data.To)
 	}
-	for _, to := range p.To {
+	if len(p.Data.To) > maxRecipients {
+		return fmt.Errorf("data.to lists %d recipients, max %d", len(p.Data.To), maxRecipients)
+	}
+	for _, to := range p.Data.To {
 		if strings.TrimSpace(to) == "" {
-			return fmt.Errorf("to entries must be non-empty addresses, got %q", to)
+			return fmt.Errorf("data.to entries must be non-empty addresses, got %q", to)
 		}
 	}
-	if p.ResendMessageID == "" {
-		return errors.New("resend_message_id must be a non-empty string")
-	}
-	if p.DeclaredValueUSD.IsNegative() {
-		return fmt.Errorf("declared_value_usd must be >= 0, got %s", p.DeclaredValueUSD)
+	if p.Data.EmailID == "" {
+		return errors.New("data.email_id must be a non-empty string")
 	}
 	return nil
 }
@@ -223,20 +226,23 @@ func (p inboundPayload) validate() error {
 // storeInbound performs the idempotent insert inside the tenant transaction.
 // The unique key (organization_id, resend_message_id) makes webhook replays
 // free; rows=0 means a replay, rows=1 a first insert.
-func (s *Server) storeInbound(ctx context.Context, org uuid.UUID, p inboundPayload) (bool, error) {
+func (s *Server) storeInbound(ctx context.Context, org uuid.UUID, p authapi.ResendEmailReceived) (bool, error) {
 	var rows int64
 	err := s.runner.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		rows, err = inboxdb.New(tx).InsertInboundMessage(ctx, inboxdb.InsertInboundMessageParams{
-			OrganizationID:   pgtype.UUID{Bytes: org, Valid: true},
-			ResendMessageID:  p.ResendMessageID,
-			Subject:          p.Subject,
-			DeclaredValueUsd: p.DeclaredValueUSD,
+			OrganizationID:  pgtype.UUID{Bytes: org, Valid: true},
+			ResendMessageID: p.Data.EmailID,
+			Subject:         p.Data.Subject,
+			// The Resend payload carries no declared value: the column is
+			// NOT NULL DEFAULT 0, so insert zero until the data-model
+			// change decides where the value comes from (RFC-002).
+			DeclaredValueUsd: decimal.Zero,
 		})
 		return err
 	})
 	if err != nil {
-		return false, fmt.Errorf("inbox: store inbound message %q: %w", p.ResendMessageID, err)
+		return false, fmt.Errorf("inbox: store inbound message %q: %w", p.Data.EmailID, err)
 	}
 	return rows == 1, nil
 }

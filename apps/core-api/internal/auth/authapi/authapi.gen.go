@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/oapi-codegen/runtime"
 )
@@ -78,6 +79,21 @@ func (e MembershipRole) Valid() bool {
 	case OWNER:
 		return true
 	case PRICINGANALYST:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ResendEmailReceivedType.
+const (
+	EmailReceived ResendEmailReceivedType = "email.received"
+)
+
+// Valid indicates whether the value is a known member of the ResendEmailReceivedType enum.
+func (e ResendEmailReceivedType) Valid() bool {
+	switch e {
+	case EmailReceived:
 		return true
 	default:
 		return false
@@ -158,6 +174,97 @@ type OrganizationResponse struct {
 	InboundEmailAlias string `json:"inbound_email_alias"`
 	Name              string `json:"name"`
 	Slug              string `json:"slug"`
+}
+
+// ResendAttachment defines model for ResendAttachment.
+type ResendAttachment struct {
+	// ContentDisposition `inline` or `attachment`.
+	ContentDisposition *string `json:"content_disposition,omitempty"`
+
+	// ContentID Content-ID of inline attachments referenced from the HTML body
+	// (e.g. `img001` for `<img src="cid:img001">`).
+	ContentID *string `json:"content_id,omitempty"`
+
+	// ContentType MIME type (e.g. `application/pdf`).
+	ContentType string `json:"content_type"`
+
+	// Filename Original filename (e.g. `rfq.pdf`).
+	Filename string `json:"filename"`
+
+	// ID Attachment identifier accepted by the Attachments API.
+	ID string `json:"id"`
+}
+
+// ResendEmailReceived defines model for ResendEmailReceived.
+type ResendEmailReceived struct {
+	// CreatedAt ISO 8601 timestamp when the webhook event was created.
+	CreatedAt time.Time               `json:"created_at"`
+	Data      ResendEmailReceivedData `json:"data"`
+
+	// Type Event discriminator — fixed `email.received` for this schema.
+	// The inbox handler rejects any other value with 400: a
+	// misconfigured Svix endpoint pointing other events at this route
+	// must fail fast, not be silently stored (2xx) or retried (5xx).
+	Type ResendEmailReceivedType `json:"type"`
+}
+
+// ResendEmailReceivedType Event discriminator — fixed `email.received` for this schema.
+// The inbox handler rejects any other value with 400: a
+// misconfigured Svix endpoint pointing other events at this route
+// must fail fast, not be silently stored (2xx) or retried (5xx).
+type ResendEmailReceivedType string
+
+// ResendEmailReceivedData defines model for ResendEmailReceivedData.
+type ResendEmailReceivedData struct {
+	// Attachments Attachment METADATA only — the bytes are fetched through the
+	// Attachments API (`download_url` expires after one hour, so the
+	// ingest job downloads immediately and never stores it, RFC-002).
+	Attachments *[]ResendAttachment `json:"attachments,omitempty"`
+
+	// Bcc BCC'd addresses (`[]` when none).
+	Bcc *[]string `json:"bcc,omitempty"`
+
+	// BroadcastID Broadcast campaign id — applies to outbound events, not expected
+	// on `email.received`.
+	BroadcastID *string `json:"broadcast_id,omitempty"`
+
+	// Cc CC'd addresses (`[]` when none).
+	Cc *[]string `json:"cc,omitempty"`
+
+	// CreatedAt ISO 8601 timestamp when the email was received.
+	CreatedAt time.Time `json:"created_at"`
+
+	// EmailID Resend's unique email identifier — maps to
+	// `app.inbound_messages.resend_message_id`, the idempotency key of
+	// the (organization_id, resend_message_id) unique constraint.
+	EmailID string `json:"email_id"`
+
+	// From Sender's bare email address on received events; the display name
+	// is preserved in `headers.from` on the retrieve endpoint (RFC-002).
+	From string `json:"from"`
+
+	// MessageID RFC Message-ID header value — absent on events that fire before
+	// the email is sent; present on `email.received`.
+	MessageID *string `json:"message_id,omitempty"`
+
+	// ReceivedFor Addresses the email was forwarded for, taken from the `for`
+	// clause of the message's `Received` headers.
+	ReceivedFor *[]string `json:"received_for,omitempty"`
+
+	// Subject Email subject line (`""` when the mail has none).
+	Subject string `json:"subject"`
+
+	// Tags Tag key-value pairs associated with the email.
+	Tags *map[string]string `json:"tags,omitempty"`
+
+	// TemplateID Template id — applies to outbound events, not expected on
+	// `email.received`.
+	TemplateID *string `json:"template_id,omitempty"`
+
+	// To Recipient addresses — the tenant-resolution input: each entry is
+	// looked up through `resolve_inbound_org` and exactly one
+	// organization must match (ADR-005 section 7).
+	To []string `json:"to"`
 }
 
 // SessionRequest defines model for SessionRequest.

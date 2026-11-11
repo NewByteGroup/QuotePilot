@@ -90,11 +90,28 @@ func TestSpikeWebhook(t *testing.T) {
 	srv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier, testLogger))
 	defer srv.Close()
 
+	// The documented email.received envelope
+	// (https://resend.com/docs/webhooks/emails/received): metadata only —
+	// body and attachment bytes come from the Receiving/Attachments APIs.
 	payload, err := json.Marshal(map[string]any{
-		"to":                 []string{alias},
-		"resend_message_id":  "resend-spike-1",
-		"subject":            "RFQ: 20 boxes Shenzhen",
-		"declared_value_usd": "99.95",
+		"type":       "email.received",
+		"created_at": "2026-11-09T12:00:00.000Z",
+		"data": map[string]any{
+			"email_id":   "resend-spike-1",
+			"created_at": "2026-11-09T11:59:58.000Z",
+			"from":       "customer@example.com",
+			"to":         []string{alias},
+			"cc":         []string{},
+			"bcc":        []string{},
+			"message_id": "<spike-1@mail.example.com>",
+			"subject":    "RFQ: 20 boxes Shenzhen",
+			"attachments": []map[string]any{{
+				"id":                  "att-1",
+				"filename":            "rfq.pdf",
+				"content_type":        "application/pdf",
+				"content_disposition": "attachment",
+			}},
+		},
 	})
 	require.NoError(t, err)
 
