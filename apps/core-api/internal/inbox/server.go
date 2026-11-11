@@ -26,6 +26,19 @@ import (
 // bigger body is an attack or a bug, not a legitimate payload.
 const maxWebhookBody = 1 << 20 // 1 MiB
 
+// maxRecipients bounds the per-recipient resolution loop: each entry costs
+// one platform call, so a signed pathological body must not turn into tens
+// of thousands of sequential queries.
+const maxRecipients = 50
+
+// abortDeliveryHeader is the response header Svix documents for telling the
+// sender to stop retrying a permanently undeliverable message (ADR-005
+// section 7). Header name, then its only value.
+const (
+	abortDeliveryHeader = "webhook-delivery"
+	abortDeliveryValue  = "abort-message"
+)
+
 // OrgResolver is the seam through which the handler asks the platform path
 // who owns an inbound recipient — platform.Store in production, a fake in
 // tests. A miss is ok=false, never an error.
@@ -71,21 +84,12 @@ type inboundPayload struct {
 	DeclaredValueUSD decimal.Decimal `json:"declared_value_usd"`
 }
 
-// handleResendInbound verifies the signature before anything else: an
-// unauthenticated caller must not reach the database (gate criterion 5).
+// handleResendInbound runs the ADR-005 section 7 pipeline: verify, resolve
+// tenants from the recipients, then either store under the single matched
+// org or acknowledge-and-drop.
 func (s *Server) handleResendInbound(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
-	if err != nil {
-		http.Error(w, "unreadable or oversized body (max 1 MiB)", http.StatusBadRequest)
-		return
-	}
-	if err := s.verifier.Verify(body, r.Header); err != nil {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
-	}
-	payload, err := parseInboundPayload(body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	payload, ok := s.verifiedPayload(w, r)
+	if !ok {
 		return
 	}
 	orgs, err := s.resolveOrgs(r.Context(), payload.To)
@@ -100,6 +104,28 @@ func (s *Server) handleResendInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store(w, r, payload, orgs[0])
+}
+
+// verifiedPayload is the unauthenticated front of the pipeline: body cap,
+// Svix signature before anything else (an unauthenticated caller must not
+// reach the database — gate criterion 5), then body validation. false means
+// the denial is already written.
+func (s *Server) verifiedPayload(w http.ResponseWriter, r *http.Request) (inboundPayload, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+	if err != nil {
+		http.Error(w, "unreadable or oversized body (max 1 MiB)", http.StatusBadRequest)
+		return inboundPayload{}, false
+	}
+	if err := s.verifier.Verify(body, r.Header); err != nil {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return inboundPayload{}, false
+	}
+	payload, err := parseInboundPayload(body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return inboundPayload{}, false
+	}
+	return payload, true
 }
 
 // resolveOrgs maps every recipient through the platform function and
@@ -133,7 +159,7 @@ func (s *Server) drop(w http.ResponseWriter, r *http.Request, p inboundPayload, 
 		"correlation_id", p.ResendMessageID,
 		"recipients", p.To,
 		"matched_orgs", len(orgs))
-	w.Header().Set("webhook-delivery", "abort-message")
+	w.Header().Set(abortDeliveryHeader, abortDeliveryValue)
 	s.writeResult(w, r, p, `{"inserted":false,"dropped":true}`)
 }
 
@@ -171,10 +197,14 @@ func parseInboundPayload(body []byte) (inboundPayload, error) {
 }
 
 // validate enforces the fields the handler depends on: at least one
-// recipient to resolve, a message id to dedupe on, a non-negative amount.
+// recipient to resolve (bounded by maxRecipients), a message id to dedupe
+// on, a non-negative amount.
 func (p inboundPayload) validate() error {
 	if len(p.To) == 0 {
 		return errors.New("to must list at least one recipient address")
+	}
+	if len(p.To) > maxRecipients {
+		return fmt.Errorf("to lists %d recipients, max %d", len(p.To), maxRecipients)
 	}
 	for _, to := range p.To {
 		if strings.TrimSpace(to) == "" {

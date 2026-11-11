@@ -106,12 +106,30 @@ func TestInboundMultiOrgDrops(t *testing.T) {
 	assert.False(t, runner.called, "a multi-tenant message must not be guessed")
 }
 
-// TestInboundSameOrgTwice dedupes recipients: the same org reached through
-// two addresses is one tenant, so the message stores once.
+// TestInboundSameOrgTwice dedupes at the org level: two distinct addresses
+// that resolve to the same tenant are one match, so the message stores.
 func TestInboundSameOrgTwice(t *testing.T) {
 	org := uuid.New()
-	body := `{"to":["a@in.test","a@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
-	rec, runner := post(t, okResolver(org), body)
+	resolver := resolverFunc(func(_ context.Context, r string) (uuid.UUID, bool, error) {
+		return org, strings.HasSuffix(r, "@in.test"), nil
+	})
+	body := `{"to":["a@in.test","b@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
+	rec, runner := post(t, resolver, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, runner.called)
+	require.Equal(t, org, runner.org)
+}
+
+// TestInboundPartialMatchStores pins ADR-005 section 7's "exactly one
+// organization matches": one resolvable plus one unresolvable recipient is
+// a single tenant — the message stores, it does not drop.
+func TestInboundPartialMatchStores(t *testing.T) {
+	org := uuid.New()
+	resolver := resolverFunc(func(_ context.Context, r string) (uuid.UUID, bool, error) {
+		return org, r == "a@in.test", nil
+	})
+	body := `{"to":["a@in.test","ghost@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
+	rec, runner := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called)
 	require.Equal(t, org, runner.org)
@@ -136,6 +154,7 @@ func TestInboundValidation(t *testing.T) {
 		"empty to":     `{"to":[],"resend_message_id":"m1","declared_value_usd":"1"}`,
 		"blank entry":  `{"to":["  "],"resend_message_id":"m1","declared_value_usd":"1"}`,
 		"no msg id":    `{"to":["a@in.test"],"declared_value_usd":"1"}`,
+		"too many to":  `{"to":[` + strings.Repeat(`"a@in.test",`, 51) + `"a@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`,
 		"negative amt": `{"to":["a@in.test"],"resend_message_id":"m1","declared_value_usd":"-1"}`,
 		"bad json":     `{nope`,
 	}
