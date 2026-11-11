@@ -229,6 +229,16 @@ func sessionConfig() *platform.Config {
 	}
 }
 
+// directInTx is the fake rigs' InTxFunc: the in-memory Querier has no Begin,
+// so "the transaction" is just the call — what the fake matrix proves is the
+// flow through fn, never atomicity. Real rollback is pinned against Postgres
+// in session_integration_test.go.
+func directInTx(store *platform.Store) auth.InTxFunc {
+	return func(_ context.Context, fn func(*platform.Store) error) error {
+		return fn(store)
+	}
+}
+
 // newSessionRig wires the endpoints the way cmd/server will: real Store over
 // the fake Querier, real Limiters on the fake clock, mounted through
 // auth.NewServer. The clock starts at real now — VerifyAccess checks exp
@@ -243,8 +253,9 @@ func newSessionRig(t *testing.T, cfg *platform.Config) *sessionRig {
 		members:  map[string][]platform.Membership{},
 		fail:     map[string]error{},
 	}
+	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		platform.NewStore(q), &platform.FakeMailSender{},
+		store, directInTx(store), &platform.FakeMailSender{},
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, clock.Now),
 		clock.Now)

@@ -194,8 +194,9 @@ func newRig(t *testing.T, mailer platform.MailSender, ipCap, emailCap int) *rig 
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cfg := &platform.Config{WebURL: "https://web.test", LoginTTL: 15 * time.Minute}
 	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
+	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		platform.NewStore(q), mailer,
+		store, directInTx(store), mailer,
 		platform.NewLimiter(ipCap, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(emailCap, platform.LimitWindow, clock.Now),
 		clock.Now)
@@ -483,7 +484,8 @@ func TestLoginWithoutClientIPMiddlewareFailsLoud(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
 	cfg := &platform.Config{WebURL: "https://web.test", LoginTTL: 15 * time.Minute}
 	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
-	endpoints := auth.NewEndpoints(cfg, platform.NewStore(q), &platform.FakeMailSender{},
+	store := platform.NewStore(q)
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), &platform.FakeMailSender{},
 		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
 		clock.Now)
@@ -505,7 +507,8 @@ func TestLoginTrimsTrailingSlashOnWebURL(t *testing.T) {
 	q := &loginQuerier{users: map[string]uuid.UUID{"ada@test.dev": uuid.New()}, fail: map[string]error{}}
 	cfg := &platform.Config{WebURL: "https://web.test/", LoginTTL: 15 * time.Minute}
 	mailer := &platform.FakeMailSender{}
-	endpoints := auth.NewEndpoints(cfg, platform.NewStore(q), mailer,
+	store := platform.NewStore(q)
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), mailer,
 		platform.NewLimiter(30, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(5, platform.LimitWindow, clock.Now),
 		clock.Now)

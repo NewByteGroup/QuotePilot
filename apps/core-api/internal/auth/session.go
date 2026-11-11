@@ -22,16 +22,17 @@ const (
 
 // PostAuthSession implements POST /auth/session (spec section 8): the
 // magic-link token is consumed exactly once — by SHA-256 hash, the raw value
-// never approaches the store — and success mints refresh generation 0, signs
-// the access JWT and sets the spec section 4 cookie pair around the
-// profile+memberships body the org switcher renders.
+// never approaches the store — and the whole exchange is ONE transaction:
+// consume, the payload reads, the session row and access signing commit
+// together or roll back together, so no failure between them can strand a
+// used-but-unserved link (the review finding this fixes: a 500 after the
+// consume committed used to kill the link and leave the user sessionless).
+// Only the cookie/response assembly stays outside the transaction.
 //
 // Used, expired and unknown tokens are one failure by construction:
 // consume_login_token collapses all three to ok=false inside its row lock,
 // and the handler answers with a single response object, so the wire cannot
-// distinguish the cases even by accident. The two payload reads run before
-// create_session so a driver fault mid-response cannot orphan a session row
-// — the only write on the path happens once the body is known to assemble.
+// distinguish the cases even by accident.
 func (e *Endpoints) PostAuthSession(
 	ctx context.Context,
 	request authapi.PostAuthSessionRequestObject,
@@ -39,31 +40,69 @@ func (e *Endpoints) PostAuthSession(
 	if request.Body == nil || request.Body.Token == "" {
 		return sessionBadRequest(), nil
 	}
-	userID, ok, err := e.store.ConsumeLoginToken(ctx, platform.HashToken(request.Body.Token))
+	var grant *sessionGrant
+	err := e.inTx(ctx, func(tx *platform.Store) error {
+		var err error
+		grant, err = e.runExchange(ctx, tx, platform.HashToken(request.Body.Token))
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if grant == nil {
+		return sessionUnauthenticated(), nil
+	}
+	return e.sessionResponse(grant), nil
+}
+
+// sessionGrant is what the committed exchange hands back across the
+// transaction boundary: the switcher body fields plus the two cookie
+// values, assembled into sessionOK only after inTx commits. A nil grant
+// with a nil error is the !ok consume — the handler's uniform 401.
+type sessionGrant struct {
+	profile     authapi.UserProfile
+	memberships []authapi.Membership
+	access      string // the signed JWT — the qp_access value
+	refresh     string // the opaque token — the qp_refresh value
+}
+
+// runExchange is the transaction body: consume the magic-link hash, load
+// the switcher payload, then mint and sign. Any error abandons the whole
+// exchange — the consumed marker and the session row die together. The !ok
+// consume returns (nil, nil): nothing was written, so the empty commit is
+// harmless and the caller maps the nil grant to the uniform 401.
+func (e *Endpoints) runExchange(
+	ctx context.Context,
+	tx *platform.Store,
+	tokenHash string,
+) (*sessionGrant, error) {
+	userID, ok, err := tx.ConsumeLoginToken(ctx, tokenHash)
 	if err != nil {
 		return nil, fmt.Errorf("auth: consume login token: %w", err)
 	}
 	if !ok {
-		return sessionUnauthenticated(), nil
+		return nil, nil
 	}
-	profile, memberships, err := e.loadSessionPayload(ctx, userID)
+	profile, memberships, err := e.loadSessionPayload(ctx, tx, userID)
 	if err != nil {
 		return nil, err
 	}
-	return e.issueSession(ctx, userID, profile, memberships)
+	return e.issueSession(ctx, tx, userID, profile, memberships)
 }
 
-// issueSession is the write tail: mint the refresh, sign the access JWT and
-// wrap the body in the cookie-carrying 200. A signing failure leaves an
-// inert session row — its opaque refresh exists nowhere outside Postgres,
-// so nobody can ever present it (the row dies at expiry).
+// issueSession is the write-and-sign tail, still inside the transaction:
+// mint refresh generation 0, sign the access JWT and return the grant the
+// caller wraps in the cookie-carrying 200 after commit. A signing failure is
+// an error like any other on the path — the consume rolls back with it, so
+// no inert session row is orphaned and the link survives for a retry.
 func (e *Endpoints) issueSession(
 	ctx context.Context,
+	tx *platform.Store,
 	userID uuid.UUID,
 	profile authapi.UserProfile,
 	memberships []authapi.Membership,
-) (authapi.PostAuthSessionResponseObject, error) {
-	refresh, sessionID, err := e.mintSession(ctx, userID)
+) (*sessionGrant, error) {
+	refresh, sessionID, err := e.mintSession(ctx, tx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -71,14 +110,26 @@ func (e *Endpoints) issueSession(
 	if err != nil {
 		return nil, fmt.Errorf("auth: sign access token: %w", err)
 	}
+	return &sessionGrant{
+		profile:     profile,
+		memberships: memberships,
+		access:      access,
+		refresh:     refresh,
+	}, nil
+}
+
+// sessionResponse is the only step after the commit: wrap the grant in the
+// cookie-carrying 200. Building it outside the transaction is what keeps a
+// rolled-back exchange from ever reaching the wire.
+func (e *Endpoints) sessionResponse(grant *sessionGrant) authapi.PostAuthSessionResponseObject {
 	return sessionOK{
 		body: authapi.PostAuthSession200JSONResponse{
-			Profile:     profile,
-			Memberships: memberships,
+			Profile:     grant.profile,
+			Memberships: grant.memberships,
 		},
-		access:  e.accessCookie(access),
-		refresh: e.refreshCookie(refresh),
-	}, nil
+		access:  e.accessCookie(grant.access),
+		refresh: e.refreshCookie(grant.refresh),
+	}
 }
 
 // loadSessionPayload reads the 200 body the switcher needs: the user's own
@@ -89,16 +140,17 @@ func (e *Endpoints) issueSession(
 // path rather than an empty 200.
 func (e *Endpoints) loadSessionPayload(
 	ctx context.Context,
+	tx *platform.Store,
 	userID uuid.UUID,
 ) (authapi.UserProfile, []authapi.Membership, error) {
-	id, email, fullName, ok, err := e.store.GetUserProfile(ctx, userID)
+	id, email, fullName, ok, err := tx.GetUserProfile(ctx, userID)
 	if err != nil {
 		return authapi.UserProfile{}, nil, fmt.Errorf("auth: get user profile: %w", err)
 	}
 	if !ok {
 		return authapi.UserProfile{}, nil, fmt.Errorf("auth: get user profile: no row for consumed user %s", userID)
 	}
-	rows, err := e.store.ListMembershipsForEmail(ctx, email)
+	rows, err := tx.ListMembershipsForEmail(ctx, email)
 	if err != nil {
 		return authapi.UserProfile{}, nil, fmt.Errorf("auth: list memberships: %w", err)
 	}
@@ -123,14 +175,19 @@ func toAPIMembership(m platform.Membership) authapi.Membership {
 
 // mintSession creates refresh generation 0: a fresh opaque token whose hash —
 // never the token — roots the new family, expiring at now+RefreshTTL (spec
-// section 4: sliding 30 days). The returned token is the cookie value; the
-// session id becomes the JWT's sid claim.
-func (e *Endpoints) mintSession(ctx context.Context, userID uuid.UUID) (string, uuid.UUID, error) {
+// section 4: sliding 30 days). It writes through the exchange's tx-bound
+// store so the row commits only when the whole exchange does. The returned
+// token is the cookie value; the session id becomes the JWT's sid claim.
+func (e *Endpoints) mintSession(
+	ctx context.Context,
+	tx *platform.Store,
+	userID uuid.UUID,
+) (string, uuid.UUID, error) {
 	refresh, err := platform.NewOpaqueToken()
 	if err != nil {
 		return "", uuid.Nil, fmt.Errorf("auth: mint refresh token: %w", err)
 	}
-	sessionID, err := e.store.CreateSession(
+	sessionID, err := tx.CreateSession(
 		ctx, userID, platform.HashToken(refresh), e.now().Add(e.cfg.RefreshTTL))
 	if err != nil {
 		return "", uuid.Nil, fmt.Errorf("auth: create session: %w", err)

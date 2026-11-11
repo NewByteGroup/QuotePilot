@@ -44,6 +44,38 @@ type Store struct {
 //	store := platform.NewStore(pool)
 func NewStore(q Querier) *Store { return &Store{q: q} }
 
+// InStoreTx runs fn against a Store bound to one transaction: every write
+// fn performs commits together or rolls back together — the contract
+// /auth/session needs so a mid-exchange failure cannot strand a consumed
+// magic link. Only a pool-backed Store can run it; a Store already bound
+// to a transaction (or a fake Querier without Begin) returns an error the
+// caller maps to its uniform failure path.
+//
+//	err := store.InStoreTx(ctx, func(tx *platform.Store) error {
+//		userID, ok, err := tx.ConsumeLoginToken(ctx, hash)
+//		...
+//	})
+func (s *Store) InStoreTx(ctx context.Context, fn func(*Store) error) error {
+	beginner, ok := s.q.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return fmt.Errorf("platform: InStoreTx: querier %T has no Begin", s.q)
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("platform: InStoreTx: begin: %w", err)
+	}
+	// Unconditional rollback — the tenantdb.tenantTx idiom: covers panic AND
+	// runtime.Goexit, is ErrTxClosed after a successful Commit, and runs on a
+	// cancel-free context so a dead caller context cannot abort it.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err := fn(&Store{q: tx}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // FindUserByEmail resolves the sole email→id lookup (spec section 3.2:
 // there is no self-signup, so this is the only path). An unknown email is
 // (uuid.Nil, false, nil) — not an error, and indistinguishable from any

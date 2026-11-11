@@ -207,7 +207,9 @@ func TestSessionFailuresAreUniform500(t *testing.T) {
 	}
 
 	// A signing key that cannot sign (active kid absent from JWTKeys) is the
-	// last error on the path — same 500, same clean headers.
+	// last error on the path — same 500, same clean headers. The fake's inTx
+	// is a direct call, so it records the attempted insert; the rollback a
+	// real transaction performs is pinned in session_integration_test.go.
 	cfg := sessionConfig()
 	cfg.ActiveKID = "ghost"
 	r := newSessionRig(t, cfg)
@@ -219,7 +221,7 @@ func TestSessionFailuresAreUniform500(t *testing.T) {
 	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Len(t, r.q.creates, 1,
-		"the inert orphan: a session row committed before the signing failed")
+		"the fake has no tx to roll back — the row's fate under a real one is pinned by TestSessionExchangeRollsBackConsume")
 }
 
 // TestSessionEmptyMembershipsIsArray pins the contract for a user with no
