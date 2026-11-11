@@ -201,7 +201,7 @@ func parseInboundPayload(body []byte) (inboundPayload, error) {
 // on, a non-negative amount.
 func (p inboundPayload) validate() error {
 	if len(p.To) == 0 {
-		return errors.New("to must list at least one recipient address")
+		return fmt.Errorf("to must list at least one recipient address, got %v", p.To)
 	}
 	if len(p.To) > maxRecipients {
 		return fmt.Errorf("to lists %d recipients, max %d", len(p.To), maxRecipients)

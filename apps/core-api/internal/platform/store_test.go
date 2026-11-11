@@ -336,22 +336,30 @@ func TestStoreResolveInboundOrg(t *testing.T) {
 	orgID := uuid.New()
 	slug := testenv.SeedOrganization(t, orgID, "store-resolve")
 
-	cases := map[string]struct {
-		recipient string
-		wantOrg   uuid.UUID
-		wantOK    bool
-	}{
+	for name, c := range resolveCases(slug, orgID) {
+		got, ok, err := store.ResolveInboundOrg(ctx, c.recipient)
+		require.NoError(t, err, name)
+		require.Equal(t, c.wantOK, ok, name)
+		require.Equal(t, c.wantOrg, got, name)
+	}
+}
+
+// resolveCase is one resolve_inbound_org outcome: recipient in, (org, ok)
+// expected out.
+type resolveCase struct {
+	recipient string
+	wantOrg   uuid.UUID
+	wantOK    bool
+}
+
+// resolveCases enumerates the function's six branches against a seeded org.
+func resolveCases(slug string, orgID uuid.UUID) map[string]resolveCase {
+	return map[string]resolveCase{
 		"exact alias":       {slug + "@in.test", orgID, true},
 		"slug fallback":     {slug + "@in.quotepilot.app", orgID, true},
 		"plus tag stripped": {slug + "+invoice@in.test", orgID, true},
 		"angle brackets":    {"Quotes <" + slug + "@in.test>", orgID, true},
 		"double at refused": {slug + "@in.test@evil.test", uuid.Nil, false},
 		"unknown alias":     {"nobody@in.test", uuid.Nil, false},
-	}
-	for name, c := range cases {
-		got, ok, err := store.ResolveInboundOrg(ctx, c.recipient)
-		require.NoError(t, err, name)
-		require.Equal(t, c.wantOK, ok, name)
-		require.Equal(t, c.wantOrg, got, name)
 	}
 }
