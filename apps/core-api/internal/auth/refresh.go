@@ -7,6 +7,7 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
+	"github.com/google/uuid"
 )
 
 // refreshCookieKey carries the raw qp_refresh cookie value
@@ -59,6 +60,8 @@ func refreshCookieFromContext(ctx context.Context) (string, bool) {
 // behind a 500: its presented generation is already exchanged and a replay
 // is the reuse case. The successor itself is inert — only its hash ever
 // left the handler — so the stranding is safe, not a leak (C2 review).
+//
+//	resp, err := endpoints.PostAuthRefresh(ctx, authapi.PostAuthRefreshRequestObject{})
 func (e *Endpoints) PostAuthRefresh(
 	ctx context.Context,
 	_ authapi.PostAuthRefreshRequestObject,
@@ -70,10 +73,9 @@ func (e *Endpoints) PostAuthRefresh(
 	return e.rotateGeneration(ctx, presented)
 }
 
-// rotateGeneration mints the successor opaque token and runs the store's
-// atomic exchange. A signing failure strands the client: the successor is
-// already committed, so replaying the presented generation is reuse and
-// kills the family — inert, never a leak (C2 review).
+// rotateGeneration orchestrates the exchange: mint the successor opaque
+// token, hand both hashes to the store's atomic rotate, then answer with
+// the signed pair — or the uniform 401 when the store refused.
 func (e *Endpoints) rotateGeneration(
 	ctx context.Context, presented string,
 ) (authapi.PostAuthRefreshResponseObject, error) {
@@ -81,18 +83,39 @@ func (e *Endpoints) rotateGeneration(
 	if err != nil {
 		return nil, fmt.Errorf("auth: mint refresh token: %w", err)
 	}
-	sessionID, userID, rotated, found, err := e.store.RotateSession(
+	sessionID, userID, rotated, err := e.rotateStored(ctx, presented, successor)
+	if err != nil {
+		return nil, err
+	}
+	if !rotated {
+		return e.refreshUnauthenticated(), nil
+	}
+	return e.rotatedResponse(userID, sessionID, successor)
+}
+
+// rotateStored runs the store's atomic exchange and collapses the two
+// rejection shapes it reports — the reuse kill (found, rotated=false) and
+// the unknown/revoked/expired empty set (not found) — into the single
+// rotated=false the handler is allowed to act on.
+func (e *Endpoints) rotateStored(
+	ctx context.Context, presented, successor string,
+) (sessionID, userID uuid.UUID, rotated bool, err error) {
+	sessionID, userID, changed, found, err := e.store.RotateSession(
 		ctx, platform.HashToken(presented), platform.HashToken(successor),
 		e.now().Add(e.cfg.RefreshTTL))
 	if err != nil {
-		return nil, fmt.Errorf("auth: rotate session: %w", err)
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("auth: rotate session: %w", err)
 	}
-	// !rotated collapses both rejection shapes the store reports — the
-	// reuse kill (found) and the unknown/revoked/expired empty set (not
-	// found) — into the one answer the wire is allowed to give.
-	if !found || !rotated {
-		return e.refreshUnauthenticated(), nil
-	}
+	return sessionID, userID, found && changed, nil
+}
+
+// rotatedResponse signs the successor's access JWT and attaches the rotated
+// pair. A sign failure strands the client: the successor is already
+// committed, so replaying the presented generation is reuse and kills the
+// family — inert, never a leak (C2 review).
+func (e *Endpoints) rotatedResponse(
+	userID, sessionID uuid.UUID, successor string,
+) (authapi.PostAuthRefreshResponseObject, error) {
 	access, err := e.cfg.SignAccess(userID, sessionID, e.now())
 	if err != nil {
 		return nil, fmt.Errorf("auth: sign access token: %w", err)
