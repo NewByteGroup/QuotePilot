@@ -11,8 +11,8 @@ import (
 )
 
 // refreshCookieKey carries the raw qp_refresh cookie value
-// ExtractRefreshCookie plants for PostAuthRefresh — and, once C4 lands,
-// PostAuthLogout, which resolves the same cookie to its session family.
+// ExtractRefreshCookie plants for PostAuthRefresh and PostAuthLogout —
+// logout resolves the same cookie to its session family.
 var refreshCookieKey = ctxKey{"refresh-cookie"}
 
 // ExtractRefreshCookie is the StrictMiddlewareFunc that reads the
@@ -20,8 +20,8 @@ var refreshCookieKey = ctxKey{"refresh-cookie"}
 // strict handlers see only (ctx, request), so anything derived from
 // *http.Request enters through a middleware (authapi/doc.go). An absent
 // cookie plants nothing: the handler's ok=false branch, not the binder,
-// answers it, so a missing cookie gets the same uniform 401 as a dead one —
-// the contract deliberately carries no cookie parameter because a required
+// answers it — refresh replies 401, logout 204, each per its contract.
+// The contract deliberately carries no cookie parameter because a required
 // one would emit a 400 where spec section 8 mandates the 401.
 //
 //	authapi.NewStrictHandlerWithOptions(endpoints, []authapi.StrictMiddlewareFunc{auth.ExtractRefreshCookie}, opts)
