@@ -112,9 +112,8 @@ func (s *Server) handleResendInbound(w http.ResponseWriter, r *http.Request) {
 // reach the database — gate criterion 5), then body validation. false means
 // the denial is already written.
 func (s *Server) verifiedPayload(w http.ResponseWriter, r *http.Request) (authapi.ResendEmailReceived, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
-	if err != nil {
-		http.Error(w, "unreadable or oversized body (max 1 MiB)", http.StatusBadRequest)
+	body, ok := readBody(w, r)
+	if !ok {
 		return authapi.ResendEmailReceived{}, false
 	}
 	if err := s.verifier.Verify(body, r.Header); err != nil {
@@ -131,6 +130,18 @@ func (s *Server) verifiedPayload(w http.ResponseWriter, r *http.Request) (authap
 		return authapi.ResendEmailReceived{}, false
 	}
 	return payload, true
+}
+
+// readBody caps the request at 1 MiB — an unauthenticated caller never
+// gets to stream unbounded bytes into memory. false means the 400 is
+// already written.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+	if err != nil {
+		http.Error(w, "unreadable or oversized body (max 1 MiB)", http.StatusBadRequest)
+		return nil, false
+	}
+	return body, true
 }
 
 // resolveOrgs maps every recipient through the platform function and
@@ -213,21 +224,31 @@ func validateInboundPayload(p authapi.ResendEmailReceived) error {
 		return fmt.Errorf("type must be %q, got %q", authapi.EmailReceived, p.Type)
 	}
 	if p.Data.CreatedAt.IsZero() {
-		return errors.New("data.created_at must be a non-empty RFC 3339 timestamp")
+		return fmt.Errorf("data.created_at got %v, expected a non-empty RFC 3339 timestamp", p.Data.CreatedAt)
 	}
-	if len(p.Data.To) == 0 {
-		return fmt.Errorf("data.to must list at least one recipient address, got %v", p.Data.To)
-	}
-	if len(p.Data.To) > maxRecipients {
-		return fmt.Errorf("data.to lists %d recipients, max %d", len(p.Data.To), maxRecipients)
-	}
-	for _, to := range p.Data.To {
-		if strings.TrimSpace(to) == "" {
-			return fmt.Errorf("data.to entries must be non-empty addresses, got %q", to)
-		}
+	if err := validateRecipients(p.Data.To); err != nil {
+		return err
 	}
 	if p.Data.EmailID == "" {
 		return errors.New("data.email_id must be a non-empty string")
+	}
+	return nil
+}
+
+// validateRecipients enforces the recipient list's shape: at least one
+// address to resolve, bounded so a hostile or misconfigured sender cannot
+// fan the resolver out, and no blank entries (each is a resolver lookup).
+func validateRecipients(to []string) error {
+	if len(to) == 0 {
+		return fmt.Errorf("data.to must list at least one recipient address, got %v", to)
+	}
+	if len(to) > maxRecipients {
+		return fmt.Errorf("data.to lists %d recipients, max %d", len(to), maxRecipients)
+	}
+	for _, addr := range to {
+		if strings.TrimSpace(addr) == "" {
+			return fmt.Errorf("data.to entries must be non-empty addresses, got %q", addr)
+		}
 	}
 	return nil
 }
@@ -239,22 +260,27 @@ func (s *Server) storeInbound(ctx context.Context, org uuid.UUID, p authapi.Rese
 	var rows int64
 	err := s.runner.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		rows, err = inboxdb.New(tx).InsertInboundMessage(ctx, inboxdb.InsertInboundMessageParams{
-			OrganizationID:  pgtype.UUID{Bytes: org, Valid: true},
-			ResendMessageID: p.Data.EmailID,
-			Subject:         p.Data.Subject,
-			// Resend's receipt timestamp, not our processing time — the
-			// audit trail orders on when the RFQ arrived.
-			ReceivedAt: pgtype.Timestamptz{Time: p.Data.CreatedAt, Valid: true},
-			// The Resend payload carries no declared value: the column is
-			// NOT NULL DEFAULT 0, so insert zero until the data-model
-			// change decides where the value comes from (RFC-002).
-			DeclaredValueUsd: decimal.Zero,
-		})
+		rows, err = inboxdb.New(tx).InsertInboundMessage(ctx, inboundInsertParams(org, p))
 		return err
 	})
 	if err != nil {
 		return false, fmt.Errorf("inbox: store inbound message %q: %w", p.Data.EmailID, err)
 	}
 	return rows == 1, nil
+}
+
+// inboundInsertParams maps the webhook payload to the row: email_id is the
+// idempotency key, created_at is Resend's receipt timestamp (the audit
+// trail orders on when the RFQ arrived, not our processing time), and the
+// declared value stays zero — the Resend payload carries none, so the
+// NOT NULL DEFAULT 0 column gets an explicit zero until the data-model
+// change decides where the value comes from (RFC-002).
+func inboundInsertParams(org uuid.UUID, p authapi.ResendEmailReceived) inboxdb.InsertInboundMessageParams {
+	return inboxdb.InsertInboundMessageParams{
+		OrganizationID:   pgtype.UUID{Bytes: org, Valid: true},
+		ResendMessageID:  p.Data.EmailID,
+		Subject:          p.Data.Subject,
+		ReceivedAt:       pgtype.Timestamptz{Time: p.Data.CreatedAt, Valid: true},
+		DeclaredValueUsd: decimal.Zero,
+	}
 }
