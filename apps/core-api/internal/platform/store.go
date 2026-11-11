@@ -29,6 +29,16 @@ type Membership struct {
 	Role  string
 }
 
+// MailOutbox is one pending magic-link send as read_mail_outbox returns it:
+// the link, the recipient resolved through the login token (the job carries
+// only the outbox id — SendMagicLink still needs a destination), and the
+// token's expiry so the worker owns the dead-link policy.
+type MailOutbox struct {
+	Link      string
+	Email     string
+	ExpiresAt time.Time
+}
+
 // Organization is the resolved tenant's registry row as
 // app.get_current_organization() returns it (spec section 8). Branding is
 // carried raw: the jsonb blob belongs to the caller, so the store neither
@@ -348,23 +358,25 @@ func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link st
 	return id, nil
 }
 
-// ReadMailOutbox returns one pending send's link. Idempotent reads are the
-// point: a River retry re-reads the row its predecessor crashed before
-// deleting, so delivery is at-least-once and a resent link is the SAME
-// link. ok=false means the job is done — already sent, or never queued —
-// never an error.
+// ReadMailOutbox returns one pending send — link, recipient and expiry.
+// Idempotent reads are the point: a River retry re-reads the row its
+// predecessor crashed before deleting, so delivery is at-least-once and a
+// resent link is the SAME link. ok=false means the job is done — already
+// sent, never queued, or the token died — never an error.
 //
-//	link, ok, err := store.ReadMailOutbox(ctx, outboxID)
-func (s *Store) ReadMailOutbox(ctx context.Context, id uuid.UUID) (string, bool, error) {
-	var link *string
-	err := s.q.QueryRow(ctx, `SELECT app.read_mail_outbox($1)`, id).Scan(&link)
+//	pending, ok, err := store.ReadMailOutbox(ctx, outboxID)
+func (s *Store) ReadMailOutbox(ctx context.Context, id uuid.UUID) (MailOutbox, bool, error) {
+	var out MailOutbox
+	err := s.q.QueryRow(ctx,
+		`SELECT * FROM app.read_mail_outbox($1)`, id).
+		Scan(&out.Link, &out.Email, &out.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MailOutbox{}, false, nil
+	}
 	if err != nil {
-		return "", false, fmt.Errorf("platform: read_mail_outbox: %w", err)
+		return MailOutbox{}, false, fmt.Errorf("platform: read_mail_outbox: %w", err)
 	}
-	if link == nil {
-		return "", false, nil
-	}
-	return *link, true, nil
+	return out, true, nil
 }
 
 // DeleteMailOutbox is the delivery receipt: called only after the send

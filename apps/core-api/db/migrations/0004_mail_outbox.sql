@@ -87,17 +87,28 @@ REVOKE EXECUTE ON FUNCTION app.create_mail_outbox(uuid, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.create_mail_outbox(uuid, text) TO qp_app;
 -- +goose StatementEnd
 
--- read_mail_outbox: the worker's claim. A NULL answer means the job is
--- done — the row was already sent and deleted, or never queued — and
--- says nothing else by design.
+-- read_mail_outbox: the worker's claim. It joins through the login token
+-- to users.email because the job carries only the outbox id and
+-- SendMagicLink needs a recipient (Devin Review 🔴). expires_at rides
+-- along so the WORKER owns the expiry policy — a past-TTL row means
+-- delete and done, not a mailed dead link. A consumed token is already
+-- dead (someone held the link), so its row is skipped as if absent: the
+-- job completes either way and the row costs only dead weight. An empty
+-- result means the job is done — already sent, never queued, or dead —
+-- and says nothing else by design.
 -- +goose StatementBegin
-CREATE FUNCTION app.read_mail_outbox(p_id uuid) RETURNS text
+CREATE FUNCTION app.read_mail_outbox(p_id uuid)
+    RETURNS TABLE(link_url text, recipient_email text, expires_at timestamptz)
     LANGUAGE sql
     SECURITY DEFINER
     SET search_path = app
 AS $fn$
-    SELECT m.link_url FROM app.auth_mail_outbox AS m
-    WHERE m.id = p_id;
+    SELECT m.link_url, u.email, t.expires_at
+    FROM app.auth_mail_outbox AS m
+    JOIN app.auth_login_tokens AS t ON t.id = m.login_token_id
+    JOIN app.users AS u ON u.id = t.user_id
+    WHERE m.id = p_id
+      AND t.consumed_at IS NULL;
 $fn$;
 
 REVOKE EXECUTE ON FUNCTION app.read_mail_outbox(uuid) FROM PUBLIC;
