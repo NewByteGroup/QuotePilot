@@ -1,0 +1,5 @@
+{
+  "reason": "Bad Request",
+  "code": "400",
+  "description": "Invalid input data: requestedEquipments[0].weightPerContainer is mandatory"
+}
