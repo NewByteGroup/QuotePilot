@@ -11,13 +11,25 @@ import { SettingsDialog } from './settings-dialog'
 
 type NavItem = { label: string; to: string; badge?: number; active?: boolean }
 
-type AppSidebarProps = {
+export type AppSidebarProps = {
   session?: Schemas['Session']
   identity?: Schemas['CompanyIdentity']
   inboxPendingCount?: number
 }
 
-function NavSection({ title, items }: { title: string; items: NavItem[] }) {
+export type SidebarContentProps = AppSidebarProps & {
+  onNavigate?: () => void
+}
+
+function NavSection({
+  title,
+  items,
+  onNavigate,
+}: {
+  title: string
+  items: NavItem[]
+  onNavigate?: () => void
+}) {
   return (
     <div className="space-y-1">
       <p className="text-muted-foreground px-2 pt-4 pb-1 text-[11px] font-semibold tracking-wider uppercase">
@@ -27,6 +39,7 @@ function NavSection({ title, items }: { title: string; items: NavItem[] }) {
         <NavLink
           key={item.to}
           to={item.to}
+          onClick={onNavigate}
           aria-current={item.active ? 'page' : undefined}
           className={cn(
             'text-foreground/80 hover:bg-muted flex items-center justify-between rounded-md px-2 py-2 text-sm transition-colors',
@@ -41,7 +54,12 @@ function NavSection({ title, items }: { title: string; items: NavItem[] }) {
   )
 }
 
-export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarProps) {
+export function SidebarContent({
+  session,
+  identity,
+  inboxPendingCount,
+  onNavigate,
+}: SidebarContentProps) {
   const { pathname } = useLocation()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const organization = session?.organization
@@ -81,7 +99,7 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
   )
 
   return (
-    <aside className="bg-card sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r px-3 py-5 lg:flex">
+    <>
       <div className="flex items-center gap-2 px-2">
         <img src="/logo.png" alt="" aria-hidden className="size-7" />
         <span className="font-semibold">QuotePilot</span>
@@ -96,6 +114,7 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
       <nav className="mt-3 flex-1" aria-label="Principal">
         <NavSection
           title="Empresa"
+          onNavigate={onNavigate}
           items={[
             {
               label: 'Inbox de cotações',
@@ -108,6 +127,7 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
         />
         <NavSection
           title="Plataforma"
+          onNavigate={onNavigate}
           items={[
             {
               label: 'Conectores',
@@ -146,6 +166,14 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
           <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} />
         </div>
       ) : null}
+    </>
+  )
+}
+
+export function AppSidebar(props: AppSidebarProps) {
+  return (
+    <aside className="bg-card sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r px-3 py-5 lg:flex">
+      <SidebarContent {...props} />
     </aside>
   )
 }

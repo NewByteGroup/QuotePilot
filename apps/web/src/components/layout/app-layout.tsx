@@ -3,6 +3,7 @@ import { Outlet } from 'react-router'
 import { useCompanyIdentity, useInboxQuotes, useSession } from '@/api/queries'
 
 import { AppSidebar } from './app-sidebar'
+import { MobileNav } from './mobile-nav'
 
 export function AppLayout() {
   const session = useSession()
@@ -19,6 +20,11 @@ export function AppLayout() {
         inboxPendingCount={pendingCount}
       />
       <div className="flex min-w-0 flex-1 flex-col">
+        <MobileNav
+          session={session.data}
+          identity={identity.data}
+          inboxPendingCount={pendingCount}
+        />
         <Outlet />
       </div>
     </div>
