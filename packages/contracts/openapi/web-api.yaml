@@ -1,0 +1,1003 @@
+# Contract the web app is built against today: openapi-typescript generates the
+# client types (generated/ts/web-api.ts) and openapi-msw types the MSW mock that
+# lets apps/web run before core-api exposes these endpoints. core-api.yaml is
+# the request edge core-api already implements (auth, /me); the endpoints below
+# are to be folded into it (as 3.0.3, per ADR-002) with Pedro as each one lands.
+openapi: 3.1.0
+info:
+  title: QuotePilot web API (mock contract)
+  version: 0.1.0
+  description: |
+    HTTP API the web app consumes (ADR-001, contracts first), served by the contract
+    mock until core-api implements it.
+    Money is always a decimal string plus an ISO 4217 currency, never a JSON number.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+tags:
+  - name: session
+    description: Signed-in user and active organization.
+  - name: inbox
+    description: RFQs received by the organization and their quote status.
+paths:
+  /v1/session:
+    get:
+      operationId: getSession
+      summary: Current user and active organization
+      tags: [session]
+      responses:
+        "200":
+          description: Session of the signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/inbox/quotes:
+    get:
+      operationId: listInboxQuotes
+      summary: Quotes in the inbox of the active organization
+      tags: [inbox]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Only quotes in this status. Omit for all.
+          schema:
+            $ref: "#/components/schemas/QuoteStatus"
+        - name: q
+          in: query
+          required: false
+          description: Case-insensitive match on RFQ number, customer name or subject.
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        "200":
+          description: Inbox page with summary counters.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxQuotePage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/quotes/{quoteId}:
+    get:
+      operationId: getQuoteDetail
+      summary: Everything needed to audit one quote (split-screen audit)
+      tags: [quotes]
+      parameters:
+        - name: quoteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Quote with the original email, agent extraction and price composition.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuoteDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/rates/net-rate-tables:
+    get:
+      operationId: listNetRateTables
+      summary: Negotiated carrier rate tables (private, per organization)
+      tags: [rates]
+      responses:
+        "200":
+          description: Rate tables and how many quotes priced on an expired snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NetRateTablePage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/pricing-rules:
+    get:
+      operationId: getPricingRules
+      summary: General pricing parameters, margin per route and pricing automations
+      tags: [rates]
+      responses:
+        "200":
+          description: Pricing rules of the active organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingRules"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/pricing-rules/route-margins:
+    post:
+      operationId: addRouteMargins
+      summary: Add or override the margin of one or more routes
+      tags: [rates]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddRouteMarginsRequest"
+      responses:
+        "200":
+          description: Updated pricing rules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingRules"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/pricing-rules/automations/{automationKey}:
+    patch:
+      operationId: updatePricingAutomation
+      summary: Turn a pricing automation on or off
+      tags: [rates]
+      parameters:
+        - name: automationKey
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[a-z0-9_]+$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePricingAutomationRequest"
+      responses:
+        "200":
+          description: Updated automation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingAutomation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/organization/identity:
+    get:
+      operationId: getCompanyIdentity
+      summary: Company identity used on outgoing quote emails and the PDF letterhead
+      tags: [organization]
+      responses:
+        "200":
+          description: Company identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyIdentity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    patch:
+      operationId: updateCompanyIdentity
+      summary: Update company data, primary color or signature
+      tags: [organization]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCompanyIdentityRequest"
+      responses:
+        "200":
+          description: Updated company identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyIdentity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/organization/identity/letterhead-logo:
+    put:
+      operationId: uploadLetterheadLogo
+      summary: Upload the logo used on the PDF letterhead and outgoing emails (PNG, JPEG or SVG, up to 2 MB)
+      tags: [organization]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Company identity with the new logo URL.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyIdentity"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    delete:
+      operationId: removeLetterheadLogo
+      summary: Remove the letterhead logo
+      tags: [organization]
+      responses:
+        "200":
+          description: Company identity without a logo.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyIdentity"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/connectors/overview:
+    get:
+      operationId: getConnectorOverview
+      summary: Shared public-data connectors, their health and the live repair
+      tags: [platform]
+      responses:
+        "200":
+          description: Connector console data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/repairs/overview:
+    get:
+      operationId: getRepairOverview
+      summary: Self-healing repair agent status, queue and session history
+      tags: [platform]
+      responses:
+        "200":
+          description: Auto-repair data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RepairOverview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    BadRequest:
+      description: Invalid request parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource does not exist in the active organization.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          examples: [invalid_parameter]
+        message:
+          type: string
+    Session:
+      type: object
+      required: [user, organization]
+      properties:
+        user:
+          $ref: "#/components/schemas/SessionUser"
+        organization:
+          $ref: "#/components/schemas/SessionOrganization"
+    SessionUser:
+      type: object
+      required: [id, name, role, organizationCount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        role:
+          type: string
+          enum: [admin, operator]
+        organizationCount:
+          type: integer
+          minimum: 1
+    SessionOrganization:
+      type: object
+      required: [id, name, planName, inboundAddress]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        planName:
+          type: string
+        inboundAddress:
+          type: string
+          format: email
+          description: Address that receives RFQ emails for this organization.
+    QuoteStatus:
+      type: string
+      enum: [processing, awaiting_review, ready_to_send, sent]
+    Equipment:
+      type: string
+      enum: [fcl_20dv, fcl_40hc, lcl, air]
+    UnLocode:
+      type: string
+      pattern: "^[A-Z]{2}[A-Z2-9]{3}$"
+      examples: [BRSSZ]
+    Route:
+      type: object
+      required: [origin, destination]
+      properties:
+        origin:
+          $ref: "#/components/schemas/UnLocode"
+        destination:
+          $ref: "#/components/schemas/UnLocode"
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: "^-?\\d+(\\.\\d+)?$"
+          description: Decimal amount as a string (no floats).
+          examples: ["23260.55"]
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          examples: [BRL]
+    InboxQuote:
+      type: object
+      required:
+        - id
+        - rfqNumber
+        - customerName
+        - subject
+        - route
+        - equipment
+        - status
+        - estimatedTotal
+        - confidencePercent
+        - slaDueAt
+        - slaAtRisk
+        - receivedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        rfqNumber:
+          type: integer
+          minimum: 1
+        customerName:
+          type: string
+        subject:
+          type: string
+        route:
+          $ref: "#/components/schemas/Route"
+        equipment:
+          $ref: "#/components/schemas/Equipment"
+        status:
+          $ref: "#/components/schemas/QuoteStatus"
+        estimatedTotal:
+          description: Null while the quote is still processing.
+          oneOf:
+            - $ref: "#/components/schemas/Money"
+            - type: "null"
+        confidencePercent:
+          description: Deterministic extraction confidence (RFC-004). Null while processing.
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+        slaDueAt:
+          description: Deadline to answer the customer. Null once the quote is sent.
+          type: [string, "null"]
+          format: date-time
+        slaAtRisk:
+          type: boolean
+        receivedAt:
+          type: string
+          format: date-time
+    InboxStatusCounts:
+      type: object
+      required: [all, processing, awaiting_review, ready_to_send, sent]
+      properties:
+        all:
+          type: integer
+          minimum: 0
+        processing:
+          type: integer
+          minimum: 0
+        awaiting_review:
+          type: integer
+          minimum: 0
+        ready_to_send:
+          type: integer
+          minimum: 0
+        sent:
+          type: integer
+          minimum: 0
+    SlaRiskHighlight:
+      type: object
+      required: [customerName, slaDueAt]
+      properties:
+        customerName:
+          type: string
+        slaDueAt:
+          type: string
+          format: date-time
+    InboxSummary:
+      type: object
+      required:
+        - receivedToday
+        - receivedYesterday
+        - readyToSend
+        - autoApproveConfidencePercent
+        - avgResponseMinutes
+        - responseTargetMinutes
+        - slaAtRiskCount
+        - mostUrgentSlaRisk
+      properties:
+        receivedToday:
+          type: integer
+          minimum: 0
+        receivedYesterday:
+          type: integer
+          minimum: 0
+        readyToSend:
+          type: integer
+          minimum: 0
+        autoApproveConfidencePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        avgResponseMinutes:
+          type: integer
+          minimum: 0
+        responseTargetMinutes:
+          type: integer
+          minimum: 0
+        slaAtRiskCount:
+          type: integer
+          minimum: 0
+        mostUrgentSlaRisk:
+          oneOf:
+            - $ref: "#/components/schemas/SlaRiskHighlight"
+            - type: "null"
+    InboxQuotePage:
+      type: object
+      required: [items, summary, statusCounts, refreshedAt]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxQuote"
+        summary:
+          $ref: "#/components/schemas/InboxSummary"
+        statusCounts:
+          $ref: "#/components/schemas/InboxStatusCounts"
+        refreshedAt:
+          type: string
+          format: date-time
+    QuoteDetail:
+      type: object
+      required: [quote, email, extraction, pricing]
+      properties:
+        quote:
+          $ref: "#/components/schemas/InboxQuote"
+        email:
+          $ref: "#/components/schemas/QuoteEmail"
+        extraction:
+          type: array
+          description: Fields the agent extracted (or inferred) from the email.
+          items:
+            $ref: "#/components/schemas/ExtractedField"
+        pricing:
+          description: Null while the quote is still processing.
+          oneOf:
+            - $ref: "#/components/schemas/PriceComposition"
+            - type: "null"
+    QuoteEmail:
+      type: object
+      required: [from, to, receivedAt, paragraphs, attachments]
+      properties:
+        from:
+          type: string
+          format: email
+        to:
+          type: string
+          format: email
+        receivedAt:
+          type: string
+          format: date-time
+        paragraphs:
+          type: array
+          description: Email body split into paragraphs of segments, so extracted spans can be highlighted.
+          items:
+            type: array
+            items:
+              $ref: "#/components/schemas/EmailSegment"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmailAttachment"
+    EmailSegment:
+      type: object
+      required: [text, highlight]
+      properties:
+        text:
+          type: string
+        highlight:
+          type: string
+          enum: [none, extracted, inferred]
+    EmailAttachment:
+      type: object
+      required: [fileName, sizeBytes]
+      properties:
+        fileName:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+    ExtractedField:
+      type: object
+      required: [label, value, inferred]
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+        inferred:
+          type: boolean
+          description: True when the value was assumed, not read from the email.
+    PriceComposition:
+      type: object
+      required:
+        - sections
+        - totalCost
+        - marginPercent
+        - margin
+        - proposalTotal
+        - confidencePercent
+        - fx
+        - validityHours
+        - recalcFxThresholdPercent
+      properties:
+        sections:
+          type: array
+          items:
+            $ref: "#/components/schemas/PriceSection"
+        totalCost:
+          $ref: "#/components/schemas/Money"
+        marginPercent:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
+          description: Target margin as a decimal string (no floats).
+        margin:
+          $ref: "#/components/schemas/Money"
+        proposalTotal:
+          $ref: "#/components/schemas/Money"
+        confidencePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        fx:
+          $ref: "#/components/schemas/AppliedFxRate"
+        validityHours:
+          type: integer
+          minimum: 1
+        recalcFxThresholdPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+    PriceSection:
+      type: object
+      required: [title, source, items, note]
+      properties:
+        title:
+          type: string
+        source:
+          oneOf:
+            - $ref: "#/components/schemas/PriceSource"
+            - type: "null"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PriceItem"
+        note:
+          type: [string, "null"]
+    PriceSource:
+      type: object
+      required: [label, kind]
+      properties:
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [private_rate, public_snapshot]
+    PriceItem:
+      type: object
+      required: [label, detail, amount, inferred]
+      properties:
+        label:
+          type: string
+        detail:
+          type: [string, "null"]
+        amount:
+          $ref: "#/components/schemas/Money"
+        inferred:
+          type: boolean
+    DecimalPercent:
+      type: string
+      pattern: "^\\d+(\\.\\d+)?$"
+      description: Percentage as a decimal string (no floats), e.g. "12.0".
+    AppliedFxRate:
+      type: object
+      required: [label, rate, referenceLabel, referenceRate]
+      properties:
+        label:
+          type: string
+          description: Rate used to price, e.g. "dólar armador".
+        rate:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
+        referenceLabel:
+          type: string
+          description: Reference rate shown for comparison, e.g. "PTAX".
+        referenceRate:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
+    NetRateTableStatus:
+      type: string
+      enum: [active, expiring, expired, processing]
+    NetRateTable:
+      type: object
+      required: [id, carrier, lane, weekLabel, validFrom, validTo, uploadedAt, fileName, status, processingPercent]
+      properties:
+        id:
+          type: string
+          format: uuid
+        carrier:
+          type: string
+        lane:
+          type: string
+          description: Trade lane as shown to the user, e.g. "Ásia → Santos".
+        weekLabel:
+          type: string
+          example: w44
+        validFrom:
+          type: string
+          format: date
+        validTo:
+          type: string
+          format: date
+        uploadedAt:
+          type: string
+          format: date-time
+        fileName:
+          type: string
+        status:
+          $ref: "#/components/schemas/NetRateTableStatus"
+        processingPercent:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+    NetRateTablePage:
+      type: object
+      required: [items, staleQuoteCount]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetRateTable"
+        staleQuoteCount:
+          type: integer
+          minimum: 0
+          description: Quotes priced on an expired table snapshot.
+    RouteMargin:
+      type: object
+      required: [route, defaultMarginPercent, appliedMarginPercent, customized]
+      properties:
+        route:
+          $ref: "#/components/schemas/Route"
+        defaultMarginPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+        appliedMarginPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+        customized:
+          type: boolean
+    PricingAutomation:
+      type: object
+      required: [key, label, enabled]
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z0-9_]+$"
+        label:
+          type: string
+        enabled:
+          type: boolean
+    PricingRules:
+      type: object
+      required: [targetMarginPercent, fxSpreadPercent, dispatchFee, marginFloorPercent, routeMargins, automations]
+      properties:
+        targetMarginPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+        fxSpreadPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+        dispatchFee:
+          $ref: "#/components/schemas/Money"
+        marginFloorPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+        routeMargins:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteMargin"
+        automations:
+          type: array
+          items:
+            $ref: "#/components/schemas/PricingAutomation"
+    NewRouteMargin:
+      type: object
+      required: [route, marginPercent]
+      properties:
+        route:
+          $ref: "#/components/schemas/Route"
+        marginPercent:
+          description: Null applies the global margin floor.
+          oneOf:
+            - $ref: "#/components/schemas/DecimalPercent"
+            - type: "null"
+    AddRouteMarginsRequest:
+      type: object
+      required: [routes]
+      properties:
+        routes:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/NewRouteMargin"
+    UpdatePricingAutomationRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    UpdateCompanyIdentityRequest:
+      type: object
+      minProperties: 1
+      properties:
+        legalName:
+          type: string
+          minLength: 1
+        taxId:
+          type: string
+          pattern: "^\\d{2}\\.\\d{3}\\.\\d{3}/\\d{4}-\\d{2}$"
+          description: CNPJ, formatted.
+        address:
+          type: string
+          minLength: 1
+        primaryColor:
+          type: string
+          pattern: "^#[0-9a-f]{6}$"
+          description: Must be one of primaryColorOptions.
+        signature:
+          $ref: "#/components/schemas/CompanySignature"
+    CompanySignature:
+      type: object
+      required: [title, details]
+      properties:
+        title:
+          type: string
+        details:
+          type: string
+    CompanyIdentity:
+      type: object
+      required: [legalName, taxId, address, primaryColor, primaryColorOptions, signature, letterheadLogoUrl]
+      properties:
+        legalName:
+          type: string
+        taxId:
+          type: string
+          description: CNPJ, formatted.
+        address:
+          type: string
+        primaryColor:
+          type: string
+          pattern: "^#[0-9a-f]{6}$"
+        primaryColorOptions:
+          type: array
+          items:
+            type: string
+            pattern: "^#[0-9a-f]{6}$"
+        signature:
+          $ref: "#/components/schemas/CompanySignature"
+        letterheadLogoUrl:
+          type: [string, "null"]
+          format: uri
+    ConnectorKind:
+      type: string
+      enum: [fx, public_tariff, fx_reference]
+    Connector:
+      type: object
+      required: [id, name, kind, healthPercent, latencyMs, collectedAt, detail, repairing]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        kind:
+          $ref: "#/components/schemas/ConnectorKind"
+        healthPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        latencyMs:
+          type: integer
+          minimum: 0
+        collectedAt:
+          type: string
+          format: date-time
+        detail:
+          type: [string, "null"]
+        repairing:
+          type: boolean
+          description: True while a repair session is open for this connector.
+    ConnectorStats:
+      type: object
+      required: [activeSources, sourceKindsSummary, averageHealthPercent, degradedSourceNames, repairs7d, repairMeanMinutes, snapshots24h, collectionFailures24h]
+      properties:
+        activeSources:
+          type: integer
+        sourceKindsSummary:
+          type: string
+        averageHealthPercent:
+          $ref: "#/components/schemas/DecimalPercent"
+        degradedSourceNames:
+          type: array
+          items:
+            type: string
+        repairs7d:
+          type: integer
+        repairMeanMinutes:
+          type: integer
+        snapshots24h:
+          type: integer
+        collectionFailures24h:
+          type: integer
+    RepairEventKind:
+      type: string
+      enum: [anomaly, session_opened, tests_passed, pull_request_merged, reprocessed]
+    RepairEvent:
+      type: object
+      required: [at, kind, message, tag, sessionUrl]
+      properties:
+        at:
+          type: string
+          format: date-time
+        kind:
+          $ref: "#/components/schemas/RepairEventKind"
+        message:
+          type: string
+        tag:
+          type: string
+        sessionUrl:
+          type: [string, "null"]
+          format: uri
+    RepairTimeline:
+      type: object
+      required: [connectorName, events]
+      properties:
+        connectorName:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepairEvent"
+    ConnectorOverview:
+      type: object
+      required: [stats, connectors, liveRepair]
+      properties:
+        stats:
+          $ref: "#/components/schemas/ConnectorStats"
+        connectors:
+          type: array
+          items:
+            $ref: "#/components/schemas/Connector"
+        liveRepair:
+          oneOf:
+            - $ref: "#/components/schemas/RepairTimeline"
+            - type: "null"
+    RepairStats:
+      type: object
+      required: [repairs7d, successRatePercent, escalated7d, mttrMinutes, queued]
+      properties:
+        repairs7d:
+          type: integer
+        successRatePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        escalated7d:
+          type: integer
+        mttrMinutes:
+          type: integer
+        queued:
+          type: integer
+    RepairQueueItem:
+      type: object
+      required: [connectorName, state, scheduledAt]
+      properties:
+        connectorName:
+          type: string
+        state:
+          type: string
+          enum: [in_progress, waiting_slot, scheduled]
+        scheduledAt:
+          type: [string, "null"]
+          format: date-time
+    RepairSession:
+      type: object
+      required: [sessionNumber, connectorName, anomaly, result, durationMinutes, finishedAt]
+      properties:
+        sessionNumber:
+          type: integer
+        connectorName:
+          type: string
+        anomaly:
+          type: string
+        result:
+          type: string
+          enum: [resolved, escalated]
+        durationMinutes:
+          type: integer
+        finishedAt:
+          type: string
+          format: date-time
+    RepairOverview:
+      type: object
+      required: [stats, current, queue, history]
+      properties:
+        stats:
+          $ref: "#/components/schemas/RepairStats"
+        current:
+          oneOf:
+            - $ref: "#/components/schemas/RepairTimeline"
+            - type: "null"
+        queue:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepairQueueItem"
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepairSession"

@@ -15,7 +15,11 @@
 
 OAPI_CODEGEN_VERSION := v2.8.2
 
+PNPM := npx --yes pnpm@10.34.9
+
 generate:
 	cd ../../apps/core-api && \
 		go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@$(OAPI_CODEGEN_VERSION) \
 		-config oapi-codegen.yaml ../../packages/contracts/openapi/core-api.yaml
+	$(PNPM) --dir ../.. install --frozen-lockfile
+	$(PNPM) --dir ../.. --filter @quotepilot/contracts generate

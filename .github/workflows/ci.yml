@@ -140,11 +140,10 @@ jobs:
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
-          npx eslint .
-          npx prettier --check .
-          npx tsc --noEmit
+          # pnpm workspace (root pnpm-lock.yaml): apps/web depends on packages/contracts.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
+          pnpm --filter @quotepilot/web lint
 
       - name: OpenAPI lint (packages/contracts)
         run: |
@@ -229,10 +228,11 @@ jobs:
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          # pnpm workspace (root pnpm-lock.yaml): apps/web depends on packages/contracts.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
           # vitest is wired through the package.json "test" script (ADR-008 layer 10).
-          npm test
+          pnpm --filter @quotepilot/web test
 
       # No coverage gate (ADR-008 section 9): artifacts are published for review.
       - name: Upload coverage artifact
