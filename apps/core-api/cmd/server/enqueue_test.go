@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -65,6 +66,34 @@ func TestEnqueueAuthMailInsertsJob(t *testing.T) {
 	assert.Equal(t, "auth_mail_send", kind)
 	assert.Equal(t, outboxID.String(), argID,
 		"the job carries the outbox id alone — never the link")
+}
+
+// TestEnqueueAuthMailRollbackLeavesNoJob proves a staged insert dies with
+// its transaction: an in-tx InsertTx followed by a fn error rolls the
+// river_job row back with everything else. The count is scoped to this
+// test's own outbox id — a global count cannot tell this job from a
+// concurrent package's insert (go test runs package binaries in parallel
+// against the same database).
+func TestEnqueueAuthMailRollbackLeavesNoJob(t *testing.T) {
+	db := testenv.Open(t)
+	ctx := context.Background()
+	client := insertOnlyRiverClient(t, db.Pool())
+	outboxID := uuid.New()
+
+	errBoom := fmt.Errorf("boom")
+	err := platform.NewStore(db.Pool()).InStorePgxTx(ctx, func(_ *platform.Store, raw pgx.Tx) error {
+		if err := enqueueAuthMail(client)(ctx, raw, outboxID); err != nil {
+			return err
+		}
+		return errBoom
+	})
+	require.ErrorIs(t, err, errBoom)
+
+	var n int
+	require.NoError(t, db.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM river.river_job WHERE args->>'outbox_id' = $1`, outboxID.String()).
+		Scan(&n))
+	assert.Zero(t, n, "the rolled-back tx must take its staged job with it")
 }
 
 // TestEnqueueAuthMailErrorWraps proves the adapter's error path keeps the

@@ -21,7 +21,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/stretchr/testify/assert"
@@ -46,8 +45,6 @@ func TestLoginOutboxTxRollbackOnEnqueueFailure(t *testing.T) {
 	userID := seedSessionUser(t, migrator, email)
 	store := platform.NewStore(db.Pool())
 
-	jobsBefore := authMailJobCount(t, db.Pool(), ctx)
-
 	failEnqueue := func(context.Context, pgx.Tx, uuid.UUID) error { return errBoom }
 	rec := postLoginTo(t, loginHandler(t, sessionConfig(), store, failEnqueue), `{"email":"`+email+`"}`)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -63,8 +60,11 @@ func TestLoginOutboxTxRollbackOnEnqueueFailure(t *testing.T) {
 		JOIN app.auth_login_tokens tk ON tk.id = m.login_token_id
 		WHERE tk.user_id = $1`, userID).Scan(&pending))
 	assert.Zero(t, pending, "the aborted tx must leave no pending send behind")
-	assert.Equal(t, jobsBefore, authMailJobCount(t, db.Pool(), ctx),
-		"the rolled-back tx must leave no river_job row")
+	// No river_job count here: the enqueue errored before InsertTx ran, and
+	// a rolled-back job's outbox id is unattributable — a global count would
+	// race any concurrent package inserting the same kind (go test runs
+	// package binaries in parallel). The scoped proof lives in
+	// cmd/server's TestEnqueueAuthMailRollbackLeavesNoJob.
 }
 
 // TestLoginOutboxTxCommitLandsJob is the happy-path commit: the same
@@ -144,15 +144,4 @@ func postLoginTo(t *testing.T, handler http.Handler, body string) *httptest.Resp
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
-}
-
-// authMailJobCount counts queued auth_mail_send rows in river.river_job as
-// qp_app — the table is qp_app-readable (the driver itself needs it), which
-// is exactly why job args carry the outbox id and never the link.
-func authMailJobCount(t *testing.T, pool *pgxpool.Pool, ctx context.Context) int {
-	t.Helper()
-	var n int
-	require.NoError(t, pool.QueryRow(ctx,
-		`SELECT count(*) FROM river.river_job WHERE kind = 'auth_mail_send'`).Scan(&n))
-	return n
 }
