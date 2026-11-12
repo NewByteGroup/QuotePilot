@@ -1,7 +1,7 @@
-import { currentLocale } from '@/i18n'
+const LOCALE = 'pt-BR'
 
 export function formatDecimal(value: string | number, fractionDigits = 2): string {
-  return Number(value).toLocaleString(currentLocale(), {
+  return Number(value).toLocaleString(LOCALE, {
     minimumFractionDigits: fractionDigits,
     maximumFractionDigits: fractionDigits,
   })
@@ -12,7 +12,7 @@ export function formatPercent(value: string, fractionDigits = 1): string {
 }
 
 export function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString(currentLocale(), { hour: '2-digit', minute: '2-digit' })
+  return new Date(iso).toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })
 }
 
 export function initials(name: string | undefined): string {

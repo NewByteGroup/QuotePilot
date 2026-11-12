@@ -10,19 +10,32 @@ function brl(amount: string): Schemas['Money'] {
   return { amount, currency: 'BRL' }
 }
 
-export const sessionFixture: Schemas['Session'] = {
-  user: {
-    id: '7d1f0a52-6c39-4f7e-9a0e-0c5b8e2a1001',
-    name: 'Marcelo Corner',
-    role: 'admin',
-    organizationCount: 2,
-  },
-  organization: {
+export const ORGANIZATIONS: Schemas['SessionOrganization'][] = [
+  {
     id: '3b4c5d6e-7f80-4912-a3b4-c5d6e7f80001',
     name: 'Atlântico Cargo',
     planName: 'Plano Operação',
     inboundAddress: 'atlantico@in.quotepilot.app',
   },
+  {
+    id: '3b4c5d6e-7f80-4912-a3b4-c5d6e7f80002',
+    name: 'Pacífico Log',
+    planName: 'Plano Essencial',
+    inboundAddress: 'pacifico@in.quotepilot.app',
+  },
+]
+
+export const sessionFixture: Schemas['Session'] = {
+  user: {
+    id: '7d1f0a52-6c39-4f7e-9a0e-0c5b8e2a1001',
+    name: 'Marcelo Corner',
+    email: 'marcelo.corner@atlanticocargo.com.br',
+    role: 'admin',
+    organizationCount: 2,
+    language: 'pt',
+  },
+  organization: ORGANIZATIONS[0],
+  organizations: ORGANIZATIONS,
 }
 
 type QuoteSeed = Omit<Schemas['InboxQuote'], 'id' | 'slaDueAt' | 'receivedAt'> & {

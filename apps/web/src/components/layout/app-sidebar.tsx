@@ -1,10 +1,13 @@
-import { ChevronDown } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
+import { ChevronDown, Settings } from 'lucide-react'
+import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router'
 
 import type { Schemas } from '@/api/client'
 import { initials } from '@/lib/format'
 import { cn } from '@/lib/utils'
+
+import { OrganizationMenu } from './organization-menu'
+import { SettingsDialog } from './settings-dialog'
 
 type NavItem = { label: string; to: string; badge?: number; active?: boolean }
 
@@ -39,11 +42,43 @@ function NavSection({ title, items }: { title: string; items: NavItem[] }) {
 }
 
 export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarProps) {
-  const { t } = useTranslation()
   const { pathname } = useLocation()
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const organization = session?.organization
   const user = session?.user
   const companyName = identity?.legalName ?? organization?.name
+  const canSwitchOrganization = (session?.organizations.length ?? 0) > 1
+
+  const organizationCard = (
+    <button
+      type="button"
+      aria-label={canSwitchOrganization ? 'Trocar de empresa' : undefined}
+      disabled={!canSwitchOrganization}
+      className="enabled:hover:bg-muted mt-5 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left disabled:cursor-default"
+    >
+      {identity?.letterheadLogoUrl ? (
+        <img
+          src={identity.letterheadLogoUrl}
+          alt=""
+          className="size-8 shrink-0 rounded-md border bg-white object-contain p-0.5"
+        />
+      ) : (
+        <span
+          className="flex size-8 shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white"
+          style={{ backgroundColor: identity?.primaryColor ?? '#171717' }}
+        >
+          {companyName?.charAt(0) ?? '·'}
+        </span>
+      )}
+      <span className="min-w-0 flex-1 leading-tight">
+        <span className="block truncate text-sm font-medium">{companyName ?? '—'}</span>
+        <span className="text-muted-foreground block truncate text-xs">
+          {organization?.planName ?? ''}
+        </span>
+      </span>
+      {canSwitchOrganization ? <ChevronDown className="text-muted-foreground size-4" /> : null}
+    </button>
+  )
 
   return (
     <aside className="bg-card sticky top-0 hidden h-svh w-60 shrink-0 flex-col border-r px-3 py-5 lg:flex">
@@ -52,56 +87,35 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
         <span className="font-semibold">QuotePilot</span>
       </div>
 
-      <button
-        type="button"
-        className="hover:bg-muted mt-5 flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left"
-      >
-        {identity?.letterheadLogoUrl ? (
-          <img
-            src={identity.letterheadLogoUrl}
-            alt=""
-            className="size-8 shrink-0 rounded-md border bg-white object-contain p-0.5"
-          />
-        ) : (
-          <span
-            className="flex size-8 shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white"
-            style={{ backgroundColor: identity?.primaryColor ?? '#171717' }}
-          >
-            {companyName?.charAt(0) ?? '·'}
-          </span>
-        )}
-        <span className="min-w-0 flex-1 leading-tight">
-          <span className="block truncate text-sm font-medium">{companyName ?? '—'}</span>
-          <span className="text-muted-foreground block truncate text-xs">
-            {organization?.planName ?? ''}
-          </span>
-        </span>
-        <ChevronDown className="text-muted-foreground size-4" />
-      </button>
+      {session && canSwitchOrganization ? (
+        <OrganizationMenu session={session}>{organizationCard}</OrganizationMenu>
+      ) : (
+        organizationCard
+      )}
 
-      <nav className="mt-3 flex-1" aria-label={t('nav.main')}>
+      <nav className="mt-3 flex-1" aria-label="Principal">
         <NavSection
-          title={t('nav.company')}
+          title="Empresa"
           items={[
             {
-              label: t('nav.inbox'),
+              label: 'Inbox de cotações',
               to: '/',
               badge: inboxPendingCount,
               active: pathname === '/' || pathname.startsWith('/quotes'),
             },
-            { label: t('nav.rates'), to: '/tarifas', active: pathname.startsWith('/tarifas') },
+            { label: 'Tarifas & regras', to: '/tarifas', active: pathname.startsWith('/tarifas') },
           ]}
         />
         <NavSection
-          title={t('nav.platform')}
+          title="Plataforma"
           items={[
             {
-              label: t('nav.connectors'),
+              label: 'Conectores',
               to: '/conectores',
               active: pathname.startsWith('/conectores'),
             },
             {
-              label: t('nav.repairs'),
+              label: 'Auto-reparo',
               to: '/auto-reparo',
               active: pathname.startsWith('/auto-reparo'),
             },
@@ -114,13 +128,22 @@ export function AppSidebar({ session, identity, inboxPendingCount }: AppSidebarP
           <span className="bg-accent text-accent-foreground flex size-9 items-center justify-center rounded-full text-xs font-semibold">
             {initials(user.name)}
           </span>
-          <span className="min-w-0 leading-tight">
+          <span className="min-w-0 flex-1 leading-tight">
             <span className="block truncate text-sm font-medium">{user.name}</span>
             <span className="text-muted-foreground block truncate text-xs">
-              {user.role === 'admin' ? t('nav.admin') : t('nav.operator')} ·{' '}
-              {t('nav.organizations', { count: user.organizationCount })}
+              {user.role === 'admin' ? 'Admin' : 'Operador'} ·{' '}
+              {`${user.organizationCount} empresas`}
             </span>
           </span>
+          <button
+            type="button"
+            aria-label="Configurações"
+            onClick={() => setSettingsOpen(true)}
+            className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5 transition-colors"
+          >
+            <Settings className="size-4" />
+          </button>
+          <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} />
         </div>
       ) : null}
     </aside>

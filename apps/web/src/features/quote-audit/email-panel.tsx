@@ -1,6 +1,4 @@
 import { FileText } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
-
 import type { Schemas } from '@/api/client'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -28,22 +26,21 @@ type EmailPanelProps = {
 }
 
 export function EmailPanel({ email, extraction, now }: EmailPanelProps) {
-  const { t } = useTranslation()
   return (
     <Card className="gap-0 rounded-lg py-0 shadow-none">
       <CardHeader className="flex flex-row items-center justify-between border-b px-4 py-4">
-        <CardTitle className="text-base">{t('email.title')}</CardTitle>
+        <CardTitle className="text-base">E-mail original</CardTitle>
         <Badge variant="secondary" className="rounded-sm font-normal">
-          {t('email.thread')}
+          thread do cliente
         </Badge>
       </CardHeader>
       <CardContent className="space-y-5 p-4">
         <dl className="grid grid-cols-[3.5rem_1fr] gap-y-1 border-b pb-4 text-sm">
-          <dt className="text-muted-foreground text-xs leading-5">{t('email.from')}</dt>
+          <dt className="text-muted-foreground text-xs leading-5">De</dt>
           <dd>{email.from}</dd>
-          <dt className="text-muted-foreground text-xs leading-5">{t('email.to')}</dt>
+          <dt className="text-muted-foreground text-xs leading-5">Para</dt>
           <dd>{email.to}</dd>
-          <dt className="text-muted-foreground text-xs leading-5">{t('email.date')}</dt>
+          <dt className="text-muted-foreground text-xs leading-5">Data</dt>
           <dd>{formatReceivedAt(email.receivedAt, now)}</dd>
         </dl>
 
@@ -61,7 +58,7 @@ export function EmailPanel({ email, extraction, now }: EmailPanelProps) {
 
         {email.attachments.length > 0 ? (
           <div className="space-y-2">
-            <SectionLabel>{t('email.attachments')}</SectionLabel>
+            <SectionLabel>Anexos</SectionLabel>
             {email.attachments.map((attachment) => (
               <div
                 key={attachment.fileName}
@@ -80,8 +77,8 @@ export function EmailPanel({ email, extraction, now }: EmailPanelProps) {
         ) : null}
 
         <div className="space-y-2">
-          <SectionLabel>{t('email.extraction')}</SectionLabel>
-          <ul aria-label={t('email.extraction')} className="divide-y rounded-md border text-sm">
+          <SectionLabel>Extração do agente</SectionLabel>
+          <ul aria-label="Extração do agente" className="divide-y rounded-md border text-sm">
             {extraction.map((field) => (
               <li key={field.label} className="flex items-center justify-between px-3 py-2">
                 <span className="flex items-center gap-2">

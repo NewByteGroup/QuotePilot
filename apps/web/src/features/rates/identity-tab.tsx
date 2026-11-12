@@ -1,6 +1,4 @@
 import { useEffect, useId, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
-import { useTranslation } from 'react-i18next'
-
 import type { Schemas } from '@/api/client'
 import {
   useCompanyIdentity,
@@ -60,10 +58,10 @@ function changedFields(
   return patch
 }
 
-function validationErrorKey(draft: Draft): string | null {
-  if (!draft.legalName.trim() || !draft.address.trim()) return 'identity.required'
-  if (!CNPJ_PATTERN.test(draft.taxId)) return 'identity.invalidTaxId'
-  if (!draft.signatureTitle.trim()) return 'identity.signatureRequired'
+function validationError(draft: Draft): string | null {
+  if (!draft.legalName.trim() || !draft.address.trim()) return 'Preencha razão social e endereço.'
+  if (!CNPJ_PATTERN.test(draft.taxId)) return 'CNPJ inválido: use 14 dígitos.'
+  if (!draft.signatureTitle.trim()) return 'Preencha a linha principal da assinatura.'
   return null
 }
 
@@ -107,7 +105,6 @@ function Field({
 }
 
 function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
-  const { t } = useTranslation()
   const update = useUpdateCompanyIdentity()
   const upload = useUploadLetterheadLogo()
   const remove = useRemoveLetterheadLogo()
@@ -116,7 +113,7 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
 
   const [draft, setDraft] = useState(() => draftFrom(identity))
   const [logo, setLogo] = useState<LogoChange>({ kind: 'none' })
-  const [errorKey, setErrorKey] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
   const patch = changedFields(identity, draft)
@@ -145,9 +142,9 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
-    if (!LOGO_TYPES.includes(file.type)) return setErrorKey('identity.invalidFormat')
-    if (file.size > LOGO_MAX_BYTES) return setErrorKey('identity.tooLarge')
-    setErrorKey(null)
+    if (!LOGO_TYPES.includes(file.type)) return setError('Formato inválido: use PNG, JPEG ou SVG.')
+    if (file.size > LOGO_MAX_BYTES) return setError('Arquivo grande demais: envie até 2 MB.')
+    setError(null)
     setSaved(false)
     setLogo({ kind: 'upload', file, previewUrl: await readAsDataUrl(file) })
   }
@@ -155,14 +152,14 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
   function discard() {
     setDraft(draftFrom(identity))
     setLogo({ kind: 'none' })
-    setErrorKey(null)
+    setError(null)
   }
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
-    const invalid = validationErrorKey(draft)
-    if (invalid) return setErrorKey(invalid)
-    setErrorKey(null)
+    const invalid = validationError(draft)
+    if (invalid) return setError(invalid)
+    setError(null)
     try {
       if (Object.keys(patch).length > 0) await update.mutateAsync(patch)
       if (logo.kind === 'upload') await upload.mutateAsync(logo.file)
@@ -170,13 +167,13 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
       setLogo({ kind: 'none' })
       setSaved(true)
     } catch {
-      setErrorKey('identity.saveError')
+      setError('Não foi possível salvar as alterações. Tente de novo.')
     }
   }
 
   return (
     <form onSubmit={handleSubmit} noValidate className="space-y-4">
-      <Panel title={t('identity.companyData')}>
+      <Panel title="Dados da empresa">
         <div className="flex items-start gap-4 p-4">
           <span
             className="flex size-12 shrink-0 items-center justify-center rounded-md text-sm font-semibold text-white"
@@ -186,12 +183,12 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
           </span>
           <div className="grid flex-1 gap-3 sm:grid-cols-2">
             <Field
-              label={t('identity.legalName')}
+              label="Razão social"
               value={draft.legalName}
               onChange={(legalName) => change({ legalName })}
             />
             <Field
-              label={t('identity.taxId')}
+              label="CNPJ"
               value={draft.taxId}
               inputMode="numeric"
               placeholder="00.000.000/0000-00"
@@ -199,7 +196,7 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
             />
             <div className="sm:col-span-2">
               <Field
-                label={t('identity.address')}
+                label="Endereço"
                 value={draft.address}
                 onChange={(address) => change({ address })}
               />
@@ -208,10 +205,12 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
         </div>
       </Panel>
 
-      <Panel title={t('identity.primaryColor')}>
+      <Panel title="Cor primária">
         <div className="space-y-3 p-4 text-sm">
-          <p className="text-muted-foreground">{t('identity.colorHint')}</p>
-          <div role="radiogroup" aria-label={t('identity.primaryColor')} className="flex gap-3">
+          <p className="text-muted-foreground">
+            Selecione a cor de destaque usada em CTAs e acentos
+          </p>
+          <div role="radiogroup" aria-label="Cor primária" className="flex gap-3">
             {identity.primaryColorOptions.map((color) => {
               const selected = color === draft.primaryColor
               return (
@@ -220,7 +219,7 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  aria-label={t('identity.colorOption', { color })}
+                  aria-label={`Cor ${color}`}
                   onClick={() => change({ primaryColor: color })}
                   className={cn(
                     'size-7 rounded-full transition-shadow',
@@ -233,19 +232,21 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
               )
             })}
           </div>
-          <p className="text-muted-foreground text-xs">{t('identity.colorNote')}</p>
+          <p className="text-muted-foreground text-xs">
+            PDF timbrado e e-mails usam esta cor como destaque.
+          </p>
         </div>
       </Panel>
 
-      <Panel title={t('identity.signature')}>
+      <Panel title="Assinatura">
         <div className="grid gap-3 p-4 sm:grid-cols-2">
           <Field
-            label={t('identity.signatureTitle')}
+            label="Linha principal"
             value={draft.signatureTitle}
             onChange={(signatureTitle) => change({ signatureTitle })}
           />
           <Field
-            label={t('identity.signatureDetails')}
+            label="Detalhes"
             value={draft.signatureDetails}
             onChange={(signatureDetails) => change({ signatureDetails })}
           />
@@ -253,7 +254,7 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
       </Panel>
 
       <Panel
-        title={t('identity.letterhead')}
+        title="Timbrado PDF"
         action={
           <div className="flex gap-2">
             {logoUrl ? (
@@ -266,18 +267,18 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
                   setLogo(identity.letterheadLogoUrl ? { kind: 'remove' } : { kind: 'none' })
                 }}
               >
-                {t('common.remove')}
+                Remover
               </Button>
             ) : null}
             <Button type="button" size="sm" onClick={() => inputRef.current?.click()}>
-              {logoUrl ? t('identity.replaceLogo') : t('identity.uploadLogo')}
+              {logoUrl ? 'Trocar logo' : 'Enviar logo'}
             </Button>
           </div>
         }
       >
         <div className="space-y-2 p-4">
           <label htmlFor={fileInputId} className="sr-only">
-            {t('identity.logoFile')}
+            Arquivo do logo
           </label>
           <input
             ref={inputRef}
@@ -290,42 +291,42 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
           {logoUrl ? (
             <img
               src={logoUrl}
-              alt={t('identity.logo')}
+              alt="Logo da empresa"
               className="h-20 max-w-40 rounded-md border object-contain p-2"
             />
           ) : (
             <div className="bg-muted/50 text-muted-foreground flex h-20 w-40 items-center justify-center rounded-md border text-xs">
-              {t('identity.logo')}
+              Logo da empresa
             </div>
           )}
-          <p className="text-muted-foreground text-xs">{t('identity.logoHint')}</p>
+          <p className="text-muted-foreground text-xs">PNG, JPEG ou SVG, até 2 MB.</p>
         </div>
       </Panel>
 
       <div className="bg-card sticky bottom-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 shadow-sm">
         <div className="text-sm">
-          {errorKey ? (
+          {error ? (
             <p role="alert" className="text-red-700">
-              {t(errorKey)}
+              {error}
             </p>
           ) : (
             <p role="status" className={cn(dirty ? 'text-amber-700' : 'text-muted-foreground')}>
               {saving
-                ? t('common.saving')
+                ? 'Salvando…'
                 : dirty
-                  ? t('identity.unsaved')
+                  ? 'Você tem alterações não salvas.'
                   : saved
-                    ? t('identity.saved')
-                    : t('identity.noChanges')}
+                    ? 'Alterações salvas.'
+                    : 'Nenhuma alteração pendente.'}
             </p>
           )}
         </div>
         <div className="flex gap-2">
           <Button type="button" variant="outline" disabled={!dirty || saving} onClick={discard}>
-            {t('identity.discard')}
+            Descartar
           </Button>
           <Button type="submit" disabled={!dirty || saving}>
-            {t('identity.saveChanges')}
+            Salvar alterações
           </Button>
         </div>
       </div>
@@ -334,10 +335,9 @@ function IdentityForm({ identity }: { identity: Schemas['CompanyIdentity'] }) {
 }
 
 export function IdentityTab() {
-  const { t } = useTranslation()
   const identity = useCompanyIdentity()
   if (!identity.data) {
-    return <QueryFallback isError={identity.isError} what={t('identity.what')} />
+    return <QueryFallback isError={identity.isError} what="a identidade" />
   }
   return <IdentityForm identity={identity.data} />
 }

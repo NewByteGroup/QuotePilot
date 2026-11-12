@@ -26,6 +26,34 @@ export function useSession() {
   })
 }
 
+export function useSwitchOrganization(options: { onSwitched?: () => void } = {}) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: Schemas['SwitchOrganizationRequest']) =>
+      unwrap(
+        'POST /v1/session/organization',
+        await apiClient.POST('/v1/session/organization', { body }),
+      ),
+    onSuccess: async (session) => {
+      queryClient.setQueryData(['session'], session)
+      // Everything else is scoped to the organization: drop it and refetch for the new one.
+      await queryClient.resetQueries({
+        predicate: (query) => query.queryKey[0] !== 'session',
+      })
+      options.onSwitched?.()
+    },
+  })
+}
+
+export function useUpdateUserPreferences() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (body: Schemas['UpdateUserPreferencesRequest']) =>
+      unwrap('PATCH /v1/me/preferences', await apiClient.PATCH('/v1/me/preferences', { body })),
+    onSuccess: (session) => queryClient.setQueryData(['session'], session),
+  })
+}
+
 export function useInboxQuotes(filters: InboxFilters = {}) {
   return useQuery({
     queryKey: ['inbox-quotes', filters],

@@ -38,9 +38,9 @@ describe('Identidade da empresa', () => {
     expect(
       within(screen.getByRole('complementary')).getByText('Atlântico Cargo S.A.'),
     ).toBeVisible()
-    expect(localStorage.getItem('quotepilot.mock.company-identity')).toContain(
-      'Atlântico Cargo S.A.',
-    )
+    expect(
+      localStorage.getItem('quotepilot.mock.company-identity.3b4c5d6e-7f80-4912-a3b4-c5d6e7f80001'),
+    ).toContain('Atlântico Cargo S.A.')
   })
 
   it('stages the primary color until saved', async () => {

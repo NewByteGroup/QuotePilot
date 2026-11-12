@@ -21,6 +21,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/session/organization": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make another of the user's organizations the active one
+         * @description Every organization-scoped endpoint then answers for the new organization.
+         */
+        post: operations["switchOrganization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/me/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update the display name or language of the signed-in user
+         * @description Send only the fields to change. The language is stored server-side and used for every
+         *     text core-api sends to this user. The email is synced from the identity provider and
+         *     cannot be changed here.
+         */
+        patch: operations["updateUserPreferences"];
+        trace?: never;
+    };
     "/v1/inbox/quotes": {
         parameters: {
             query?: never;
@@ -204,15 +246,37 @@ export interface components {
         };
         Session: {
             user: components["schemas"]["SessionUser"];
+            /** @description Active organization; all organization-scoped endpoints answer for it. */
             organization: components["schemas"]["SessionOrganization"];
+            /** @description Every organization the user belongs to, including the active one. */
+            organizations: components["schemas"]["SessionOrganization"][];
+        };
+        SwitchOrganizationRequest: {
+            /** Format: uuid */
+            organizationId: string;
         };
         SessionUser: {
             /** Format: uuid */
             id: string;
             name: string;
+            /**
+             * Format: email
+             * @description Synced from the identity provider; not editable in web.
+             */
+            readonly email: string;
             /** @enum {string} */
             role: "admin" | "operator";
             organizationCount: number;
+            language: components["schemas"]["UserLanguage"];
+        };
+        /**
+         * @description Language core-api uses for the texts it sends to this user.
+         * @enum {string}
+         */
+        UserLanguage: "pt" | "en" | "es";
+        UpdateUserPreferencesRequest: {
+            name?: string;
+            language?: components["schemas"]["UserLanguage"];
         };
         SessionOrganization: {
             /** Format: uuid */
@@ -577,6 +641,58 @@ export interface operations {
                     "application/json": components["schemas"]["Session"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    switchOrganization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchOrganizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Session with the new active organization. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateUserPreferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUserPreferencesRequest"];
+            };
+        };
+        responses: {
+            /** @description Session with the updated user. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
         };
     };

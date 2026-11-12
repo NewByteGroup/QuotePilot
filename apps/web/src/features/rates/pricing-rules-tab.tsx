@@ -1,6 +1,4 @@
 import { useState } from 'react'
-import { useTranslation } from 'react-i18next'
-
 import { usePricingRules, useUpdatePricingAutomation } from '@/api/queries'
 import { Panel, QueryFallback } from '@/components/panel'
 import { StatusPill } from '@/components/status-pill'
@@ -30,61 +28,60 @@ function Parameter({ label, value }: { label: string; value: string }) {
 }
 
 export function PricingRulesTab() {
-  const { t } = useTranslation()
   const rules = usePricingRules()
   const toggle = useUpdatePricingAutomation()
   const [dialogOpen, setDialogOpen] = useState(false)
 
-  if (!rules.data) return <QueryFallback isError={rules.isError} what={t('pricingRules.what')} />
+  if (!rules.data) return <QueryFallback isError={rules.isError} what="as regras de preço" />
   const data = rules.data
 
   return (
     <div className="space-y-4">
       <Panel
-        title={t('pricingRules.general')}
+        title="Parâmetros gerais"
         action={
-          <Button variant="outline" size="sm" disabled title={t('pricingRules.editPending')}>
-            {t('common.edit')}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled
+            title="Disponível quando o core-api expuser a edição no contrato."
+          >
+            Editar
           </Button>
         }
       >
         <dl className="grid gap-4 p-4 text-sm sm:grid-cols-2">
+          <Parameter label="Margem alvo" value={formatPercent(data.targetMarginPercent)} />
           <Parameter
-            label={t('pricingRules.targetMargin')}
-            value={formatPercent(data.targetMarginPercent)}
+            label="Spread cambial"
+            value={`+${formatPercent(data.fxSpreadPercent, 2)} s/ dólar armador`}
           />
+          <Parameter label="Taxa fixa de despacho" value={formatMoney(data.dispatchFee)} />
           <Parameter
-            label={t('pricingRules.fxSpread')}
-            value={t('pricingRules.fxSpreadValue', {
-              percent: formatPercent(data.fxSpreadPercent, 2),
-            })}
-          />
-          <Parameter label={t('pricingRules.dispatchFee')} value={formatMoney(data.dispatchFee)} />
-          <Parameter
-            label={t('pricingRules.floor')}
+            label="Piso de margem por rota"
             value={formatPercent(data.marginFloorPercent)}
           />
         </dl>
       </Panel>
 
       <Panel
-        title={t('pricingRules.routeMargins')}
+        title="Margem por rota"
         action={
           <Button size="sm" onClick={() => setDialogOpen(true)}>
-            {t('pricingRules.addRoute')}
+            Adicionar rota
           </Button>
         }
       >
         <p className="text-muted-foreground px-4 pt-3 text-xs">
-          {t('pricingRules.customizations', { percent: formatPercent(data.marginFloorPercent) })}
+          {`Personalizações sobre o piso global de ${formatPercent(data.marginFloorPercent)}`}
         </p>
         <Table>
           <TableHeader>
             <TableRow className="text-xs hover:bg-transparent">
-              <TableHead className="pl-4">{t('pricingRules.route')}</TableHead>
-              <TableHead className="text-right">{t('pricingRules.defaultMargin')}</TableHead>
-              <TableHead className="text-right">{t('pricingRules.appliedMargin')}</TableHead>
-              <TableHead className="pr-4">{t('pricingRules.status')}</TableHead>
+              <TableHead className="pl-4">Rota</TableHead>
+              <TableHead className="text-right">Margem padrão</TableHead>
+              <TableHead className="text-right">Margem aplicada</TableHead>
+              <TableHead className="pr-4">Status</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -103,9 +100,9 @@ export function PricingRulesTab() {
                 </TableCell>
                 <TableCell className="pr-4">
                   {item.customized ? (
-                    <StatusPill tone="violet">{t('pricingRules.customized')}</StatusPill>
+                    <StatusPill tone="violet">Personalizada</StatusPill>
                   ) : (
-                    <StatusPill tone="neutral">{t('pricingRules.default')}</StatusPill>
+                    <StatusPill tone="neutral">Padrão</StatusPill>
                   )}
                 </TableCell>
               </TableRow>
@@ -114,7 +111,7 @@ export function PricingRulesTab() {
         </Table>
       </Panel>
 
-      <Panel title={t('pricingRules.automations')}>
+      <Panel title="Automações de preço">
         <ul className="divide-y">
           {data.automations.map((automation) => (
             <li
@@ -133,7 +130,7 @@ export function PricingRulesTab() {
         </ul>
         {toggle.isError ? (
           <p role="alert" className="border-t px-4 py-2 text-sm text-red-700">
-            {t('pricingRules.automationError')}
+            Não foi possível salvar a automação.
           </p>
         ) : null}
       </Panel>

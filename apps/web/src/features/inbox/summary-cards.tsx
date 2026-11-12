@@ -1,5 +1,3 @@
-import { useTranslation } from 'react-i18next'
-
 import type { Schemas } from '@/api/client'
 import { Card, CardContent } from '@/components/ui/card'
 
@@ -31,36 +29,32 @@ function SummaryCard({
 }
 
 export function SummaryCards({ summary, now }: { summary: Schemas['InboxSummary']; now: Date }) {
-  const { t } = useTranslation()
   const delta = summary.receivedToday - summary.receivedYesterday
   const urgent = summary.mostUrgentSlaRisk
   return (
-    <section
-      aria-label={t('inbox.summary.label')}
-      className="grid grid-cols-2 gap-3 xl:grid-cols-4"
-    >
+    <section aria-label="Resumo" className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       <SummaryCard
-        label={t('inbox.summary.today')}
+        label="RFQs hoje"
         value={String(summary.receivedToday)}
-        hint={t('inbox.summary.vsYesterday', { delta: `${delta >= 0 ? '+' : ''}${delta}` })}
+        hint={`${`${delta >= 0 ? '+' : ''}${delta}`} vs ontem`}
       />
       <SummaryCard
-        label={t('inbox.summary.ready')}
+        label="Prontas para 1-clique"
         value={String(summary.readyToSend)}
-        hint={t('inbox.summary.confidence', { percent: summary.autoApproveConfidencePercent })}
+        hint={`confiança ≥ ${summary.autoApproveConfidencePercent}%`}
       />
       <SummaryCard
-        label={t('inbox.summary.avgResponse')}
-        value={t('common.minutes', { count: summary.avgResponseMinutes })}
-        hint={t('inbox.summary.target', { count: summary.responseTargetMinutes })}
+        label="Tempo médio de resposta"
+        value={`${summary.avgResponseMinutes} min`}
+        hint={`meta < ${summary.responseTargetMinutes} min`}
       />
       <SummaryCard
-        label={t('inbox.summary.slaRisk')}
+        label="SLA em risco"
         value={String(summary.slaAtRiskCount)}
         hint={
           urgent
-            ? `${urgent.customerName} · ${t('common.minutes', { count: minutesUntil(urgent.slaDueAt, now) })}`
-            : t('inbox.summary.noQuote')
+            ? `${urgent.customerName} · ${`${minutesUntil(urgent.slaDueAt, now)} min`}`
+            : 'nenhuma cotação'
         }
         alert={summary.slaAtRiskCount > 0}
       />

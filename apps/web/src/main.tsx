@@ -3,7 +3,6 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
 import App from './App'
-import './i18n'
 import './index.css'
 
 // Mock is on until core-api exists; set VITE_API_MOCK=false to hit a real backend.

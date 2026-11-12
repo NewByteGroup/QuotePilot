@@ -1,5 +1,3 @@
-import { useTranslation } from 'react-i18next'
-
 import type { Schemas } from '@/api/client'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -72,15 +70,14 @@ type PricePanelProps = {
 }
 
 export function PricePanel({ pricing, status }: PricePanelProps) {
-  const { t } = useTranslation()
   const hasInferred = pricing?.sections.some((section) => section.items.some((i) => i.inferred))
-  const pendingHint = t('price.actionPending')
+  const pendingHint = 'Disponível quando o core-api expuser a ação no contrato.'
   return (
     <Card className="gap-0 rounded-lg py-0 shadow-none">
       <CardHeader className="flex flex-row items-center justify-between border-b px-4 py-4">
-        <CardTitle className="text-base">{t('price.title')}</CardTitle>
+        <CardTitle className="text-base">Composição do preço</CardTitle>
         <Badge variant="secondary" className="rounded-sm font-normal">
-          {t('price.auditable')}
+          memória de cálculo auditável
         </Badge>
       </CardHeader>
 
@@ -93,12 +90,12 @@ export function PricePanel({ pricing, status }: PricePanelProps) {
 
             <div className="space-y-1.5 border-t pt-3 text-sm">
               <div className="flex justify-between">
-                <span className="text-muted-foreground">{t('price.totalCost')}</span>
+                <span className="text-muted-foreground">Custo total</span>
                 <span className="font-semibold tabular-nums">{formatMoney(pricing.totalCost)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">
-                  {t('price.margin', { percent: formatPercent(pricing.marginPercent, 0) })}
+                  {`Margem alvo (${formatPercent(pricing.marginPercent, 0)})`}
                 </span>
                 <span className="font-semibold text-green-700 tabular-nums">
                   {formatMoney(pricing.margin)}
@@ -107,7 +104,7 @@ export function PricePanel({ pricing, status }: PricePanelProps) {
             </div>
 
             <div className="flex items-center justify-between rounded-lg bg-violet-50 px-4 py-4 text-violet-700">
-              <span className="font-medium">{t('price.proposal')}</span>
+              <span className="font-medium">Total da proposta</span>
               <span className="text-2xl font-bold tabular-nums">
                 {formatMoney(pricing.proposalTotal)}
               </span>
@@ -116,12 +113,12 @@ export function PricePanel({ pricing, status }: PricePanelProps) {
             <div className="text-muted-foreground flex flex-wrap gap-5 text-xs">
               <span className="flex items-center gap-1.5">
                 <span aria-hidden className="size-1.5 rounded-full bg-green-600" />
-                {t('price.confidence', { percent: pricing.confidencePercent })}
+                {`${pricing.confidencePercent}% confiança`}
               </span>
               {hasInferred ? (
                 <span className="flex items-center gap-1.5">
                   <span aria-hidden className="size-1.5 rounded-full bg-orange-500" />
-                  {t('price.inferred')}
+                  inferido — revise antes de enviar
                 </span>
               ) : null}
             </div>
@@ -130,21 +127,23 @@ export function PricePanel({ pricing, status }: PricePanelProps) {
           <div className="space-y-3 border-t p-4">
             <div className="flex flex-wrap justify-end gap-2">
               <Button variant="ghost" disabled title={pendingHint}>
-                {t('price.reject')}
+                Reprovar
               </Button>
               <Button variant="outline" disabled title={pendingHint}>
-                {t('price.editValues')}
+                Editar valores
               </Button>
               <Button disabled title={pendingHint}>
-                {status === 'sent' ? t('price.sent') : t('price.approve')}
+                {status === 'sent' ? 'Enviado' : 'Aprovar e enviar (1-clique)'}
               </Button>
             </div>
-            <p className="text-muted-foreground text-xs">{t('price.sendNote')}</p>
+            <p className="text-muted-foreground text-xs">
+              O envio usa a identidade da empresa e responde na thread original do cliente (Resend).
+            </p>
           </div>
         </>
       ) : (
         <CardContent className="text-muted-foreground p-4 text-sm">
-          {t('price.processing')}
+          Cotação em processamento: a composição do preço aparece quando o agente terminar.
         </CardContent>
       )}
     </Card>

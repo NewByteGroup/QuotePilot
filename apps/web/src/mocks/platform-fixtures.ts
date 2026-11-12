@@ -217,13 +217,32 @@ export function addRouteMargins(
   }
 }
 
-export function buildCompanyIdentity(): Schemas['CompanyIdentity'] {
+const PRIMARY_COLOR_OPTIONS = ['#0f172a', '#2563eb', '#0d9488', '#171717']
+
+// Each organization has its own identity; the second one gets generic data derived from its name.
+export function buildCompanyIdentity(
+  organization?: Schemas['SessionOrganization'],
+): Schemas['CompanyIdentity'] {
+  if (organization && organization.name !== 'Atlântico Cargo') {
+    return {
+      legalName: `${organization.name} Ltda`,
+      taxId: '98.765.432/0001-10',
+      address: 'Av. Beira-Mar, 200 · Itajaí/SC · Brasil',
+      primaryColor: '#0d9488',
+      primaryColorOptions: PRIMARY_COLOR_OPTIONS,
+      signature: {
+        title: `${organization.name} Ltda — Logística Internacional`,
+        details: 'Itajaí · SC · Brasil · (47) 0000-0000',
+      },
+      letterheadLogoUrl: null,
+    }
+  }
   return {
     legalName: 'Atlântico Cargo Ltda',
     taxId: '12.345.678/0001-90',
     address: 'Av. Paulista, 1000 · São Paulo/SP · Brasil',
     primaryColor: '#0f172a',
-    primaryColorOptions: ['#0f172a', '#2563eb', '#0d9488', '#171717'],
+    primaryColorOptions: PRIMARY_COLOR_OPTIONS,
     signature: {
       title: 'Atlântico Cargo Ltda — Comércio Exterior',
       details: 'São Paulo · SP · Brasil · (11) 0000-0000',

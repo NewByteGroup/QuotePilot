@@ -1,7 +1,5 @@
 import { RefreshCw, Search } from 'lucide-react'
 import { useDeferredValue, useState } from 'react'
-import { useTranslation } from 'react-i18next'
-
 import { useInboxQuotes, useSession } from '@/api/queries'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,7 +10,6 @@ import { StatusFilters, type StatusFilter } from './status-filters'
 import { SummaryCards } from './summary-cards'
 
 export function InboxPage() {
-  const { t } = useTranslation()
   const [status, setStatus] = useState<StatusFilter>('all')
   const [search, setSearch] = useState('')
   const deferredSearch = useDeferredValue(search)
@@ -30,10 +27,10 @@ export function InboxPage() {
     <main className="min-w-0 flex-1 space-y-5 p-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t('inbox.title')}</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Inbox de cotações</h1>
           <p className="text-muted-foreground text-sm">
-            {t('inbox.receivedAt', { address: session.data?.organization.inboundAddress ?? '…' })}
-            {page ? t('inbox.updated', { when: formatRelative(page.refreshedAt, now) }) : null}
+            {`RFQs recebidos em ${session.data?.organization.inboundAddress ?? '…'}`}
+            {page ? ` · atualizado ${formatRelative(page.refreshedAt, now)}` : null}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -41,8 +38,8 @@ export function InboxPage() {
             <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
             <Input
               type="search"
-              aria-label={t('inbox.searchLabel')}
-              placeholder={t('inbox.searchPlaceholder')}
+              aria-label="Buscar RFQ ou cliente"
+              placeholder="Buscar RFQ, cliente..."
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               className="bg-card w-56 pl-9"
@@ -50,7 +47,7 @@ export function InboxPage() {
           </div>
           <Button variant="outline" onClick={() => inbox.refetch()} disabled={inbox.isFetching}>
             <RefreshCw className={inbox.isFetching ? 'animate-spin' : undefined} />
-            {t('inbox.refresh')}
+            Atualizar
           </Button>
         </div>
       </header>
@@ -60,7 +57,7 @@ export function InboxPage() {
           role="alert"
           className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700"
         >
-          {t('inbox.loadError')}
+          Não foi possível carregar as cotações. Tente atualizar.
         </p>
       ) : null}
 
@@ -71,7 +68,7 @@ export function InboxPage() {
           <QuotesTable quotes={page.items} totalCount={page.statusCounts.all} now={now} />
         </>
       ) : inbox.isPending ? (
-        <p className="text-muted-foreground text-sm">{t('inbox.loading')}</p>
+        <p className="text-muted-foreground text-sm">Carregando cotações…</p>
       ) : null}
     </main>
   )

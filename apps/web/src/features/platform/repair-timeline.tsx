@@ -1,6 +1,4 @@
 import { ArrowUpRight } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
-
 import type { Schemas } from '@/api/client'
 import { StatusPill, type PillTone } from '@/components/status-pill'
 import { formatTime } from '@/lib/format'
@@ -33,9 +31,8 @@ export function RepairTimeline({
   highlightAnomaly = false,
   showSessionLink = false,
 }: RepairTimelineProps) {
-  const { t } = useTranslation()
   return (
-    <ol aria-label={t('repairs.timeline', { name: timeline.connectorName })} className="px-4 py-3">
+    <ol aria-label={`Linha do tempo · ${timeline.connectorName}`} className="px-4 py-3">
       {timeline.events.map((event, index) => (
         <li key={index} className="relative flex items-center gap-4 py-2 text-sm">
           {index < timeline.events.length - 1 ? (
@@ -61,7 +58,7 @@ export function RepairTimeline({
               rel="noreferrer"
               className="text-primary inline-flex items-center gap-1 text-xs hover:underline"
             >
-              {t('repairs.viewSession')}
+              Ver sessão
               <ArrowUpRight className="size-3" aria-hidden />
             </a>
           ) : null}

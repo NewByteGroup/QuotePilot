@@ -1,5 +1,4 @@
 import { Mail } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
 import { Link, useNavigate } from 'react-router'
 
 import type { Schemas } from '@/api/client'
@@ -57,21 +56,20 @@ type QuotesTableProps = {
 }
 
 export function QuotesTable({ quotes, totalCount, now }: QuotesTableProps) {
-  const { t } = useTranslation()
   const navigate = useNavigate()
   return (
     <div className="bg-card overflow-hidden rounded-lg border">
       <Table>
         <TableHeader>
           <TableRow className="text-xs hover:bg-transparent">
-            <TableHead className="pl-4">{t('inbox.table.customer')}</TableHead>
-            <TableHead>{t('inbox.table.route')}</TableHead>
-            <TableHead>{t('inbox.table.mode')}</TableHead>
-            <TableHead>{t('inbox.table.status')}</TableHead>
-            <TableHead className="text-right">{t('inbox.table.estimated')}</TableHead>
-            <TableHead className="text-right">{t('inbox.table.confidence')}</TableHead>
-            <TableHead className="text-right">{t('inbox.table.sla')}</TableHead>
-            <TableHead className="pr-4 text-right">{t('inbox.table.received')}</TableHead>
+            <TableHead className="pl-4">Cliente / assunto</TableHead>
+            <TableHead>Rota</TableHead>
+            <TableHead>Modal</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Valor estimado</TableHead>
+            <TableHead className="text-right">Confiança</TableHead>
+            <TableHead className="text-right">SLA</TableHead>
+            <TableHead className="pr-4 text-right">Recebido</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -130,14 +128,14 @@ export function QuotesTable({ quotes, totalCount, now }: QuotesTableProps) {
           {quotes.length === 0 ? (
             <TableRow>
               <TableCell colSpan={8} className="text-muted-foreground py-10 text-center">
-                {t('inbox.table.empty')}
+                Nenhuma cotação encontrada.
               </TableCell>
             </TableRow>
           ) : null}
         </TableBody>
       </Table>
       <p className="text-muted-foreground border-t px-4 py-3 text-xs">
-        {t('inbox.table.showing', { shown: quotes.length, total: totalCount })}
+        {`Mostrando ${quotes.length} de ${totalCount} cotações`}
       </p>
     </div>
   )

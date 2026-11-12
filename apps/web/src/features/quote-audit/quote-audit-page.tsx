@@ -1,5 +1,4 @@
 import { ChevronLeft } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
 import { Link, useParams } from 'react-router'
 
 import { useQuoteDetail } from '@/api/queries'
@@ -14,7 +13,6 @@ import { PricePanel } from './price-panel'
 const HIGH_PRIORITY_MINUTES = 90
 
 function SlaBox({ dueAt, atRisk, now }: { dueAt: string; atRisk: boolean; now: Date }) {
-  const { t } = useTranslation()
   const minutesLeft = minutesUntil(dueAt, now)
   const high = atRisk || minutesLeft < HIGH_PRIORITY_MINUTES
   return (
@@ -24,25 +22,19 @@ function SlaBox({ dueAt, atRisk, now }: { dueAt: string; atRisk: boolean; now: D
         high ? 'border-red-300 bg-red-50 text-red-700' : 'bg-card text-muted-foreground',
       )}
     >
-      <p>{t('audit.slaUntil', { time: formatTime(dueAt) })}</p>
-      <p>
-        {t('audit.slaRemaining', {
-          duration: formatDuration(minutesLeft),
-          priority: high ? t('audit.high') : t('audit.normal'),
-        })}
-      </p>
+      <p>{`SLA: responder até ${formatTime(dueAt)}`}</p>
+      <p>{`restam ${formatDuration(minutesLeft)} · prioridade ${high ? 'alta' : 'normal'}`}</p>
     </div>
   )
 }
 
 export function QuoteAuditPage() {
-  const { t } = useTranslation()
   const { quoteId = '' } = useParams()
   const detail = useQuoteDetail(quoteId)
   const now = new Date()
 
   if (detail.isPending) {
-    return <main className="text-muted-foreground flex-1 p-6 text-sm">{t('audit.loading')}</main>
+    return <main className="text-muted-foreground flex-1 p-6 text-sm">Carregando cotação…</main>
   }
 
   if (detail.isError) {
@@ -52,10 +44,10 @@ export function QuoteAuditPage() {
           role="alert"
           className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700"
         >
-          {t('audit.loadError')}
+          Não foi possível carregar esta cotação.
         </p>
         <Link to="/" className="text-primary text-sm hover:underline">
-          {t('audit.back')}
+          Voltar para a inbox
         </Link>
       </main>
     )
@@ -69,7 +61,7 @@ export function QuoteAuditPage() {
           <div className="flex flex-wrap items-center gap-3">
             <Link
               to="/"
-              aria-label={t('audit.back')}
+              aria-label="Voltar para a inbox"
               className="text-muted-foreground hover:text-foreground"
             >
               <ChevronLeft className="size-5" />
@@ -80,16 +72,13 @@ export function QuoteAuditPage() {
             <StatusBadge status={quote.status} />
           </div>
           <p className="text-muted-foreground pl-8 text-sm">
-            {t('audit.received', {
-              subject: quote.subject,
-              when: formatReceivedAt(quote.receivedAt, now),
-            })}
+            {`${quote.subject} · recebido ${formatReceivedAt(quote.receivedAt, now)}`}
           </p>
           <Link
             to={`/quotes/${quote.id}/aprovacao`}
             className="text-primary pl-8 text-sm hover:underline"
           >
-            {t('audit.approvalEmailLink')}
+            Ver e-mail de aprovação
           </Link>
         </div>
         {quote.slaDueAt ? (

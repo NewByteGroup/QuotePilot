@@ -38,6 +38,55 @@ paths:
                 $ref: "#/components/schemas/Session"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /v1/session/organization:
+    post:
+      operationId: switchOrganization
+      summary: Make another of the user's organizations the active one
+      description: Every organization-scoped endpoint then answers for the new organization.
+      tags: [session]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SwitchOrganizationRequest"
+      responses:
+        "200":
+          description: Session with the new active organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/me/preferences:
+    patch:
+      operationId: updateUserPreferences
+      summary: Update the display name or language of the signed-in user
+      description: |
+        Send only the fields to change. The language is stored server-side and used for every
+        text core-api sends to this user. The email is synced from the identity provider and
+        cannot be changed here.
+      tags: [session]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserPreferencesRequest"
+      responses:
+        "200":
+          description: Session with the updated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/inbox/quotes:
     get:
       operationId: listInboxQuotes
@@ -310,27 +359,64 @@ components:
           type: string
     Session:
       type: object
-      required: [user, organization]
+      required: [user, organization, organizations]
       properties:
         user:
           $ref: "#/components/schemas/SessionUser"
         organization:
+          description: Active organization; all organization-scoped endpoints answer for it.
           $ref: "#/components/schemas/SessionOrganization"
+        organizations:
+          type: array
+          description: Every organization the user belongs to, including the active one.
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/SessionOrganization"
+    SwitchOrganizationRequest:
+      type: object
+      required: [organizationId]
+      properties:
+        organizationId:
+          type: string
+          format: uuid
     SessionUser:
       type: object
-      required: [id, name, role, organizationCount]
+      required: [id, name, email, role, organizationCount, language]
       properties:
         id:
           type: string
           format: uuid
         name:
           type: string
+          minLength: 1
+          maxLength: 120
+        email:
+          type: string
+          format: email
+          readOnly: true
+          description: Synced from the identity provider; not editable in web.
         role:
           type: string
           enum: [admin, operator]
         organizationCount:
           type: integer
           minimum: 1
+        language:
+          $ref: "#/components/schemas/UserLanguage"
+    UserLanguage:
+      type: string
+      description: Language core-api uses for the texts it sends to this user.
+      enum: [pt, en, es]
+    UpdateUserPreferencesRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        language:
+          $ref: "#/components/schemas/UserLanguage"
     SessionOrganization:
       type: object
       required: [id, name, planName, inboundAddress]

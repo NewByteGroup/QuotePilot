@@ -1,18 +1,32 @@
 import type { Schemas } from '@/api/client'
-import i18n, { currentLocale } from '@/i18n'
 
 const MINUTE_MS = 60_000
+const LOCALE = 'pt-BR'
+
+const STATUS_LABELS: Record<Schemas['QuoteStatus'], string> = {
+  processing: 'Processando',
+  awaiting_review: 'Aguardando revisão',
+  ready_to_send: 'Pronto para 1-clique',
+  sent: 'Enviado',
+}
+
+const EQUIPMENT_LABELS: Record<Schemas['Equipment'], string> = {
+  fcl_20dv: 'FCL 20DV',
+  fcl_40hc: 'FCL 40HC',
+  lcl: 'LCL',
+  air: 'Aéreo',
+}
 
 export function statusLabel(status: Schemas['QuoteStatus']): string {
-  return i18n.t(`quoteStatus.${status}`)
+  return STATUS_LABELS[status]
 }
 
 export function equipmentLabel(equipment: Schemas['Equipment']): string {
-  return i18n.t(`equipment.${equipment}`)
+  return EQUIPMENT_LABELS[equipment]
 }
 
 export function formatMoney(money: Schemas['Money']): string {
-  return new Intl.NumberFormat(currentLocale(), {
+  return new Intl.NumberFormat(LOCALE, {
     style: 'currency',
     currency: money.currency,
   }).format(Number(money.amount))
@@ -34,18 +48,17 @@ function startOfDay(date: Date): number {
 
 export function formatReceivedAt(iso: string, now: Date): string {
   const date = new Date(iso)
-  const locale = currentLocale()
-  const time = date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })
+  const time = date.toLocaleTimeString(LOCALE, { hour: '2-digit', minute: '2-digit' })
   const daysAgo = Math.round((startOfDay(now) - startOfDay(date)) / (24 * 60 * MINUTE_MS))
-  if (daysAgo === 0) return i18n.t('time.todayAt', { time })
-  if (daysAgo === 1) return i18n.t('time.yesterdayAt', { time })
-  const day = date.toLocaleDateString(locale, { day: '2-digit', month: '2-digit' })
-  return i18n.t('time.dateAt', { date: day, time })
+  if (daysAgo === 0) return `hoje ${time}`
+  if (daysAgo === 1) return `ontem ${time}`
+  const day = date.toLocaleDateString(LOCALE, { day: '2-digit', month: '2-digit' })
+  return `${day} ${time}`
 }
 
 export function formatRelative(iso: string, now: Date): string {
   const minutes = Math.max(0, Math.round((now.getTime() - new Date(iso).getTime()) / MINUTE_MS))
-  if (minutes < 1) return i18n.t('time.now')
-  if (minutes < 60) return i18n.t('time.minutesAgo', { count: minutes })
-  return i18n.t('time.hoursAgo', { count: Math.floor(minutes / 60) })
+  if (minutes < 1) return 'agora'
+  if (minutes < 60) return `há ${minutes} min`
+  return `há ${Math.floor(minutes / 60)} h`
 }

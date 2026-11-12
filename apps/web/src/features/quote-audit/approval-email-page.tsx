@@ -1,5 +1,4 @@
 import { ChevronLeft } from 'lucide-react'
-import { useTranslation } from 'react-i18next'
 import { Link, useParams } from 'react-router'
 
 import { useCompanyIdentity, useQuoteDetail, useSession } from '@/api/queries'
@@ -21,7 +20,6 @@ function SummaryRow({ label, value, strong }: { label: string; value: string; st
 }
 
 export function ApprovalEmailPage() {
-  const { t } = useTranslation()
   const { quoteId = '' } = useParams()
   const detail = useQuoteDetail(quoteId)
   const session = useSession()
@@ -30,7 +28,7 @@ export function ApprovalEmailPage() {
   if (!detail.data) {
     return (
       <main className="flex-1 p-6">
-        <QueryFallback isError={detail.isError} what={t('approval.what')} />
+        <QueryFallback isError={detail.isError} what="a cotação" />
       </main>
     )
   }
@@ -48,19 +46,21 @@ export function ApprovalEmailPage() {
       <header className="flex items-center gap-3">
         <Link
           to={auditPath}
-          aria-label={t('approval.back')}
+          aria-label="Voltar para a auditoria"
           className="text-muted-foreground hover:text-foreground"
         >
           <ChevronLeft className="size-5" />
         </Link>
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">{t('approval.title')}</h1>
-          <p className="text-muted-foreground text-sm">{t('approval.subtitle')}</p>
+          <h1 className="text-2xl font-bold tracking-tight">E-mail de aprovação</h1>
+          <p className="text-muted-foreground text-sm">
+            Prévia do e-mail enviado ao aprovador interno
+          </p>
         </div>
       </header>
 
       <article
-        aria-label={t('approval.preview')}
+        aria-label="Prévia do e-mail de aprovação"
         className="bg-card mx-auto max-w-xl overflow-hidden rounded-xl border"
       >
         <header
@@ -76,13 +76,13 @@ export function ApprovalEmailPage() {
           )}
           <div className="leading-tight">
             <p className="font-semibold">{organizationName ?? '…'}</p>
-            <p className="text-xs text-white/70">{t('approval.via')}</p>
+            <p className="text-xs text-white/70">alçada de aprovação interna · via QuotePilot</p>
           </div>
         </header>
 
         <div className="space-y-5 px-6 py-6">
           <div>
-            <h2 className="text-xl font-bold">{t('approval.heading')}</h2>
+            <h2 className="text-xl font-bold">Cotação pronta para sua aprovação</h2>
             <p className="text-muted-foreground text-sm">
               RFQ #{quote.rfqNumber} · {quote.customerName} · {quote.route.origin} →{' '}
               {quote.route.destination} ({equipmentLabel(quote.equipment)})
@@ -93,24 +93,21 @@ export function ApprovalEmailPage() {
             <>
               <dl className="bg-muted/40 divide-y rounded-lg border text-sm">
                 <SummaryRow
-                  label={t('price.proposal')}
+                  label="Total da proposta"
                   value={formatMoney(pricing.proposalTotal)}
                   strong
                 />
                 <SummaryRow
-                  label={t('approval.netMargin')}
+                  label="Margem líquida"
                   value={`${formatPercent(pricing.marginPercent)} · ${formatMoney(pricing.margin)}`}
                 />
                 <SummaryRow
-                  label={t('approval.fx')}
+                  label="Câmbio aplicado"
                   value={`${pricing.fx.label} ${formatDecimal(pricing.fx.rate)} (${pricing.fx.referenceLabel} ${formatDecimal(pricing.fx.referenceRate)})`}
                 />
                 <SummaryRow
-                  label={t('approval.validity')}
-                  value={t('approval.validityValue', {
-                    hours: pricing.validityHours,
-                    threshold: formatPercent(pricing.recalcFxThresholdPercent, 0),
-                  })}
+                  label="Validade"
+                  value={`${pricing.validityHours} h · recalcula se o câmbio variar > ${formatPercent(pricing.recalcFxThresholdPercent, 0)}`}
                 />
               </dl>
 
@@ -120,12 +117,14 @@ export function ApprovalEmailPage() {
                   className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm"
                 >
                   <p className="font-medium text-amber-800">
-                    {t('approval.inferred', { count: inferredItems.length })}
+                    {inferredItems.length === 1
+                      ? '1 item inferido pelo agente'
+                      : `${inferredItems.length} itens inferidos pelo agente`}
                   </p>
                   {inferredItems.map((item) => (
                     <p key={item.label} className="text-amber-700">
                       {item.label}
-                      {item.detail ? ` — ${item.detail}` : null} — {t('approval.reviewSuffix')}
+                      {item.detail ? ` — ${item.detail}` : null} — revise antes de enviar.
                     </p>
                   ))}
                 </div>
@@ -136,24 +135,31 @@ export function ApprovalEmailPage() {
                   className="flex-1 text-white hover:opacity-90"
                   style={{ backgroundColor: brandColor }}
                   disabled
-                  title={t('price.actionPending')}
+                  title="Disponível quando o core-api expuser a ação no contrato."
                 >
-                  {t('approval.approve')}
+                  Aprovar e enviar ao cliente
                 </Button>
                 <Button variant="outline" asChild>
-                  <Link to={auditPath}>{t('approval.viewCalc')}</Link>
+                  <Link to={auditPath}>Ver memória de cálculo</Link>
                 </Button>
               </div>
-              <p className="text-muted-foreground text-center text-xs">{t('approval.tokenNote')}</p>
+              <p className="text-muted-foreground text-center text-xs">
+                {
+                  'Link exclusivo de uso único · expira em 24 h · token HMAC {quote_id, org, action}'
+                }
+              </p>
             </>
           ) : (
-            <p className="text-muted-foreground text-sm">{t('approval.processing')}</p>
+            <p className="text-muted-foreground text-sm">
+              Cotação ainda em processamento: o e-mail de aprovação sai quando a composição do preço
+              estiver pronta.
+            </p>
           )}
         </div>
 
         <footer className="text-muted-foreground border-t px-6 py-4 text-center text-xs">
-          <p>{t('approval.footerReason', { org: organizationName ?? '…' })}</p>
-          <p>{t('approval.footerLgpd')}</p>
+          <p>{`Você recebeu este e-mail porque é aprovador em ${organizationName ?? '…'}.`}</p>
+          <p>Tratamento de dados conforme LGPD · descadastrar</p>
         </footer>
       </article>
     </main>

@@ -1,6 +1,3 @@
-import type { TFunction } from 'i18next'
-import { useTranslation } from 'react-i18next'
-
 import type { Schemas } from '@/api/client'
 import { useNetRateTables } from '@/api/queries'
 import { Panel, QueryFallback } from '@/components/panel'
@@ -35,16 +32,18 @@ function daysUntil(isoDate: string, now: Date): number {
   return Math.max(0, Math.round((parseDate(isoDate).getTime() - today.getTime()) / DAY_MS))
 }
 
-function statusLabel(table: Schemas['NetRateTable'], now: Date, t: TFunction): string {
+function statusLabel(table: Schemas['NetRateTable'], now: Date): string {
   switch (table.status) {
     case 'active':
-      return t('netRates.active')
+      return 'Ativa'
     case 'expired':
-      return t('netRates.expired')
+      return 'Expirada'
     case 'processing':
-      return t('netRates.processing', { percent: table.processingPercent ?? 0 })
-    case 'expiring':
-      return t('netRates.expiring', { count: daysUntil(table.validTo, now) })
+      return `Processando ${table.processingPercent ?? 0}%`
+    case 'expiring': {
+      const days = daysUntil(table.validTo, now)
+      return `Expira em ${days} ${days === 1 ? 'dia' : 'dias'}`
+    }
   }
 }
 
@@ -58,21 +57,20 @@ function validityRange(table: Schemas['NetRateTable']): string {
 }
 
 export function NetRatesTab() {
-  const { t } = useTranslation()
   const tables = useNetRateTables()
   const now = new Date()
-  const uploadPending = t('netRates.uploadPending')
+  const uploadPending = 'Disponível quando o core-api expuser o upload no contrato.'
 
   return (
     <Panel
-      title={t('netRates.title')}
+      title="Tabelas negociadas (net rates)"
       action={
         <div className="flex gap-2">
           <Button variant="outline" size="sm" disabled title={uploadPending}>
-            {t('netRates.newFolder')}
+            Nova pasta
           </Button>
           <Button size="sm" disabled title={uploadPending}>
-            {t('netRates.upload')}
+            Enviar CSV / PDF
           </Button>
         </div>
       }
@@ -82,11 +80,11 @@ export function NetRatesTab() {
           <Table>
             <TableHeader>
               <TableRow className="text-xs hover:bg-transparent">
-                <TableHead className="pl-4">{t('netRates.carrier')}</TableHead>
-                <TableHead>{t('netRates.route')}</TableHead>
-                <TableHead>{t('netRates.validity')}</TableHead>
-                <TableHead>{t('netRates.file')}</TableHead>
-                <TableHead className="pr-4">{t('netRates.status')}</TableHead>
+                <TableHead className="pl-4">Armador</TableHead>
+                <TableHead>Rota</TableHead>
+                <TableHead>Vigência</TableHead>
+                <TableHead>Arquivo</TableHead>
+                <TableHead className="pr-4">Status</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -98,14 +96,14 @@ export function NetRatesTab() {
                     <p className="text-xs font-semibold">{table.weekLabel}</p>
                     <p className="text-muted-foreground text-xs">
                       {table.status === 'processing'
-                        ? t('netRates.uploadedAt', { time: formatTime(table.uploadedAt) })
+                        ? `upload ${formatTime(table.uploadedAt)}`
                         : validityRange(table)}
                     </p>
                   </TableCell>
                   <TableCell className="text-xs">{table.fileName}</TableCell>
                   <TableCell className="pr-4">
                     <StatusPill tone={STATUS_TONES[table.status]}>
-                      {statusLabel(table, now, t)}
+                      {statusLabel(table, now)}
                     </StatusPill>
                   </TableCell>
                 </TableRow>
@@ -115,13 +113,13 @@ export function NetRatesTab() {
           {tables.data.staleQuoteCount > 0 ? (
             <p className="flex items-center gap-2 border-t px-4 py-3 text-sm text-red-600">
               <span aria-hidden className="size-1.5 rounded-full bg-red-600" />
-              {t('netRates.stale', { count: tables.data.staleQuoteCount })}
+              {`Tabela expirada: ${tables.data.staleQuoteCount} cotações usaram snapshot antigo — reprocessar?`}
             </p>
           ) : null}
         </>
       ) : (
         <div className="p-4">
-          <QueryFallback isError={tables.isError} what={t('netRates.what')} />
+          <QueryFallback isError={tables.isError} what="as tabelas" />
         </div>
       )}
     </Panel>
