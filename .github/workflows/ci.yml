@@ -774,16 +774,17 @@ jobs:
           cache: ${{ hashFiles('apps/web/package-lock.json') != '' && 'npm' || '' }}
           cache-dependency-path: apps/web/package-lock.json
 
-      - name: npm audit (production dependencies only)
+      - name: pnpm audit (production dependencies only)
         run: |
           if [ ! -f apps/web/package.json ]; then
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          # npm audit reads the lockfile; generate it without installing when absent.
-          if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
-          npm audit --omit=dev
+          # pnpm workspace: npm cannot resolve workspace:* and has no lockfile
+          # here; audit the committed root pnpm-lock.yaml instead.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
+          pnpm audit --prod
 
       # Scans locally built images; when the registry/deploy story lands
       # (ADR-007) this should reuse the images produced by the `build` job
