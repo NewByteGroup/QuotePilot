@@ -19,7 +19,7 @@ describe('Troca de empresa', () => {
     expect(await screen.findByText('Pacífico Log Ltda')).toBeInTheDocument()
     expect(screen.getByText('Plano Essencial')).toBeInTheDocument()
     expect(
-      await screen.findByText('RFQs recebidos em pacifico@in.quotepilot.app'),
+      await screen.findByText(/RFQs recebidos em pacifico@in\.quotepilot\.app/),
     ).toBeInTheDocument()
     expect(await screen.findByText(/Mostrando 7 de 7 cotações/)).toBeInTheDocument()
 

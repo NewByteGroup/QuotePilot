@@ -7,7 +7,6 @@ import { API_BASE_URL } from '@/api/client'
 import {
   buildInboxQuotes,
   buildInboxSummary,
-  buildQuoteDetail,
   countByStatus,
   ORGANIZATIONS,
   sessionFixture,
@@ -24,6 +23,7 @@ import {
   buildPricingRules,
   buildRepairOverview,
 } from './platform-fixtures'
+import { buildQuoteDetail } from './quote-detail-fixtures'
 
 const http = createOpenApiHttp<paths>({ baseUrl: API_BASE_URL })
 
@@ -43,7 +43,7 @@ export function buildInboxQuotePage(
   const searched = all.filter((quote) => matchesSearch(quote, search))
   return {
     items: searched.filter((quote) => !status || quote.status === status),
-    summary: buildInboxSummary(all),
+    summary: buildInboxSummary(all, now),
     statusCounts: countByStatus(searched),
     refreshedAt: new Date(now.getTime() - 2 * 60_000).toISOString(),
   }
@@ -215,7 +215,7 @@ export const handlers = [
     if (!quote) {
       return response(404).json({ code: 'not_found', message: 'Quote not found' })
     }
-    return response(200).json(buildQuoteDetail(quote))
+    return response(200).json(buildQuoteDetail(quote, session.organization))
   }),
   http.get('/v1/rates/net-rate-tables', ({ response }) =>
     response(200).json(organizationNetRates(new Date())),
