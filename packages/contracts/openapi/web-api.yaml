@@ -2,8 +2,9 @@
 # client types (generated/ts/web-api.ts) and openapi-msw types the MSW mock that
 # lets apps/web run before core-api exposes these endpoints. core-api.yaml is
 # the request edge core-api already implements (auth, /me); the endpoints below
-# are to be folded into it (as 3.0.3, per ADR-002) with Pedro as each one lands.
-openapi: 3.1.0
+# are to be folded into it with Pedro as each one lands. This file is written
+# as OpenAPI 3.0.3, per ADR-002.
+openapi: 3.0.3
 info:
   title: QuotePilot web API (mock contract)
   version: 0.1.0
@@ -13,7 +14,7 @@ info:
     Money is always a decimal string plus an ISO 4217 currency, never a JSON number.
   license:
     name: Apache-2.0
-    identifier: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
 servers:
   - url: /api
 security:
@@ -354,7 +355,7 @@ components:
       properties:
         code:
           type: string
-          examples: [invalid_parameter]
+          example: invalid_parameter
         message:
           type: string
     Session:
@@ -441,7 +442,7 @@ components:
     UnLocode:
       type: string
       pattern: "^[A-Z]{2}[A-Z2-9]{3}$"
-      examples: [BRSSZ]
+      example: BRSSZ
     Route:
       type: object
       required: [origin, destination]
@@ -458,11 +459,11 @@ components:
           type: string
           pattern: "^-?\\d+(\\.\\d+)?$"
           description: Decimal amount as a string (no floats).
-          examples: ["23260.55"]
+          example: "23260.55"
         currency:
           type: string
           pattern: "^[A-Z]{3}$"
-          examples: [BRL]
+          example: BRL
     InboxQuote:
       type: object
       required:
@@ -497,17 +498,20 @@ components:
           $ref: "#/components/schemas/QuoteStatus"
         estimatedTotal:
           description: Null while the quote is still processing.
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/Money"
-            - type: "null"
         confidencePercent:
           description: Deterministic extraction confidence (RFC-004). Null while processing.
-          type: [integer, "null"]
+          type: integer
+          nullable: true
           minimum: 0
           maximum: 100
         slaDueAt:
           description: Deadline to answer the customer. Null once the quote is sent.
-          type: [string, "null"]
+          type: string
+          nullable: true
           format: date-time
         slaAtRisk:
           type: boolean
@@ -577,9 +581,10 @@ components:
           type: integer
           minimum: 0
         mostUrgentSlaRisk:
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/SlaRiskHighlight"
-            - type: "null"
     InboxQuotePage:
       type: object
       required: [items, summary, statusCounts, refreshedAt]
@@ -610,9 +615,10 @@ components:
             $ref: "#/components/schemas/ExtractedField"
         pricing:
           description: Null while the quote is still processing.
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/PriceComposition"
-            - type: "null"
     QuoteEmail:
       type: object
       required: [from, to, receivedAt, paragraphs, attachments]
@@ -711,15 +717,17 @@ components:
         title:
           type: string
         source:
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/PriceSource"
-            - type: "null"
         items:
           type: array
           items:
             $ref: "#/components/schemas/PriceItem"
         note:
-          type: [string, "null"]
+          type: string
+          nullable: true
     PriceSource:
       type: object
       required: [label, kind]
@@ -736,7 +744,8 @@ components:
         label:
           type: string
         detail:
-          type: [string, "null"]
+          type: string
+          nullable: true
         amount:
           $ref: "#/components/schemas/Money"
         inferred:
@@ -793,7 +802,8 @@ components:
         status:
           $ref: "#/components/schemas/NetRateTableStatus"
         processingPercent:
-          type: [integer, "null"]
+          type: integer
+          nullable: true
           minimum: 0
           maximum: 100
     NetRateTablePage:
@@ -859,9 +869,10 @@ components:
           $ref: "#/components/schemas/Route"
         marginPercent:
           description: Null applies the global margin floor.
-          oneOf:
+          type: string
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/DecimalPercent"
-            - type: "null"
     AddRouteMarginsRequest:
       type: object
       required: [routes]
@@ -927,7 +938,8 @@ components:
         signature:
           $ref: "#/components/schemas/CompanySignature"
         letterheadLogoUrl:
-          type: [string, "null"]
+          type: string
+          nullable: true
           format: uri
     ConnectorKind:
       type: string
@@ -954,7 +966,8 @@ components:
           type: string
           format: date-time
         detail:
-          type: [string, "null"]
+          type: string
+          nullable: true
         repairing:
           type: boolean
           description: True while a repair session is open for this connector.
@@ -997,7 +1010,8 @@ components:
         tag:
           type: string
         sessionUrl:
-          type: [string, "null"]
+          type: string
+          nullable: true
           format: uri
     RepairTimeline:
       type: object
@@ -1020,9 +1034,10 @@ components:
           items:
             $ref: "#/components/schemas/Connector"
         liveRepair:
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/RepairTimeline"
-            - type: "null"
     RepairStats:
       type: object
       required: [repairs7d, successRatePercent, escalated7d, mttrMinutes, queued]
@@ -1049,7 +1064,8 @@ components:
           type: string
           enum: [in_progress, waiting_slot, scheduled]
         scheduledAt:
-          type: [string, "null"]
+          type: string
+          nullable: true
           format: date-time
     RepairSession:
       type: object
@@ -1076,9 +1092,10 @@ components:
         stats:
           $ref: "#/components/schemas/RepairStats"
         current:
-          oneOf:
+          type: object
+          nullable: true
+          allOf:
             - $ref: "#/components/schemas/RepairTimeline"
-            - type: "null"
         queue:
           type: array
           items:

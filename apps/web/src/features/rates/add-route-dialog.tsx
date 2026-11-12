@@ -13,21 +13,31 @@ import {
 import { Input } from '@/components/ui/input'
 import { formatPercent } from '@/lib/format'
 
-const ORIGIN_PORTS = [
+// Both directions need the full list: export quotes leave from BR ports and
+// air quotes land at BRGRU, so origin and destination share every UN/LOCODE.
+const PORTS = [
   'BEANR',
+  'BRGRU',
+  'BRITJ',
+  'BRNVT',
+  'BRPNG',
+  'BRRIG',
+  'BRSSZ',
+  'BRSUA',
+  'BRVIX',
   'CNNSA',
   'CNQDG',
   'CNSHA',
   'CNSZX',
   'DEHAM',
   'DESTR',
+  'INBOM',
   'INNSA',
   'KRPUS',
   'NLRTM',
   'PTLIS',
   'USMIA',
 ]
-const DESTINATION_PORTS = ['BRITJ', 'BRNVT', 'BRPNG', 'BRRIG', 'BRSSZ', 'BRSUA', 'BRVIX']
 const MARGIN_PATTERN = /^\d+([.,]\d+)?$/
 
 type RouteRow = { origin: string; destination: string; margin: string }
@@ -48,6 +58,14 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
   const addRoutes = useAddRouteMargins()
 
   const completeRows = rows.filter((row) => row.origin && row.destination)
+  // Two rows with the same route would persist conflicting margins; block
+  // submit and name the route so the user fixes it instead of dropping one.
+  const duplicateRow = completeRows.find((row, index) =>
+    completeRows.some(
+      (other, otherIndex) =>
+        otherIndex < index && other.origin === row.origin && other.destination === row.destination,
+    ),
+  )
   const marginsValid = rows.every(
     (row) => row.margin.trim() === '' || MARGIN_PATTERN.test(row.margin.trim()),
   )
@@ -99,7 +117,7 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
                   className={selectClassName}
                 >
                   <option value="">Selecionar porto…</option>
-                  {ORIGIN_PORTS.map((port) => (
+                  {PORTS.map((port) => (
                     <option key={port}>{port}</option>
                   ))}
                 </select>
@@ -110,7 +128,7 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
                   className={selectClassName}
                 >
                   <option value="">Selecionar porto…</option>
-                  {DESTINATION_PORTS.map((port) => (
+                  {PORTS.map((port) => (
                     <option key={port}>{port}</option>
                   ))}
                 </select>
@@ -140,6 +158,11 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
               Margem inválida: use um número, por exemplo 10,5.
             </p>
           ) : null}
+          {duplicateRow ? (
+            <p role="alert" className="text-sm text-red-700">
+              {`Rota duplicada: ${duplicateRow.origin} → ${duplicateRow.destination}.`}
+            </p>
+          ) : null}
           {addRoutes.isError ? (
             <p role="alert" className="text-sm text-red-700">
               Não foi possível salvar as rotas.
@@ -152,7 +175,12 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
             </Button>
             <Button
               type="submit"
-              disabled={completeRows.length === 0 || !marginsValid || addRoutes.isPending}
+              disabled={
+                completeRows.length === 0 ||
+                !marginsValid ||
+                duplicateRow !== undefined ||
+                addRoutes.isPending
+              }
             >
               Salvar rotas
             </Button>

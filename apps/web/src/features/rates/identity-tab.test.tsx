@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { server } from '@/mocks/node'
 import { buildCompanyIdentity } from '@/mocks/platform-fixtures'
@@ -71,24 +71,26 @@ describe('Identidade da empresa', () => {
   })
 
   it('uploads and removes the letterhead logo on save', async () => {
-    // jsdom's File/FormData can't be sent through Node's fetch, so the upload response is stubbed.
+    // jsdom's File loses its name and content through Node's multipart serializer, so
+    // the test spies on FormData.append to assert the File the app actually sends.
+    const appendSpy = vi.spyOn(FormData.prototype, 'append')
+    let contentType: string | null = null
     server.use(
-      http.put('*/v1/organization/identity/letterhead-logo', () =>
-        HttpResponse.json({
+      http.put('*/v1/organization/identity/letterhead-logo', ({ request }) => {
+        contentType = request.headers.get('content-type')
+        return HttpResponse.json({
           ...buildCompanyIdentity(),
           letterheadLogoUrl: 'data:image/svg+xml;base64,PHN2Zy8+',
-        }),
-      ),
+        })
+      }),
     )
     renderApp('/tarifas/identidade')
     const user = userEvent.setup()
 
-    await user.upload(
-      await screen.findByLabelText('Arquivo do logo'),
-      new File(['<svg xmlns="http://www.w3.org/2000/svg"/>'], 'logo.svg', {
-        type: 'image/svg+xml',
-      }),
-    )
+    const logo = new File(['<svg xmlns="http://www.w3.org/2000/svg"/>'], 'logo.svg', {
+      type: 'image/svg+xml',
+    })
+    await user.upload(await screen.findByLabelText('Arquivo do logo'), logo)
     expect(await screen.findByRole('img', { name: 'Logo da empresa' })).toBeInTheDocument()
     await user.click(saveButton())
     await waitFor(() =>
@@ -97,6 +99,10 @@ describe('Identidade da empresa', () => {
         'data:image/svg+xml;base64,PHN2Zy8+',
       ),
     )
+    expect(contentType).toContain('multipart/form-data')
+    const sentFile = appendSpy.mock.calls.find(([name]) => name === 'file')?.[1]
+    expect(sentFile).toBeInstanceOf(File)
+    expect(sentFile).toMatchObject({ name: logo.name, type: logo.type, size: logo.size })
 
     await user.click(screen.getByRole('button', { name: 'Remover' }))
     expect(screen.queryByRole('img', { name: 'Logo da empresa' })).not.toBeInTheDocument()

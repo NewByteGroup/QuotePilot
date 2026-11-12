@@ -479,7 +479,7 @@ export interface components {
         NewRouteMargin: {
             route: components["schemas"]["Route"];
             /** @description Null applies the global margin floor. */
-            marginPercent: components["schemas"]["DecimalPercent"] | null;
+            marginPercent: (string & components["schemas"]["DecimalPercent"]) | null;
         };
         AddRouteMarginsRequest: {
             routes: components["schemas"]["NewRouteMargin"][];

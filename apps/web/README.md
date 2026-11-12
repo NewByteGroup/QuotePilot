@@ -25,5 +25,9 @@ Requires Node 22 (`.nvmrc`) and pnpm (`corepack enable`). Run `pnpm install` fro
 
 ## Environment
 
-- `VITE_API_MOCK=false`: disable the contract mock and call a real `core-api`.
+- `VITE_API_MOCK` (`'true' | 'false'`): controls the MSW contract mock. Defaults:
+  on for `vite dev`, on for Cloudflare Pages builds of branches other than
+  `main` (injected by `vite.config.ts` via `CF_PAGES_BRANCH`), off for
+  production builds. Set `VITE_API_MOCK=true` to opt a production build into
+  the mock, `false` to call a real `core-api`.
 - `VITE_API_BASE_URL`: API base URL (default `/api`).
