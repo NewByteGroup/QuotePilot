@@ -238,11 +238,41 @@ func sessionConfig() *platform.Config {
 
 // directInTx is the fake rigs' InTxFunc: the in-memory Querier has no Begin,
 // so "the transaction" is just the call — what the fake matrix proves is the
-// flow through fn, never atomicity. Real rollback is pinned against Postgres
-// in session_integration_test.go.
+// flow through fn, never atomicity. The raw tx a production inTx hands the
+// River enqueue is nil here; only login's stageMagicLink would notice, and
+// it forwards it to a fake enqueue that never touches it. Real rollback is
+// pinned against Postgres in session_integration_test.go.
 func directInTx(store *platform.Store) auth.InTxFunc {
-	return func(_ context.Context, fn func(*platform.Store) error) error {
-		return fn(store)
+	return func(_ context.Context, fn func(*platform.Store, pgx.Tx) error) error {
+		return fn(store, nil)
+	}
+}
+
+// fakeEnqueue is the EnqueueMailFunc double for the login rig: it records
+// the outbox ids the handler staged — the only arg a River job may carry
+// (migration 0004: the link never rides job args) — and returns err when a
+// test injects a send-queue failure.
+type fakeEnqueue struct {
+	ids []uuid.UUID
+	err error
+}
+
+func (f *fakeEnqueue) run(_ context.Context, _ pgx.Tx, id uuid.UUID) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.ids = append(f.ids, id)
+	return nil
+}
+
+// mustNotEnqueue is the EnqueueMailFunc for rigs on the five routes that
+// never stage mail: any call fails the test, the same must-not-be-called
+// signal neverRunner gives the tenant path.
+func mustNotEnqueue(t *testing.T) auth.EnqueueMailFunc {
+	t.Helper()
+	return func(context.Context, pgx.Tx, uuid.UUID) error {
+		t.Fatal("unexpected enqueue: this route must never stage a mail send")
+		return nil
 	}
 }
 
@@ -262,7 +292,7 @@ func newSessionRig(t *testing.T, cfg *platform.Config) *sessionRig {
 	}
 	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		store, directInTx(store), &neverRunner{t}, &platform.FakeMailSender{},
+		store, directInTx(store), &neverRunner{t}, mustNotEnqueue(t),
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, clock.Now),
 		clock.Now)

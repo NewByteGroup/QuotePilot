@@ -170,7 +170,7 @@ func newRefreshRig(t *testing.T, cfg *platform.Config) *refreshRig {
 	}
 	store := platform.NewStore(q)
 	endpoints := auth.NewEndpoints(cfg,
-		store, directInTx(store), &neverRunner{t}, &platform.FakeMailSender{},
+		store, directInTx(store), &neverRunner{t}, mustNotEnqueue(t),
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, clock.Now),
 		clock.Now)

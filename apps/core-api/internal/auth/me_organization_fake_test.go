@@ -275,7 +275,7 @@ func newMeOrgRig(t *testing.T, cfg *platform.Config) *meOrgRig {
 	}
 	runner := &orgRunner{q: q, tx: &orgTx{t: t, q: q}}
 	store := platform.NewStore(q)
-	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), runner, &platform.FakeMailSender{},
+	endpoints := auth.NewEndpoints(cfg, store, directInTx(store), runner, mustNotEnqueue(t),
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, clock.Now),
 		clock.Now)

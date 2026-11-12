@@ -80,21 +80,39 @@ func NewStore(q Querier) *Store { return &Store{q: q} }
 //		...
 //	})
 func (s *Store) InStoreTx(ctx context.Context, fn func(*Store) error) error {
+	return s.InStorePgxTx(ctx, func(tx *Store, _ pgx.Tx) error { return fn(tx) })
+}
+
+// InStorePgxTx is InStoreTx with the driver transaction also handed to fn —
+// the shape River's InsertTx needs, since a staged job enqueues on the raw
+// pgx.Tx, not on a Store bound to it (ADR-004). One begin/commit/rollback
+// path backs both entry points, so the atomicity contract is identical:
+// /auth/login's token row, outbox row and river_job row land in a single
+// commit through it (migration 0004).
+//
+//	err := store.InStorePgxTx(ctx, func(tx *platform.Store, raw pgx.Tx) error {
+//		outboxID, err := tx.CreateMailOutbox(ctx, tokenID, link)
+//		if err != nil {
+//			return err
+//		}
+//		return enqueue(ctx, raw, outboxID)
+//	})
+func (s *Store) InStorePgxTx(ctx context.Context, fn func(*Store, pgx.Tx) error) error {
 	beginner, ok := s.q.(interface {
 		Begin(context.Context) (pgx.Tx, error)
 	})
 	if !ok {
-		return fmt.Errorf("platform: InStoreTx: querier %T has no Begin", s.q)
+		return fmt.Errorf("platform: InStorePgxTx: querier %T has no Begin", s.q)
 	}
 	tx, err := beginner.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("platform: InStoreTx: begin: %w", err)
+		return fmt.Errorf("platform: InStorePgxTx: begin: %w", err)
 	}
 	// Unconditional rollback — the tenantdb.tenantTx idiom: covers panic AND
 	// runtime.Goexit, is ErrTxClosed after a successful Commit, and runs on a
 	// cancel-free context so a dead caller context cannot abort it.
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if err := fn(&Store{q: tx}); err != nil {
+	if err := fn(&Store{q: tx}, tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

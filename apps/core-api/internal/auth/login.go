@@ -4,14 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/mail"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
@@ -110,13 +109,15 @@ func parseLoginEmail(raw string) (string, bool) {
 	return strings.ToLower(email), true
 }
 
-// deliverMagicLink runs the lookup-and-send for a throttled, well-formed
-// email. An unknown email is not an error: nothing is created or sent and the
-// caller still gets the uniform 200 (spec section 8 — the only observable
-// difference is inside the platform, never in the response). The send itself
-// leaves the response path: the mail provider's round trip would otherwise
-// make a provisioned address measurably slower than an unknown one — a
-// timing oracle identical bodies cannot hide.
+// deliverMagicLink runs the lookup-and-stage for a throttled, well-formed
+// email. An unknown email is not an error: nothing is created or queued and
+// the caller still gets the uniform 200 (spec section 8 — the only
+// observable difference is inside the platform, never in the response). The
+// lookup stays outside the transaction: it is the one read both paths pay
+// before the known path's writes begin. The send itself never touches the
+// response path — the auth_mail_send worker owns it (migration 0004), so a
+// mail provider's round trip cannot make a provisioned address measurably
+// slower than an unknown one, a timing oracle identical bodies cannot hide.
 func (e *Endpoints) deliverMagicLink(ctx context.Context, email string) error {
 	userID, found, err := e.store.FindUserByEmail(ctx, email)
 	if err != nil {
@@ -125,79 +126,43 @@ func (e *Endpoints) deliverMagicLink(ctx context.Context, email string) error {
 	if !found {
 		return nil
 	}
-	token, err := e.issueLoginToken(ctx, userID)
-	if err != nil {
-		return err
-	}
-	e.detached.Add(1)
-	go func() {
-		defer e.detached.Done()
-		e.sendMagicLink(context.WithoutCancel(ctx), email, magicLinkURL(e.cfg.WebURL, token))
-	}()
-	return nil
-}
-
-// sendMagicLink delivers the link off the response path: the mail RTT must
-// never distinguish a provisioned address from an unknown one (uniform-200
-// spec section 8). WithoutCancel detaches request cancellation while keeping
-// request values; the whole delivery is bounded by magicSendBudget and a
-// failed attempt is retried with backoff — a transient provider outage must
-// not strand a token its owner never received. A permanently failed send is
-// logged, never surfaced — the client already has its uniform answer.
-func (e *Endpoints) sendMagicLink(ctx context.Context, email, link string) {
-	ctx, cancel := context.WithTimeout(ctx, magicSendBudget)
-	defer cancel()
-	for attempt := 1; ; attempt++ {
-		err := e.mailer.SendMagicLink(ctx, email, link)
-		if err == nil {
-			return
-		}
-		slog.Default().WarnContext(ctx, "auth: magic link send failed",
-			"correlation_id", platform.CorrelationID(ctx), "attempt", attempt, "error", err)
-		if attempt == magicSendAttempts || !sleepCtx(ctx, magicSendBackoff(attempt)) {
-			return
-		}
-	}
-}
-
-// magicSendBudget bounds the whole detached delivery — retries included —
-// so a wedged provider cannot pin a goroutine past a request's lifetime.
-// magicSendAttempts caps retries; magicSendBackoff spaces them (1s, 2s).
-const (
-	magicSendBudget   = 30 * time.Second
-	magicSendAttempts = 3
-)
-
-// magicSendBackoff spaces retries linearly; a real queue (River, ADR-004)
-// is where durable delivery belongs once cmd/server exists.
-func magicSendBackoff(attempt int) time.Duration {
-	return time.Duration(attempt) * time.Second
-}
-
-// sleepCtx waits d or until ctx ends — false means the budget expired and
-// the caller should stop retrying.
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-time.After(d):
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-// issueLoginToken mints a fresh opaque token and stores only its SHA-256 hex
-// (spec section 4: the token travels in the link, Postgres keeps the hash).
-// It returns the token itself for the magic-link URL — never the hash.
-func (e *Endpoints) issueLoginToken(ctx context.Context, userID uuid.UUID) (string, error) {
 	token, err := platform.NewOpaqueToken()
 	if err != nil {
-		return "", fmt.Errorf("auth: mint login token: %w", err)
+		return fmt.Errorf("auth: mint login token: %w", err)
 	}
+	link := magicLinkURL(e.cfg.WebURL, token)
+	return e.inTx(ctx, func(tx *platform.Store, raw pgx.Tx) error {
+		return e.stageMagicLink(ctx, tx, raw, userID, token, link)
+	})
+}
+
+// stageMagicLink is the login transaction body (migration 0004, ADR-005):
+// the token row, the outbox row carrying the rendered link and the
+// auth_mail_send job commit together or roll back together — a token is
+// never minted without its send queued, so a crash between mint and
+// delivery can no longer strand a link. The job arg is the outbox id alone:
+// river_job is qp_app-readable at rest, and a tokened URL there would be a
+// second live-credential copy outside the outbox's retention story.
+func (e *Endpoints) stageMagicLink(
+	ctx context.Context,
+	tx *platform.Store,
+	raw pgx.Tx,
+	userID uuid.UUID,
+	token, link string,
+) error {
 	expiresAt := e.now().Add(e.cfg.LoginTTL)
-	if _, err := e.store.CreateLoginToken(ctx, userID, platform.HashToken(token), expiresAt); err != nil {
-		return "", fmt.Errorf("auth: store login token: %w", err)
+	tokenID, err := tx.CreateLoginToken(ctx, userID, platform.HashToken(token), expiresAt)
+	if err != nil {
+		return fmt.Errorf("auth: store login token: %w", err)
 	}
-	return token, nil
+	outboxID, err := tx.CreateMailOutbox(ctx, tokenID, link)
+	if err != nil {
+		return fmt.Errorf("auth: stage mail outbox: %w", err)
+	}
+	if err := e.enqueue(ctx, raw, outboxID); err != nil {
+		return fmt.Errorf("auth: enqueue mail send %s: %w", outboxID, err)
+	}
+	return nil
 }
 
 // magicLinkURL builds the spec section 8 exchange link; the token is

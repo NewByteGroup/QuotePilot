@@ -5,7 +5,7 @@ package auth_test
 // the access signing, the last step on the path — rolls the consume back and
 // the magic link stays valid. The fake rig cannot see this (its inTx is a
 // direct call), so this mounts the endpoints on a real qp_app pool with
-// store.InStoreTx and inspects the auth tables as qp_migrator — qp_app holds
+// store.InStorePgxTx and inspects the auth tables as qp_migrator — qp_app holds
 // no table privilege on them (spec 2026-11-10-tenant-resolution-api section
 // 5), which is why the reads go through the migrator pool.
 
@@ -37,7 +37,7 @@ func TestSessionExchangeRollsBackConsume(t *testing.T) {
 	migrator := testenv.MigratorPool(t)
 	ctx := context.Background()
 
-	userID := seedSessionUser(t, migrator)
+	userID := seedSessionUser(t, migrator, "session-rollback-"+uuid.NewString()+"@test.dev")
 	store := platform.NewStore(db.Pool())
 	token, tokenHash := plantLoginToken(t, store, userID)
 
@@ -70,13 +70,14 @@ func TestSessionExchangeRollsBackConsume(t *testing.T) {
 
 // seedSessionUser inserts an app.users row as qp_migrator — the only role
 // that may write Layer A (seedAuthUser's twin in tenantdb) — and returns
-// its id.
-func seedSessionUser(t *testing.T, migrator *pgxpool.Pool) uuid.UUID {
+// its id. The caller supplies the email so tests that must address a
+// request to the seeded user (login) can know it.
+func seedSessionUser(t *testing.T, migrator *pgxpool.Pool, email string) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
 	require.NoError(t, migrator.QueryRow(context.Background(),
 		`INSERT INTO app.users (email, full_name) VALUES ($1, $2) RETURNING id`,
-		"session-rollback-"+uuid.NewString()+"@test.dev", "Rollback User").Scan(&id))
+		email, "Rollback User").Scan(&id))
 	return id
 }
 
@@ -95,9 +96,10 @@ func plantLoginToken(t *testing.T, store *platform.Store, userID uuid.UUID) (str
 }
 
 // sessionHandler mounts the endpoints on the real store with the production
-// wiring: real store.InStoreTx, real Limiters on wall time, auth.NewServer.
+// wiring: real store.InStorePgxTx, real Limiters on wall time, an enqueue
+// that must never fire on this route, auth.NewServer.
 func sessionHandler(t *testing.T, cfg *platform.Config, store *platform.Store) http.Handler {
-	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, &neverRunner{t}, &platform.FakeMailSender{},
+	endpoints := auth.NewEndpoints(cfg, store, store.InStorePgxTx, &neverRunner{t}, mustNotEnqueue(t),
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, time.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, time.Now),
 		time.Now)

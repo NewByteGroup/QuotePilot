@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
@@ -41,7 +42,7 @@ func (e *Endpoints) PostAuthSession(
 		return sessionBadRequest(), nil
 	}
 	var grant *sessionGrant
-	err := e.inTx(ctx, func(tx *platform.Store) error {
+	err := e.inTx(ctx, func(tx *platform.Store, _ pgx.Tx) error {
 		var err error
 		grant, err = e.runExchange(ctx, tx, platform.HashToken(request.Body.Token))
 		return err
