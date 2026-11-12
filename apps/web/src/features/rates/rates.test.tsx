@@ -45,4 +45,21 @@ describe('Tarifas & regras', () => {
     expect(screen.getByText('CNNSA → BRSSZ')).toBeInTheDocument()
     expect(screen.getByText('10,5%')).toBeInTheDocument()
   })
+
+  it('blocks a route whose origin equals its destination', async () => {
+    renderApp('/tarifas/regras')
+    const user = userEvent.setup()
+
+    await user.click(await screen.findByRole('button', { name: 'Adicionar rota' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Adicionar rota' })
+    await user.selectOptions(within(dialog).getByLabelText('Origem da rota 1'), 'BRGRU')
+    await user.selectOptions(within(dialog).getByLabelText('Destino da rota 1'), 'BRGRU')
+
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Origem e destino iguais: BRGRU.')
+    expect(within(dialog).getByRole('button', { name: 'Salvar rotas' })).toBeDisabled()
+
+    await user.selectOptions(within(dialog).getByLabelText('Destino da rota 1'), 'BRSSZ')
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Salvar rotas' })).toBeEnabled()
+  })
 })
