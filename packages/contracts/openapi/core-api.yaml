@@ -4,9 +4,14 @@
 # This file fixes the wire shapes implied by
 # docs/specs/2026-11-10-tenant-resolution-api.md (sections 4, 7 and 8) and
 # ADR-005; the C1–C6 PRs implement handlers against the strict-server
-# interfaces generated from it. Generated output is committed to
-# apps/core-api/internal/auth/authapi and the CI contracts-drift job fails on
-# any regeneration diff — never hand-edit generated code.
+# interfaces generated from it. It also carries payload-only schemas (no
+# paths) for third-party webhooks — today the Resend `email.received`
+# envelope, decoded by the hand-mounted handler in internal/inbox, which must
+# stay out of the strict-server interface because Svix signature
+# verification runs on the raw body before any binding. Generated output is
+# committed to apps/core-api/internal/auth/authapi and the CI
+# contracts-drift job fails on any regeneration diff — never hand-edit
+# generated code.
 openapi: "3.0.3"
 
 info:
@@ -423,6 +428,133 @@ components:
           description: |
             Free-form branding blob (colors, logo, legal footer) —
             `app.organizations.branding_json`, jsonb with `{}` default.
+
+    # Third-party webhook payloads — schemas only, no paths (see the file
+    # header). Shape follows Resend's documented `email.received` event
+    # (https://resend.com/docs/webhooks/emails/received, checked
+    # 2026-11-16): the webhook carries METADATA ONLY — body and headers come
+    # from the Received emails API, attachment bytes from the Attachments
+    # API whose download_url expires after one hour (RFC-002).
+    # `additionalProperties: false` documents the contract for readers;
+    # Go's encoding/json decodes tolerantly (Resend may add fields), so the
+    # handler enforces only the keys it depends on.
+    ResendEmailReceived:
+      type: object
+      additionalProperties: false
+      required: [type, created_at, data]
+      properties:
+        type:
+          type: string
+          enum: [email.received]
+          description: |
+            Event discriminator — fixed `email.received` for this schema.
+            The inbox handler rejects any other value with 400: a
+            misconfigured Svix endpoint pointing other events at this route
+            must fail fast, not be silently stored (2xx) or retried (5xx).
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp when the webhook event was created.
+        data:
+          $ref: '#/components/schemas/ResendEmailReceivedData'
+    ResendEmailReceivedData:
+      type: object
+      additionalProperties: false
+      required: [email_id, created_at, from, to, subject]
+      properties:
+        email_id:
+          type: string
+          description: |
+            Resend's unique email identifier — maps to
+            `app.inbound_messages.resend_message_id`, the idempotency key of
+            the (organization_id, resend_message_id) unique constraint.
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp when the email was received.
+        message_id:
+          type: string
+          description: |
+            RFC Message-ID header value — absent on events that fire before
+            the email is sent; present on `email.received`.
+        from:
+          type: string
+          description: |
+            Sender's bare email address on received events; the display name
+            is preserved in `headers.from` on the retrieve endpoint (RFC-002).
+        to:
+          type: array
+          items:
+            type: string
+          description: |
+            Recipient addresses — the tenant-resolution input: each entry is
+            looked up through `resolve_inbound_org` and exactly one
+            organization must match (ADR-005 section 7).
+        cc:
+          type: array
+          items:
+            type: string
+          description: CC'd addresses (`[]` when none).
+        bcc:
+          type: array
+          items:
+            type: string
+          description: BCC'd addresses (`[]` when none).
+        received_for:
+          type: array
+          items:
+            type: string
+          description: |
+            Addresses the email was forwarded for, taken from the `for`
+            clause of the message's `Received` headers.
+        subject:
+          type: string
+          description: Email subject line (`""` when the mail has none).
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResendAttachment'
+          description: |
+            Attachment METADATA only — the bytes are fetched through the
+            Attachments API (`download_url` expires after one hour, so the
+            ingest job downloads immediately and never stores it, RFC-002).
+        broadcast_id:
+          type: string
+          description: |
+            Broadcast campaign id — applies to outbound events, not expected
+            on `email.received`.
+        template_id:
+          type: string
+          description: |
+            Template id — applies to outbound events, not expected on
+            `email.received`.
+        tags:
+          type: object
+          additionalProperties:
+            type: string
+          description: Tag key-value pairs associated with the email.
+    ResendAttachment:
+      type: object
+      additionalProperties: false
+      required: [id, filename, content_type]
+      properties:
+        id:
+          type: string
+          description: Attachment identifier accepted by the Attachments API.
+        filename:
+          type: string
+          description: Original filename (e.g. `rfq.pdf`).
+        content_type:
+          type: string
+          description: MIME type (e.g. `application/pdf`).
+        content_disposition:
+          type: string
+          description: "`inline` or `attachment`."
+        content_id:
+          type: string
+          description: |
+            Content-ID of inline attachments referenced from the HTML body
+            (e.g. `img001` for `<img src="cid:img001">`).
 
   responses:
     BadRequest:

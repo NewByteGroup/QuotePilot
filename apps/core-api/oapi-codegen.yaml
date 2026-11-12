@@ -14,3 +14,7 @@ output-options:
   # Idiomatic Go names — ID, JSON — matching the hand-written code style
   # (e.g. internal/inbox's OrganizationID). Default ToCamelCase emits `Id`.
   name-normalizer: ToCamelCaseWithInitialisms
+  # Emit every components/schemas entry, not only those reachable from a
+  # path: webhook payload schemas (e.g. ResendEmailReceived) have no path —
+  # the handler is hand-mounted — and pruning would drop them entirely.
+  skip-prune: true

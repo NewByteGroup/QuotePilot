@@ -1,8 +1,11 @@
 // Package authapi holds the oapi-codegen output for
 // packages/contracts/openapi/core-api.yaml — the six-route auth/session slice
 // of the tenant-resolution spec (docs/specs/2026-11-10-tenant-resolution-api.md
-// section 8), generated per ADR-002 (std-http-server + strict-server,
-// committed output).
+// section 8) plus path-less payload models such as the Resend
+// `email.received` webhook envelope decoded by the hand-mounted inbox
+// handler — generated per ADR-002 (std-http-server + strict-server,
+// committed output, skip-prune so schemas with no referencing path still
+// emit a type).
 //
 // Handlers implement StrictServerInterface and are mounted through
 // NewStrictHandlerWithOptions + HandlerWithOptions — HandlerWithOptions, not

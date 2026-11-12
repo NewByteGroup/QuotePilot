@@ -67,7 +67,14 @@ func okResolver(org uuid.UUID) resolverFunc {
 	return func(context.Context, string) (uuid.UUID, bool, error) { return org, true, nil }
 }
 
-const validBody = `{"to":["a@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
+// eventBody wraps a `data` object in the documented email.received envelope
+// (https://resend.com/docs/webhooks/emails/received) so each test writes
+// only the fields it exercises.
+func eventBody(data string) string {
+	return `{"type":"email.received","created_at":"2026-11-09T12:00:00.000Z","data":` + data + `}`
+}
+
+var validBody = eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","from":"customer@example.com","to":["a@in.test"],"subject":"RFQ: 20 boxes Shenzhen","attachments":[{"id":"att-1","filename":"rfq.pdf","content_type":"application/pdf","content_disposition":"attachment"}]}`)
 
 // TestInboundSingleOrgRoutes proves the happy path reaches the tenant
 // transaction with the resolved organization — the insert itself is covered
@@ -99,7 +106,7 @@ func TestInboundMultiOrgDrops(t *testing.T) {
 	resolver := resolverFunc(func(_ context.Context, r string) (uuid.UUID, bool, error) {
 		return orgs[r], true, nil
 	})
-	body := `{"to":["a@in.test","b@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
+	body := eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","b@in.test"]}`)
 	rec, runner := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "abort-message", rec.Header().Get("webhook-delivery"))
@@ -113,7 +120,7 @@ func TestInboundSameOrgTwice(t *testing.T) {
 	resolver := resolverFunc(func(_ context.Context, r string) (uuid.UUID, bool, error) {
 		return org, strings.HasSuffix(r, "@in.test"), nil
 	})
-	body := `{"to":["a@in.test","b@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
+	body := eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","b@in.test"]}`)
 	rec, runner := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called)
@@ -128,7 +135,7 @@ func TestInboundPartialMatchStores(t *testing.T) {
 	resolver := resolverFunc(func(_ context.Context, r string) (uuid.UUID, bool, error) {
 		return org, r == "a@in.test", nil
 	})
-	body := `{"to":["a@in.test","ghost@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`
+	body := eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","ghost@in.test"]}`)
 	rec, runner := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called)
@@ -145,22 +152,43 @@ func TestInboundResolverError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// TestInboundMinimalPayload proves the handler tolerates absent fields it
+// never reads: the handler's minimum — `type` plus `data.created_at`,
+// `data.to` and `data.email_id` — still resolves and routes into the
+// tenant transaction even though the schema also requires `from` and
+// `subject` (required there documents Resend's guarantee for consumers;
+// it is not what this handler enforces).
+func TestInboundMinimalPayload(t *testing.T) {
+	org := uuid.New()
+	body := `{"type":"email.received","data":{"email_id":"m-min","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test"]}}`
+	rec, runner := post(t, okResolver(org), body)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, runner.called)
+	require.Equal(t, org, runner.org)
+}
+
 // TestInboundValidation covers the parse gates that must die before any DB
-// touch: empty/missing recipient list, blank entries, missing message id,
-// negative amount, malformed JSON.
+// touch: a wrong or missing event type (a misconfigured endpoint pointing
+// other Resend events at this route fails fast), missing created_at,
+// empty/missing recipient list, blank entries, missing email id, malformed
+// JSON. Every one is permanent for that body, so the abort header must be
+// set — Svix retries would replay the same invalid payload for ~27h.
 func TestInboundValidation(t *testing.T) {
 	bodies := map[string]string{
-		"no to":        `{"resend_message_id":"m1","declared_value_usd":"1"}`,
-		"empty to":     `{"to":[],"resend_message_id":"m1","declared_value_usd":"1"}`,
-		"blank entry":  `{"to":["  "],"resend_message_id":"m1","declared_value_usd":"1"}`,
-		"no msg id":    `{"to":["a@in.test"],"declared_value_usd":"1"}`,
-		"too many to":  `{"to":[` + strings.Repeat(`"a@in.test",`, 51) + `"a@in.test"],"resend_message_id":"m1","declared_value_usd":"1"}`,
-		"negative amt": `{"to":["a@in.test"],"resend_message_id":"m1","declared_value_usd":"-1"}`,
-		"bad json":     `{nope`,
+		"wrong type":  `{"type":"email.delivered","created_at":"2026-11-09T12:00:00.000Z","data":{"email_id":"m1","to":["a@in.test"]}}`,
+		"no type":     `{"created_at":"2026-11-09T12:00:00.000Z","data":{"email_id":"m1","to":["a@in.test"]}}`,
+		"no created":  eventBody(`{"email_id":"m1","to":["a@in.test"]}`),
+		"no to":       eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z"}`),
+		"empty to":    eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":[]}`),
+		"blank entry": eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["  "]}`),
+		"no email id": eventBody(`{"created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test"]}`),
+		"too many to": eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":[` + strings.Repeat(`"a@in.test",`, 51) + `"a@in.test"]}`),
+		"bad json":    `{nope`,
 	}
 	for name, body := range bodies {
 		rec, runner := post(t, okResolver(uuid.New()), body)
 		require.Equal(t, http.StatusBadRequest, rec.Code, name)
+		assert.Equal(t, "abort-message", rec.Header().Get("webhook-delivery"), name)
 		assert.False(t, runner.called, name)
 	}
 }
