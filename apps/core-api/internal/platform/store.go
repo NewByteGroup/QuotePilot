@@ -12,9 +12,9 @@ import (
 )
 
 // Querier is the narrow slice of pgx the Store needs; *pgxpool.Pool and
-// pgx.Tx both satisfy it. Every query runs as qp_app against the
-// migration-0003 SECURITY DEFINER family — the only path to the Layer A
-// auth tables (spec section 5: qp_app holds no table privilege on them).
+// pgx.Tx both satisfy it. Every query runs as qp_app against the Layer A
+// SECURITY DEFINER family (migrations 0003+) — the only path to the auth
+// tables (spec section 5: qp_app holds no table privilege on them).
 type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -29,6 +29,16 @@ type Membership struct {
 	Role  string
 }
 
+// MailOutbox is one pending magic-link send as read_mail_outbox returns it:
+// the link, the recipient resolved through the login token (the job carries
+// only the outbox id — SendMagicLink still needs a destination), and the
+// token's expiry so the worker owns the dead-link policy.
+type MailOutbox struct {
+	Link      string
+	Email     string
+	ExpiresAt time.Time
+}
+
 // Organization is the resolved tenant's registry row as
 // app.get_current_organization() returns it (spec section 8). Branding is
 // carried raw: the jsonb blob belongs to the caller, so the store neither
@@ -41,7 +51,7 @@ type Organization struct {
 	Branding          json.RawMessage
 }
 
-// Store wraps the migration-0003 function family in typed methods (spec
+// Store wraps the Layer A function family in typed methods (spec
 // section 6). NULL results and empty sets become (zero, false, nil) so
 // callers never handle pgx NULLs — the indistinguishability spec section 7
 // requires is preserved by returning found=false, never an error, for an
@@ -328,6 +338,58 @@ func (s *Store) ListMembershipsForEmail(ctx context.Context, email string) ([]Me
 		return nil, fmt.Errorf("platform: list_memberships_for_email rows: %w", err)
 	}
 	return out, nil
+}
+
+// CreateMailOutbox queues one magic-link send beside its login token — the
+// migration-0004 half of durable delivery, meant to run in the same
+// transaction as CreateLoginToken and the River enqueue so a token is never
+// minted without its send. The link is a live credential bounded by the
+// token's TTL; the row lives only until DeleteMailOutbox follows a
+// successful send.
+//
+//	outboxID, err := store.CreateMailOutbox(ctx, tokenID, link)
+func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.q.QueryRow(ctx,
+		`SELECT app.create_mail_outbox($1, $2)`, tokenID, link).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("platform: create_mail_outbox: %w", err)
+	}
+	return id, nil
+}
+
+// ReadMailOutbox returns one pending send — link, recipient and expiry.
+// Idempotent reads are the point: a River retry re-reads the row its
+// predecessor crashed before deleting, so delivery is at-least-once and a
+// resent link is the SAME link. ok=false means the job is done — already
+// sent, never queued, or the token died — never an error.
+//
+//	pending, ok, err := store.ReadMailOutbox(ctx, outboxID)
+func (s *Store) ReadMailOutbox(ctx context.Context, id uuid.UUID) (MailOutbox, bool, error) {
+	var out MailOutbox
+	err := s.q.QueryRow(ctx,
+		`SELECT * FROM app.read_mail_outbox($1)`, id).
+		Scan(&out.Link, &out.Email, &out.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return MailOutbox{}, false, nil
+	}
+	if err != nil {
+		return MailOutbox{}, false, fmt.Errorf("platform: read_mail_outbox: %w", err)
+	}
+	return out, true, nil
+}
+
+// DeleteMailOutbox is the delivery receipt: called only after the send
+// succeeds. Idempotent — ok=false just means the row is already gone.
+//
+//	deleted, err := store.DeleteMailOutbox(ctx, outboxID)
+func (s *Store) DeleteMailOutbox(ctx context.Context, id uuid.UUID) (bool, error) {
+	var deleted *bool
+	err := s.q.QueryRow(ctx, `SELECT app.delete_mail_outbox($1)`, id).Scan(&deleted)
+	if err != nil {
+		return false, fmt.Errorf("platform: delete_mail_outbox: %w", err)
+	}
+	return deleted != nil, nil
 }
 
 // GetCurrentOrganization reads the resolved tenant's registry row through

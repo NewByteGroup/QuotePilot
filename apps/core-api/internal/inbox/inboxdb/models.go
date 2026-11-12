@@ -595,6 +595,13 @@ type AppAuthLoginToken struct {
 	CreatedAt  pgtype.Timestamptz
 }
 
+type AppAuthMailOutbox struct {
+	ID           pgtype.UUID
+	LoginTokenID pgtype.UUID
+	LinkUrl      string
+	CreatedAt    pgtype.Timestamptz
+}
+
 type AppAuthSession struct {
 	ID               pgtype.UUID
 	UserID           pgtype.UUID

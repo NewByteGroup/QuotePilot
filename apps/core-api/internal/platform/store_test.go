@@ -1,6 +1,6 @@
 package platform_test
 
-// Store accessors over the real migration-0003 function family (spec
+// Store accessors over the real Layer A function family (spec
 // 2026-11-10-tenant-resolution-api sections 5 and 9): found/not-found for
 // every accessor plus the rotate three-outcome mapping, all as qp_app with
 // Layer A rows seeded as qp_migrator — qp_app holds no table privilege on
@@ -362,4 +362,80 @@ func resolveCases(slug string, orgID uuid.UUID) map[string]resolveCase {
 		"double at refused": {slug + "@in.test@evil.test", uuid.Nil, false},
 		"unknown alias":     {"nobody@in.test", uuid.Nil, false},
 	}
+}
+
+// TestStoreMailOutboxLifecycle proves the durable-send contract (migration
+// 0004): create returns the outbox id, read is idempotent so a retried
+// worker sees the same link, recipient and expiry, delete is the post-send
+// receipt, and an absent id collapses to (zero, false, nil). A consumed
+// token's row reads as absent — someone already held that link. Empty and
+// whitespace-only link_urls are refused — either would queue a send that
+// can never deliver.
+func TestStoreMailOutboxLifecycle(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	email := uniqueEmail("store-outbox")
+	userID := seedUser(t, email, "Outbox User")
+	expires := time.Now().Add(15 * time.Minute)
+	tokenID, err := store.CreateLoginToken(ctx, userID, freshHash(t), expires)
+	require.NoError(t, err)
+
+	link := "https://app.quotepilot.test/auth/exchange?token=" + uuid.NewString()
+	outboxID, err := store.CreateMailOutbox(ctx, tokenID, link)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, outboxID)
+
+	pending, ok := readOutbox(t, store, outboxID)
+	require.True(t, ok)
+	assert.Equal(t, link, pending.Link)
+	assert.Equal(t, email, pending.Email, "the recipient joins through the login token")
+	assert.WithinDuration(t, expires, pending.ExpiresAt, time.Second)
+
+	_, ok = readOutbox(t, store, outboxID)
+	assert.True(t, ok, "read is idempotent — a retried worker sees the same row")
+	deleted, err := store.DeleteMailOutbox(ctx, outboxID)
+	require.NoError(t, err)
+	assert.True(t, deleted)
+
+	_, ok = readOutbox(t, store, outboxID)
+	assert.False(t, ok, "delete-on-send: the row is gone after the receipt")
+	_, ok = readOutbox(t, store, uuid.New())
+	assert.False(t, ok, "an absent id is (zero, false, nil), never an error")
+	deleted, err = store.DeleteMailOutbox(ctx, uuid.New())
+	require.NoError(t, err)
+	assert.False(t, deleted, "deleting an absent row is false, not an error")
+	for _, bad := range []string{"", "   "} {
+		_, err = store.CreateMailOutbox(ctx, tokenID, bad)
+		require.Error(t, err, "a blank link_url must be refused, got %q", bad)
+	}
+}
+
+// TestStoreMailOutboxConsumedToken proves a dead token's pending send reads
+// as absent: the recipient already held the link and used it, so the job is
+// done — no mail for a link that cannot work.
+func TestStoreMailOutboxConsumedToken(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	userID := seedUser(t, uniqueEmail("store-outbox-dead"), "Dead Outbox")
+	hash := freshHash(t)
+	tokenID, err := store.CreateLoginToken(ctx, userID, hash, time.Now().Add(15*time.Minute))
+	require.NoError(t, err)
+
+	outboxID, err := store.CreateMailOutbox(ctx, tokenID, "https://app.quotepilot.test/l")
+	require.NoError(t, err)
+	_, ok, err := store.ConsumeLoginToken(ctx, hash)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	_, ok = readOutbox(t, store, outboxID)
+	assert.False(t, ok, "a consumed token's pending send must read as done")
+}
+
+// readOutbox runs one ReadMailOutbox and asserts the error leg away, so the
+// lifecycle test reads as (row, ok) pairs only.
+func readOutbox(t *testing.T, store *platform.Store, id uuid.UUID) (platform.MailOutbox, bool) {
+	t.Helper()
+	out, ok, err := store.ReadMailOutbox(context.Background(), id)
+	require.NoError(t, err)
+	return out, ok
 }

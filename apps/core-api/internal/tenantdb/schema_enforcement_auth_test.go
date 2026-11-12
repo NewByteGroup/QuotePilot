@@ -111,6 +111,10 @@ func TestSchemaEnforcementAuthLookup(t *testing.T) {
 		`SELECT count(*) FROM app.auth_sessions`).Scan(&direct)
 	require.Error(t, directErr, "qp_app must not SELECT app.auth_sessions directly")
 	assert.Contains(t, directErr.Error(), "permission denied")
+	directErr = db.Pool().QueryRow(ctx,
+		`SELECT count(*) FROM app.auth_mail_outbox`).Scan(&direct)
+	require.Error(t, directErr, "qp_app must not SELECT app.auth_mail_outbox directly — the link column is a live credential")
+	assert.Contains(t, directErr.Error(), "permission denied")
 
 	// qp_admin reaches none of the family (spec section 5): every call is a
 	// permission error, not an empty answer.
@@ -125,6 +129,9 @@ func TestSchemaEnforcementAuthLookup(t *testing.T) {
 		`SELECT app.get_membership(gen_random_uuid(), gen_random_uuid())`,
 		`SELECT * FROM app.get_user_profile(gen_random_uuid())`,
 		`SELECT * FROM app.list_memberships_for_email('x@test.dev')`,
+		`SELECT app.create_mail_outbox(gen_random_uuid(), 'https://x.test/l')`,
+		`SELECT app.read_mail_outbox(gen_random_uuid())`,
+		`SELECT app.delete_mail_outbox(gen_random_uuid())`,
 	} {
 		_, err := admin.Pool().Exec(ctx, call)
 		require.Error(t, err, "qp_admin must not EXECUTE %s", call)
