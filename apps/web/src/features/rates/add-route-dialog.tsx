@@ -66,6 +66,9 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
         otherIndex < index && other.origin === row.origin && other.destination === row.destination,
     ),
   )
+  // A route cannot start and end at the same port; unlike a duplicate, this
+  // violation lives inside a single row.
+  const samePortRow = completeRows.find((row) => row.origin === row.destination)
   const marginsValid = rows.every(
     (row) => row.margin.trim() === '' || MARGIN_PATTERN.test(row.margin.trim()),
   )
@@ -163,6 +166,11 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
               {`Rota duplicada: ${duplicateRow.origin} → ${duplicateRow.destination}.`}
             </p>
           ) : null}
+          {samePortRow ? (
+            <p role="alert" className="text-sm text-red-700">
+              {`Origem e destino iguais: ${samePortRow.origin}.`}
+            </p>
+          ) : null}
           {addRoutes.isError ? (
             <p role="alert" className="text-sm text-red-700">
               Não foi possível salvar as rotas.
@@ -179,6 +187,7 @@ export function AddRouteDialog({ open, onOpenChange, floorPercent }: AddRouteDia
                 completeRows.length === 0 ||
                 !marginsValid ||
                 duplicateRow !== undefined ||
+                samePortRow !== undefined ||
                 addRoutes.isPending
               }
             >
