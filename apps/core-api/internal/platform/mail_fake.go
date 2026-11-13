@@ -13,11 +13,11 @@ type MagicSend struct {
 
 // FakeMailSender is the test double for MailSender: it records every call
 // and never touches the network. It lives in the platform package (not a
-// _test.go file) because internal/auth handler tests in PRs C1–C6 assert
-// which (to, url) pairs went out — the uniform-response contract is proven
-// by what the fake did NOT receive. Nothing wires it in production. Sends
-// may run on detached goroutines (auth sends the magic link off the response
-// path), so reads go through Sent and never touch the slice directly.
+// _test.go file) because tests outside platform — the auth_mail_send
+// worker's, today — assert which (to, url) pairs went out, and the
+// uniform-response contract is proven by what the fake did NOT receive.
+// Nothing wires it in production. Sends may run on worker goroutines, so
+// reads go through Sent and never touch the slice directly.
 //
 //	fake := &platform.FakeMailSender{}
 //	handler.ServeHTTP(w, req)
@@ -42,7 +42,7 @@ func (f *FakeMailSender) SendMagicLink(_ context.Context, to, url string) error 
 }
 
 // Sent returns a copy of the recorded sends. The copy is safe to assert on
-// while a detached send goroutine may still be recording the next one.
+// while a worker goroutine may still be recording the next one.
 func (f *FakeMailSender) Sent() []MagicSend {
 	f.mu.Lock()
 	defer f.mu.Unlock()

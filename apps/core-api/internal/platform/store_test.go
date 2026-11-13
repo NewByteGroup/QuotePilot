@@ -8,6 +8,8 @@ package platform_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -438,4 +440,47 @@ func readOutbox(t *testing.T, store *platform.Store, id uuid.UUID) (platform.Mai
 	out, ok, err := store.ReadMailOutbox(context.Background(), id)
 	require.NoError(t, err)
 	return out, ok
+}
+
+// TestStoreInStorePgxTx proves the raw-tx seam River's InsertTx needs
+// (ADR-004): fn receives the driver transaction itself, sharing the bound
+// Store's transaction — the raw tx can consume the token the tx-bound Store
+// just wrote — and one error path rolls the whole batch back while a nil
+// return commits it.
+func TestStoreInStorePgxTx(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	userID := seedUser(t, uniqueEmail("store-pgxtx"), "PgxTx User")
+	hash := freshHash(t)
+	errRollback := errors.New("platform test: force rollback")
+
+	// The raw tx must be live and must see the bound Store's uncommitted
+	// write — the contract a same-tx river_job insert relies on.
+	err := store.InStorePgxTx(ctx, func(tx *platform.Store, raw pgx.Tx) error {
+		if _, err := tx.CreateLoginToken(ctx, userID, hash, time.Now().Add(15*time.Minute)); err != nil {
+			return err
+		}
+		var got *uuid.UUID
+		if err := raw.QueryRow(ctx, `SELECT app.consume_login_token($1)`, hash).Scan(&got); err != nil {
+			return err
+		}
+		if got == nil || *got != userID {
+			return fmt.Errorf("raw tx could not consume the Store's write in-tx (got %v)", got)
+		}
+		return errRollback
+	})
+	require.ErrorIs(t, err, errRollback)
+
+	_, ok, err := store.ConsumeLoginToken(ctx, hash)
+	require.NoError(t, err)
+	assert.False(t, ok, "fn's error must roll back both the write and the consume")
+
+	require.NoError(t, store.InStorePgxTx(ctx, func(tx *platform.Store, _ pgx.Tx) error {
+		_, err := tx.CreateLoginToken(ctx, userID, hash, time.Now().Add(15*time.Minute))
+		return err
+	}))
+	gotUser, ok, err := store.ConsumeLoginToken(ctx, hash)
+	require.NoError(t, err)
+	require.True(t, ok, "nil from fn must commit the bound Store's write")
+	assert.Equal(t, userID, gotUser)
 }

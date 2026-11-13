@@ -19,7 +19,7 @@ const resendDefaultBaseURL = "https://api.resend.com"
 const magicLinkSubject = "Your QuotePilot sign-in link"
 
 // resendTimeout bounds the mail call so a hung provider cannot stall the
-// login endpoint.
+// auth_mail_send worker past River's job budget.
 const resendTimeout = 10 * time.Second
 
 // MailSender delivers the magic-link email. Production uses

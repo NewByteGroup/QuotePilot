@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -43,7 +44,9 @@ func main() {
 // run wires config, pool, surfaces and jobs, then serves until a signal
 // asks for shutdown. Boot failures are fatal by construction: a server
 // that cannot prove the qp_app role model or parse its own config must
-// not half-live.
+// not half-live. startJobs precedes buildEndpoints on purpose: the worker
+// registry needs the one mailer, and the endpoints need the built client
+// for the in-transaction enqueue closure (migration 0004).
 func run(ctx context.Context) error {
 	cfg, err := platform.LoadConfig(os.Getenv)
 	if err != nil {
@@ -55,7 +58,7 @@ func run(ctx context.Context) error {
 	}
 	defer db.Close()
 	store := platform.NewStore(db.Pool())
-	endpoints, err := buildEndpoints(&cfg, db, store)
+	mailer, err := newMailer(&cfg)
 	if err != nil {
 		return err
 	}
@@ -63,12 +66,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db)
+	riverClient, err := startJobs(ctx, db, store, mailer)
 	if err != nil {
 		return err
 	}
+	endpoints := buildEndpoints(&cfg, db, store, enqueueAuthMail(riverClient))
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
-	return serve(ctx, srv, endpoints.WaitDetached, riverClient)
+	return serve(ctx, srv, riverClient)
 }
 
 // newServer assembles the bounded http.Server — every timeout is set so a
@@ -87,21 +91,33 @@ func newServer(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv ht
 }
 
 // buildEndpoints composes the contract's six-route surface: the Store over
-// the qp_app pool, the mailer and the spec section 8.1 limiter pair sharing
-// one clock with the token TTLs. The returned Endpoints carries the
-// detached-send counter serve drains on shutdown (auth.NewServer mounts
-// the ctx-planting middleware pair itself).
-func buildEndpoints(cfg *platform.Config, db *tenantdb.DB, store *platform.Store) (*auth.Endpoints, error) {
-	mailer, err := newMailer(cfg)
-	if err != nil {
-		return nil, err
-	}
+// the qp_app pool, the raw-tx transaction seam the staged send lands in,
+// the enqueue closure and the spec section 8.1 limiter pair sharing one
+// clock with the token TTLs. No MailSender is wired — the auth_mail_send
+// worker owns delivery now (auth.NewServer mounts the ctx-planting
+// middleware pair itself).
+func buildEndpoints(cfg *platform.Config, db *tenantdb.DB, store *platform.Store, enqueue auth.EnqueueMailFunc) *auth.Endpoints {
 	return auth.NewEndpoints(
-		cfg, store, store.InStoreTx, db, mailer,
+		cfg, store, store.InStorePgxTx, db, enqueue,
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, time.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, time.Now),
 		time.Now,
-	), nil
+	)
+}
+
+// enqueueAuthMail adapts the River client's InsertTx to the endpoints'
+// enqueue seam: the auth_mail_send job lands inside the login transaction —
+// one commit with the token row and the outbox row — carrying the outbox id
+// only, so the tokened link never reaches river_job's qp_app-readable args
+// (migration 0004).
+func enqueueAuthMail(client *river.Client[pgx.Tx]) auth.EnqueueMailFunc {
+	return func(ctx context.Context, tx pgx.Tx, outboxID uuid.UUID) error {
+		_, err := client.InsertTx(ctx, tx, jobs.AuthMailArgs{OutboxID: outboxID}, nil)
+		if err != nil {
+			return fmt.Errorf("server: enqueue auth mail %s: %w", outboxID, err)
+		}
+		return nil
+	}
 }
 
 // newMailer picks the sender: a configured Resend pair means real mail;
@@ -159,12 +175,15 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 }
 
 // startJobs builds the River client over the qp_app pool — the driver
-// shares the request path's connections — with the worker registry:
-// echo_tenant only for now, the spike's proof. The reindexer is disabled
-// (its fast schedule was a spike affordance; production never owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB) (*river.Client[pgx.Tx], error) {
+// shares the request path's connections — with the worker registry: the
+// spike's echo_tenant plus auth_mail_send, the durable magic-link delivery
+// whose outbox the login transaction stages (migration 0004). The reindexer
+// is disabled (its fast schedule was a spike affordance; production never
+// owns it).
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
+	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		Queues:            map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 4}},
 		Workers:           workers,
@@ -202,7 +221,7 @@ type jobStopper interface {
 // then drains. A listener that dies on its own (bind failure) still owes
 // the River client its stop — the deferred pool close must not race a
 // running client.
-func serve(ctx context.Context, srv httpServer, detached func(context.Context) bool, jobs jobStopper) error {
+func serve(ctx context.Context, srv httpServer, jobs jobStopper) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
 	select {
@@ -218,20 +237,19 @@ func serve(ctx context.Context, srv httpServer, detached func(context.Context) b
 	// A second signal during the drain should kill, not be swallowed by the
 	// still-subscribed NotifyContext.
 	signal.Reset(os.Interrupt, syscall.SIGTERM)
-	return drain(srv, detached, jobs)
+	return drain(srv, jobs)
 }
 
 // drain owns the ordered shutdown inside one shared grace window: HTTP
-// requests first (a finishing login may still have a detached send in
-// flight), the detached sends themselves, then the workers.
-func drain(srv httpServer, detached func(context.Context) bool, jobs jobStopper) error {
+// requests first — a finishing login may still be committing its staged
+// send — then River's Stop, under which workers keep delivering queued
+// sends inside the client's SoftStopTimeout window. A send outliving the
+// window still loses nothing: its outbox row stays for the next boot's
+// worker to retry (migration 0004's at-least-once contract).
+func drain(srv httpServer, jobs jobStopper) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	httpErr := srv.Shutdown(shutCtx)
-	if !detached(shutCtx) {
-		slog.Warn("server: detached sends still running at window end — links may be lost")
-	}
-	return errors.Join(httpErr, jobs.Stop(shutCtx))
+	return errors.Join(srv.Shutdown(shutCtx), jobs.Stop(shutCtx))
 }
 
 // listenAddr reads PORT (the PaaS convention) with a dev default so a bare

@@ -333,7 +333,7 @@ func TestMeOrganizationEndToEnd(t *testing.T) {
 
 	clock := &fakeClock{now: time.Now()}
 	store := platform.NewStore(db.Pool())
-	endpoints := auth.NewEndpoints(cfg, store, store.InStoreTx, db, &platform.FakeMailSender{},
+	endpoints := auth.NewEndpoints(cfg, store, store.InStorePgxTx, db, mustNotEnqueue(t),
 		platform.NewLimiter(platform.LoginIPCapacity, platform.LimitWindow, clock.Now),
 		platform.NewLimiter(platform.LoginEmailCapacity, platform.LimitWindow, clock.Now),
 		clock.Now)

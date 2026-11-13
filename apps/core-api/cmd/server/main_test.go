@@ -197,16 +197,15 @@ func (f *fakeJobs) StopAndCancel(context.Context) error {
 }
 
 // TestServeDrainsInOrder pins the shutdown sequence: HTTP Shutdown, then
-// the detached sends, then the workers — the ordering the lost-link fix
-// requires.
+// the workers — River's Stop keeps delivering queued sends inside the
+// client's SoftStopTimeout window, so nothing in the outbox is stranded.
 func TestServeDrainsInOrder(t *testing.T) {
 	rec := &recording{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	srv := &fakeHTTPServer{rec: rec, die: make(chan struct{})}
-	detached := func(context.Context) bool { rec.add("detached"); return true }
-	require.NoError(t, serve(ctx, srv, detached, &fakeJobs{rec: rec}))
-	require.Equal(t, []string{"http-shutdown", "detached", "jobs-stop"}, rec.events)
+	require.NoError(t, serve(ctx, srv, &fakeJobs{rec: rec}))
+	require.Equal(t, []string{"http-shutdown", "jobs-stop"}, rec.events)
 }
 
 // TestServeBindFailureStopsJobs pins the leak fix: a dead listener still
@@ -215,7 +214,7 @@ func TestServeBindFailureStopsJobs(t *testing.T) {
 	rec := &recording{}
 	bindErr := errors.New("bind: address in use")
 	srv := &fakeHTTPServer{rec: rec, die: make(chan struct{}), fail: bindErr}
-	err := serve(context.Background(), srv, func(context.Context) bool { return true }, &fakeJobs{rec: rec})
+	err := serve(context.Background(), srv, &fakeJobs{rec: rec})
 	require.ErrorIs(t, err, bindErr)
 	require.Equal(t, []string{"jobs-stopcancel"}, rec.events)
 }
@@ -225,6 +224,6 @@ func TestServeBindFailureStopsJobs(t *testing.T) {
 func TestServeServerClosedIsClean(t *testing.T) {
 	rec := &recording{}
 	srv := &fakeHTTPServer{rec: rec, die: make(chan struct{}), fail: http.ErrServerClosed}
-	require.NoError(t, serve(context.Background(), srv, func(context.Context) bool { return true }, &fakeJobs{rec: rec}))
+	require.NoError(t, serve(context.Background(), srv, &fakeJobs{rec: rec}))
 	require.Empty(t, rec.events)
 }
