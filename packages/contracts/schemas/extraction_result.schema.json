@@ -69,7 +69,10 @@
       "type": "string",
       "description": "Canonical service description synthesized for tariff retrieval (embedded for ranking among already-valid rows; filtering is always on codes first — RFC-001 step 3)."
     },
-    "embedding": { "$ref": "./common.schema.json#/$defs/Embedding" },
+    "embedding": {
+      "$ref": "./common.schema.json#/$defs/Embedding",
+      "description": "Optional and nullable (Pedro, 2026-11-16): a missing embedding never fails the batch — retrieval ranking falls back to deterministic order. Exactly 1024 items when present."
+    },
     "embedding_model": {
       "type": "string",
       "description": "Pinned embedding model id (qwen/qwen3-embedding-8b in the MVP)."

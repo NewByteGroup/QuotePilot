@@ -120,11 +120,11 @@
       "description": "ISO 8601 calendar date (YYYY-MM-DD)."
     },
     "Embedding": {
-      "type": "array",
+      "type": ["array", "null"],
       "items": { "type": "number" },
       "minItems": 1024,
       "maxItems": 1024,
-      "description": "qwen/qwen3-embedding-8b vector at 1024 dimensions (MRL), L2-normalized. One vector space across the platform."
+      "description": "qwen/qwen3-embedding-8b vector at 1024 dimensions (MRL), L2-normalized. One vector space across the platform. OPTIONAL and NULLABLE (decided by Pedro, 2026-11-16): per RFC-001 embeddings only rank service descriptions among already-valid rows — they never decide validity, and a batch must not fail because the embedding model was down. Validated to exactly 1024 items when present; absent or null means ranking falls back to deterministic order."
     }
   }
 }
