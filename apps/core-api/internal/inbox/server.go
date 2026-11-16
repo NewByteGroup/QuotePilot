@@ -47,21 +47,27 @@ type OrgResolver interface {
 	ResolveInboundOrg(ctx context.Context, recipient string) (uuid.UUID, bool, error)
 }
 
+// EnqueueIngestFunc stages the rfq_ingest job inside the receipt's tenant
+// transaction (ADR-004: row and job commit or roll back together) — the
+// same shape as auth.EnqueueMailFunc. main adapts river's InsertTx to it.
+type EnqueueIngestFunc func(ctx context.Context, tx pgx.Tx, organizationID, correlationID, inboundMessageID uuid.UUID) error
+
 // Server serves the inbox HTTP surface on a stdlib ServeMux (ADR-002: no router).
 type Server struct {
 	mux      *http.ServeMux
 	runner   tenantdb.TenantRunner
 	resolver OrgResolver
 	verifier SignatureVerifier
+	enqueue  EnqueueIngestFunc
 	logger   *slog.Logger
 }
 
 // NewServer wires the inbox endpoints. Dependencies are injected so tests can
-// supply a fake verifier, resolver or runner.
+// supply a fake verifier, resolver, runner or enqueue.
 //
-//	http.ListenAndServe(addr, inbox.NewServer(db, store, verifier, logger))
-func NewServer(runner tenantdb.TenantRunner, resolver OrgResolver, verifier SignatureVerifier, logger *slog.Logger) *Server {
-	s := &Server{mux: http.NewServeMux(), runner: runner, resolver: resolver, verifier: verifier, logger: logger}
+//	http.ListenAndServe(addr, inbox.NewServer(db, store, verifier, enqueue, logger))
+func NewServer(runner tenantdb.TenantRunner, resolver OrgResolver, verifier SignatureVerifier, enqueue EnqueueIngestFunc, logger *slog.Logger) *Server {
+	s := &Server{mux: http.NewServeMux(), runner: runner, resolver: resolver, verifier: verifier, enqueue: enqueue, logger: logger}
 	s.mux.HandleFunc("POST /webhooks/resend/inbound", s.handleResendInbound)
 	return s
 }
@@ -253,20 +259,42 @@ func validateRecipients(to []string) error {
 	return nil
 }
 
-// storeInbound performs the idempotent insert inside the tenant transaction.
-// The unique key (organization_id, resend_message_id) makes webhook replays
-// free; rows=0 means a replay, rows=1 a first insert.
+// storeInbound performs the idempotent insert inside the tenant transaction
+// and, on a first store, chains the rfq_ingest job in the same commit (spec
+// S1/ADR-004: receipt and job land together or not at all). The unique key
+// (organization_id, resend_message_id) makes webhook replays free; rows=0
+// means a replay — the first delivery already enqueued the job.
 func (s *Server) storeInbound(ctx context.Context, org uuid.UUID, p authapi.ResendEmailReceived) (bool, error) {
 	var rows int64
 	err := s.runner.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		rows, err = inboxdb.New(tx).InsertInboundMessage(ctx, inboundInsertParams(org, p))
-		return err
+		if err != nil || rows != 1 {
+			return err
+		}
+		return s.enqueueIngest(ctx, tx, org, p.Data.EmailID)
 	})
 	if err != nil {
 		return false, fmt.Errorf("inbox: store inbound message %q: %w", p.Data.EmailID, err)
 	}
 	return rows == 1, nil
+}
+
+// enqueueIngest resolves the just-inserted receipt id and stages S1. A nil
+// enqueue (unit tests without a job queue) is a no-op; the insert result is
+// unchanged.
+func (s *Server) enqueueIngest(ctx context.Context, tx pgx.Tx, org uuid.UUID, resendMessageID string) error {
+	if s.enqueue == nil {
+		return nil
+	}
+	msg, err := inboxdb.New(tx).GetInboundMessage(ctx, inboxdb.GetInboundMessageParams{
+		OrganizationID:  pgtype.UUID{Bytes: org, Valid: true},
+		ResendMessageID: resendMessageID,
+	})
+	if err != nil {
+		return fmt.Errorf("inbox: read back receipt %q: %w", resendMessageID, err)
+	}
+	return s.enqueue(ctx, tx, org, uuid.New(), uuid.UUID(msg.ID.Bytes))
 }
 
 // inboundInsertParams maps the webhook payload to the row: email_id is the

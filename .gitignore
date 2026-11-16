@@ -15,3 +15,6 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+
+# Dev object-storage artifacts (QP_STORAGE_DIR default; see newStorage in cmd/server)
+.dev-storage/
