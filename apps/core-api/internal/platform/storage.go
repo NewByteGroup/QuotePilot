@@ -45,17 +45,18 @@ func NewDirStorage(root string) *DirStorage {
 // workers never need it (the interface stays Put-only).
 func (d *DirStorage) Root() string { return d.root }
 
-// Put writes body to root/key (0o644, parents 0o755). The slash-separated
-// worker key maps through filepath.FromSlash so it stays portable.
+// Put writes body to root/key (0o600, parents 0o750 — tenant bytes stay
+// owner-only). The slash-separated worker key maps through
+// filepath.FromSlash so it stays portable.
 func (d *DirStorage) Put(_ context.Context, key string, body []byte) error {
 	if strings.Contains(key, "..") {
 		return fmt.Errorf("platform: storage key %q must not contain '..'", key)
 	}
 	p := filepath.Join(d.root, filepath.FromSlash(key))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
 		return fmt.Errorf("platform: storage mkdir for %q: %w", key, err)
 	}
-	if err := os.WriteFile(p, body, 0o644); err != nil {
+	if err := os.WriteFile(p, body, 0o600); err != nil {
 		return fmt.Errorf("platform: storage write %q: %w", key, err)
 	}
 	return nil

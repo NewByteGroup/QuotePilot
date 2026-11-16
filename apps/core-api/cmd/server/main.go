@@ -181,7 +181,7 @@ func newStorage() platform.ObjectStorage {
 	if dir == "" {
 		dir = ".dev-storage"
 	}
-	slog.Warn("server: object storage not configured (R2 creds pending) — writing attachments under " + dir + " (dev only)")
+	slog.Warn("server: object storage not configured (R2 creds pending) — dev directory storage", "dir", dir)
 	return platform.NewDirStorage(dir)
 }
 
