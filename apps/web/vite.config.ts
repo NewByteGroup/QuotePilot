@@ -15,9 +15,22 @@ function resolveApiMockFlag(env: Record<string, string>): string | undefined {
 }
 
 export default defineConfig(({ mode }) => {
-  const apiMock = resolveApiMockFlag(loadEnv(mode, process.cwd(), ''))
+  const env = loadEnv(mode, process.cwd(), '')
+  const apiMock = resolveApiMockFlag(env)
   return {
     plugins: [react(), tailwindcss()],
+    // Same-origin API: the browser calls /api/* and Vite forwards to core-api, so the
+    // SameSite session cookies stay first-party (ADR-005 section 4). Only used when
+    // the contract mock is off (VITE_API_MOCK=false).
+    server: {
+      proxy: {
+        '/api': {
+          target: env.CORE_API_URL || 'http://localhost:8080',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api/, ''),
+        },
+      },
+    },
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },
