@@ -140,20 +140,22 @@ jobs:
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
-          npx eslint .
-          npx prettier --check .
-          npx tsc --noEmit
+          # pnpm workspace (root pnpm-lock.yaml): apps/web depends on packages/contracts.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
+          pnpm --filter @quotepilot/web lint
 
       - name: OpenAPI lint (packages/contracts)
         run: |
-          if ! find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print -quit | grep -q .; then
-            echo "stub: no OpenAPI spec yet — check activates when a spec lands under packages/contracts"
+          if [ ! -d packages/contracts/openapi ] \
+            || ! find packages/contracts/openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print -quit | grep -q .; then
+            echo "stub: no OpenAPI spec yet — check activates when a spec lands under packages/contracts/openapi"
             exit 0
           fi
-          # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3.
-          find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print0 \
+          # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3; only the
+          # specs under packages/contracts/openapi are linted (other files in
+          # packages/contracts, e.g. package.json, are not OpenAPI documents).
+          find packages/contracts/openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
             | xargs -0 -n1 npx --yes @redocly/cli@2.76.0 lint
 
   test:
@@ -229,10 +231,11 @@ jobs:
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          # pnpm workspace (root pnpm-lock.yaml): apps/web depends on packages/contracts.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
           # vitest is wired through the package.json "test" script (ADR-008 layer 10).
-          npm test
+          pnpm --filter @quotepilot/web test
 
       # No coverage gate (ADR-008 section 9): artifacts are published for review.
       - name: Upload coverage artifact
@@ -771,16 +774,17 @@ jobs:
           cache: ${{ hashFiles('apps/web/package-lock.json') != '' && 'npm' || '' }}
           cache-dependency-path: apps/web/package-lock.json
 
-      - name: npm audit (production dependencies only)
+      - name: pnpm audit (production dependencies only)
         run: |
           if [ ! -f apps/web/package.json ]; then
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          # npm audit reads the lockfile; generate it without installing when absent.
-          if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
-          npm audit --omit=dev
+          # pnpm workspace: npm cannot resolve workspace:* and has no lockfile
+          # here; audit the committed root pnpm-lock.yaml instead.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
+          pnpm audit --prod
 
       # Scans locally built images; when the registry/deploy story lands
       # (ADR-007) this should reuse the images produced by the `build` job
