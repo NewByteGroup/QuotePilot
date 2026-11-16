@@ -1,0 +1,7 @@
+{
+  "type": "about:blank",
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "placeOfReceipt.locode must be a 5 character UN/LOCODE",
+  "globalTransactionId": "9d1b0d3a-8f9f-4a2c-9d21-9f6f0d51a111"
+}

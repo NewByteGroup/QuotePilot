@@ -1,0 +1,23 @@
+{
+  "placeOfReceipt": { "locode": "BRSSZ" },
+  "placeOfDelivery": { "locode": "DEHAM" },
+  "portOfLoading": { "locode": "BRSSZ" },
+  "portOfDischarge": { "locode": "DEHAM" },
+  "requestedEquipment": {
+    "requestedEquipmentSizeType": "22G1",
+    "requestedEquipmentUnits": 2,
+    "isNonOperatingReefer": false,
+    "shippersOwnedContainer": false
+  },
+  "commodity": {
+    "commodityTypeGroup": "FAK",
+    "cargoGrossWeight": 36000,
+    "cargoGrossWeightUnit": "KG",
+    "isHazardous": false
+  },
+  "receiptTypeAtOrigin": "CY",
+  "deliveryTypeAtDestination": "CY",
+  "earliestDepartureDate": "2026-12-01",
+  "productIdentifiers": ["QUICK_QUOTES", "QUICK_QUOTES_SPOT"],
+  "customerIdentifier": "ops@example.com"
+}

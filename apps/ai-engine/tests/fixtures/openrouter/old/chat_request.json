@@ -1,0 +1,30 @@
+{
+  "model": "qwen/qwen3-32b",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You extract RFQ fields from freight emails into JSON."
+    },
+    {
+      "role": "user",
+      "content": "RFQ: 2x40GP Santos (BRSSZ) to Hamburg (DEHAM), FAK, 36000 KG gross."
+    }
+  ],
+  "temperature": 0.1,
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "rfq_extraction",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "port_of_loading": { "type": "string" },
+          "port_of_discharge": { "type": "string" }
+        },
+        "required": ["port_of_loading", "port_of_discharge"]
+      }
+    }
+  },
+  "max_tokens": 800
+}

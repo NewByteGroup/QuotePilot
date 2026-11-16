@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +26,8 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox/inboxdb"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/testenv"
 )
 
@@ -46,6 +51,7 @@ func TestSpikeInTenantTxSqlcDecimal(t *testing.T) {
 			ResendMessageID:  "msg-decimal-1",
 			Subject:          "decimal roundtrip",
 			DeclaredValueUsd: amount,
+			ReceivedAt:       pgtype.Timestamptz{Time: time.Now(), Valid: true},
 		})
 		require.NoError(t, err)
 		require.Equal(t, int64(1), rows, "first insert must report one row")
@@ -67,9 +73,11 @@ func TestSpikeInTenantTxSqlcDecimal(t *testing.T) {
 	}))
 }
 
-// TestSpikeWebhook is gate criterion 5: a valid Svix signature inserts
-// idempotently on (organization_id, resend_message_id); an invalid one is a
-// 401 before any DB write.
+// TestSpikeWebhook is gate criterion 5 plus the ADR-005 section 7 path: a
+// valid Svix signature resolves the tenant from `to` through
+// resolve_inbound_org, then inserts idempotently on
+// (organization_id, resend_message_id); an invalid one is a 401 before any
+// DB write.
 func TestSpikeWebhook(t *testing.T) {
 	db := testenv.Open(t)
 	ctx := context.Background()
@@ -81,16 +89,34 @@ func TestSpikeWebhook(t *testing.T) {
 	signer, err := svix.NewWebhook(secret)
 	require.NoError(t, err)
 
-	srv := httptest.NewServer(inbox.NewServer(db, verifier, testLogger))
+	org := uuid.New()
+	alias := testenv.SeedOrganization(t, org, "inbox-webhook") + "@in.test"
+
+	srv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier, nil, testLogger))
 	defer srv.Close()
 
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "inbox-webhook")
+	// The documented email.received envelope
+	// (https://resend.com/docs/webhooks/emails/received): metadata only —
+	// body and attachment bytes come from the Receiving/Attachments APIs.
 	payload, err := json.Marshal(map[string]any{
-		"organization_id":    org.String(),
-		"resend_message_id":  "resend-spike-1",
-		"subject":            "RFQ: 20 boxes Shenzhen",
-		"declared_value_usd": "99.95",
+		"type":       "email.received",
+		"created_at": "2026-11-09T12:00:00.000Z",
+		"data": map[string]any{
+			"email_id":   "resend-spike-1",
+			"created_at": "2026-11-09T11:59:58.000Z",
+			"from":       "customer@example.com",
+			"to":         []string{alias},
+			"cc":         []string{},
+			"bcc":        []string{},
+			"message_id": "<spike-1@mail.example.com>",
+			"subject":    "RFQ: 20 boxes Shenzhen",
+			"attachments": []map[string]any{{
+				"id":                  "att-1",
+				"filename":            "rfq.pdf",
+				"content_type":        "application/pdf",
+				"content_disposition": "attachment",
+			}},
+		},
 	})
 	require.NoError(t, err)
 
@@ -123,6 +149,134 @@ func TestSpikeWebhook(t *testing.T) {
 		n, err := inboxdb.New(tx).CountInboundMessagesForOrg(ctx, pgtype.UUID{Bytes: org, Valid: true})
 		require.NoError(t, err)
 		require.Equal(t, int64(1), n, "rejected webhook must not write")
+		return nil
+	}))
+}
+
+// TestWebhookChainsIngest is the spec-S1 seam end to end: the verified
+// webhook commits the inbound_messages receipt AND the staged rfq_ingest
+// job inside one tenant transaction. A replay adds neither a second row
+// nor a second job, and an enqueue failure rolls the whole delivery back —
+// nothing lands half-committed.
+func TestWebhookChainsIngest(t *testing.T) {
+	db := testenv.Open(t)
+	ctx := context.Background()
+
+	secretBytes := []byte("ingest-chain-signing-secret")
+	secret := "whsec_" + base64.StdEncoding.EncodeToString(secretBytes)
+	verifier, err := inbox.NewSvixVerifier(secret)
+	require.NoError(t, err)
+	signer, err := svix.NewWebhook(secret)
+	require.NoError(t, err)
+
+	org := uuid.New()
+	alias := testenv.SeedOrganization(t, org, "inbox-chain") + "@in.test"
+
+	// Insert-only client: no workers are needed for InsertTx to land the
+	// job row inside the request's transaction (same shape as the worker
+	// rig in jobs tests).
+	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
+		Schema:            "river",
+		ReindexerSchedule: river.NeverSchedule(),
+	})
+	require.NoError(t, err)
+	enqueue := inbox.EnqueueIngestFunc(func(ctx context.Context, tx pgx.Tx, orgID, corrID, msgID uuid.UUID) error {
+		_, err := client.InsertTx(ctx, tx, jobs.IngestArgs{
+			OrganizationID:   orgID,
+			CorrelationID:    corrID,
+			InboundMessageID: msgID,
+		}, nil)
+		return err
+	})
+
+	srv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier, enqueue, testLogger))
+	defer srv.Close()
+
+	payload, err := json.Marshal(map[string]any{
+		"type":       "email.received",
+		"created_at": "2026-11-09T12:00:00.000Z",
+		"data": map[string]any{
+			"email_id":    "resend-chain-1",
+			"created_at":  "2026-11-09T11:59:58.000Z",
+			"from":        "customer@example.com",
+			"to":          []string{alias},
+			"subject":     "RFQ chain",
+			"attachments": []map[string]any{},
+		},
+	})
+	require.NoError(t, err)
+
+	resp, body := postSigned(t, srv.URL+"/webhooks/resend/inbound", signer, "msg_chain_1", payload)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+	assert.Contains(t, body, `"inserted":true`)
+
+	// One commit: the receipt row exists and exactly one rfq_ingest job —
+	// queue `ingest` — carries this receipt's id in its args.
+	var receiptID uuid.UUID
+	var jobsForReceipt int
+	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+		require.NoError(t, tx.QueryRow(ctx,
+			`SELECT id FROM app.inbound_messages WHERE resend_message_id = 'resend-chain-1'`).
+			Scan(&receiptID))
+		return tx.QueryRow(ctx, `
+			SELECT count(*) FROM river.river_job
+			WHERE kind = 'rfq_ingest' AND queue = 'ingest'
+			  AND args ->> 'inbound_message_id' = $1
+			  AND args ->> 'organization_id' = $2`,
+			receiptID.String(), org.String()).Scan(&jobsForReceipt)
+	}))
+	assert.Equal(t, 1, jobsForReceipt, "the receipt must carry exactly one staged rfq_ingest job")
+
+	// Replay: no second row, no second job — the enqueue only runs inside a
+	// first-insert transaction.
+	resp, body = postSigned(t, srv.URL+"/webhooks/resend/inbound", signer, "msg_chain_replay", payload)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "body: %s", body)
+	assert.Contains(t, body, `"inserted":false`)
+	var replayJobs int
+	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+		n, err := inboxdb.New(tx).CountInboundMessagesForOrg(ctx, pgtype.UUID{Bytes: org, Valid: true})
+		require.NoError(t, err)
+		require.Equal(t, int64(1), n, "replay must not store a second receipt")
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM river.river_job WHERE kind = 'rfq_ingest'
+			 AND args ->> 'organization_id' = $1`, org.String()).Scan(&replayJobs)
+	}))
+	assert.Equal(t, 1, replayJobs, "replay must not enqueue a second job")
+
+	// Atomicity: a failing enqueue aborts the tx — the webhook surfaces 5xx
+	// (Svix retries) and neither the receipt nor the job persists.
+	failSrv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier,
+		inbox.EnqueueIngestFunc(func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID) error {
+			return errors.New("river insert failed")
+		}), testLogger))
+	defer failSrv.Close()
+
+	failPayload, err := json.Marshal(map[string]any{
+		"type":       "email.received",
+		"created_at": "2026-11-09T12:00:00.000Z",
+		"data": map[string]any{
+			"email_id":    "resend-chain-fail",
+			"created_at":  "2026-11-09T11:59:58.000Z",
+			"from":        "customer@example.com",
+			"to":          []string{alias},
+			"subject":     "rollback me",
+			"attachments": []map[string]any{},
+		},
+	})
+	require.NoError(t, err)
+	resp, body = postSigned(t, failSrv.URL+"/webhooks/resend/inbound", signer, "msg_chain_fail", failPayload)
+	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, "body: %s", body)
+
+	require.NoError(t, db.InTenantTx(ctx, org, func(ctx context.Context, tx pgx.Tx) error {
+		var receipts, orgJobs int
+		require.NoError(t, tx.QueryRow(ctx,
+			`SELECT count(*) FROM app.inbound_messages WHERE resend_message_id = 'resend-chain-fail'`).
+			Scan(&receipts))
+		require.NoError(t, tx.QueryRow(ctx,
+			`SELECT count(*) FROM river.river_job WHERE kind = 'rfq_ingest'
+			 AND args ->> 'organization_id' = $1`, org.String()).Scan(&orgJobs))
+		assert.Equal(t, 0, receipts, "a failed enqueue must roll the receipt back")
+		assert.Equal(t, 1, orgJobs, "only the first delivery's job may exist")
 		return nil
 	}))
 }

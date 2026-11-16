@@ -1,0 +1,232 @@
+{
+  "carrierPriceRequestReference": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "request": {
+    "placeOfReceipt": { "locode": "BRSSZ" },
+    "placeOfDelivery": { "locode": "DEHAM" },
+    "portOfLoading": { "locode": "BRSSZ" },
+    "portOfDischarge": { "locode": "DEHAM" },
+    "requestedEquipment": {
+      "requestedEquipmentSizeType": "22G1",
+      "requestedEquipmentUnits": 2,
+      "isNonOperatingReefer": false,
+      "shippersOwnedContainer": false
+    },
+    "commodity": {
+      "commodityTypeGroup": "FAK",
+      "cargoGrossWeight": 36000,
+      "cargoGrossWeightUnit": "KG",
+      "isHazardous": false
+    },
+    "receiptTypeAtOrigin": "CY",
+    "deliveryTypeAtDestination": "CY",
+    "earliestDepartureDate": "2026-12-01",
+    "productIdentifiers": ["QUICK_QUOTES", "QUICK_QUOTES_SPOT"],
+    "customerIdentifier": "ops@example.com"
+  },
+  "offers": [
+    {
+      "carrierOfferRequestReference": "24595eb0-5cfc-4381-9c3a-cedc1975e9aa",
+      "productIdentifier": "QUICK_QUOTES_SPOT",
+      "placeOfReceipt": "BRSSZ",
+      "placeOfReceiptDate": "2026-12-03T08:00:00.000Z",
+      "placeOfDelivery": "DEHAM",
+      "placeOfDeliveryDateTime": "2026-12-30T06:00:00.000Z",
+      "portOfLoading": "BRSSZ",
+      "portOfLoadingDateTime": "2026-12-05T14:00:00.000Z",
+      "portOfDischarge": "DEHAM",
+      "portOfDischargeDateTime": "2026-12-28T19:00:00.000Z",
+      "receiptTypeAtOrigin": "CY",
+      "deliveryTypeAtDestination": "CY",
+      "isOriginLocationExchangedWithTwinCity": false,
+      "isDestinationLocationExchangedWithTwinCity": false,
+      "transitTime": 27,
+      "cutOffDateTime": "2026-12-04T12:00:00.000Z",
+      "documentationClosureDateTime": "2026-12-04T18:00:00.000Z",
+      "verifiedGrossMassDateTime": "2026-12-04T12:00:00.000Z",
+      "offerValidTo": "2026-12-01T23:59:59.000Z",
+      "termsAndConditions": [
+        "QUICK_QUOTES_SPOT terms apply",
+        "Subject to equipment availability"
+      ],
+      "legs": [
+        {
+          "modeOfTransport": "VESSEL",
+          "departureLocation": { "unLocationCode": "BRSSZ", "locationName": "Santos" },
+          "departureDateTime": "2026-12-05T14:00:00.000Z",
+          "arrivalLocation": { "unLocationCode": "DEHAM", "locationName": "Hamburg" },
+          "arrivalDateTime": "2026-12-28T19:00:00.000Z",
+          "vesselName": "SANTOS EXPRESS",
+          "vesselImoNumber": "9321483",
+          "carrierServiceName": "ASA",
+          "scheduleVoyageNumber": "048E"
+        }
+      ],
+      "equipments": [
+        {
+          "requestedEquipment": {
+            "requestedEquipmentSizeType": "22G1",
+            "requestedEquipmentUnits": 2,
+            "isNonOperatingReefer": false,
+            "shippersOwnedContainer": false
+          },
+          "commodity": {
+            "commodityTypeGroup": "FAK",
+            "commodityTypeGroupNumber": 1,
+            "name": "FREIGHT ALL KINDS"
+          },
+          "cancellationFeeAmount": 50.0,
+          "cancellationFeeCurrency": "USD",
+          "cancellationFeeUoM": "CONTAINER",
+          "rates": [
+            {
+              "chargeTypeCode": "SEA",
+              "chargeTypeShortDescription": "Ocean freight",
+              "currency": "USD",
+              "unitOfMeasure": "CONTAINER",
+              "amount": 1750.5,
+              "subjectToGri": false,
+              "included": true,
+              "chargeable": true,
+              "exclusiveRate": false,
+              "locationProposal": "MAIN_CARRIAGE",
+              "modeOfTransport": "VESSEL",
+              "motDirectionIndicator": "LOCAL",
+              "rateBaseType": "CONTAINER",
+              "seaFreightIndicator": true,
+              "carrierServiceName": "ASA",
+              "pcIndicator": "PREPAID",
+              "invoiceItemGroup": 1
+            },
+            {
+              "chargeTypeCode": "THO",
+              "chargeTypeShortDescription": "Terminal handling at origin",
+              "currency": "USD",
+              "unitOfMeasure": "CONTAINER",
+              "amount": 325.0,
+              "subjectToGri": false,
+              "included": true,
+              "chargeable": true,
+              "exclusiveRate": false,
+              "locationProposal": "BASE_PORT_FROM",
+              "modeOfTransport": "VESSEL",
+              "motDirectionIndicator": "PRE",
+              "rateBaseType": "CONTAINER",
+              "seaFreightIndicator": false,
+              "pcIndicator": "PREPAID",
+              "invoiceItemGroup": 2
+            },
+            {
+              "chargeTypeCode": "DDF",
+              "chargeTypeShortDescription": "Documentation fee",
+              "currency": "USD",
+              "unitOfMeasure": "BL",
+              "amount": 119.99,
+              "subjectToGri": false,
+              "included": true,
+              "chargeable": true,
+              "exclusiveRate": false,
+              "locationProposal": "MAIN_CARRIAGE",
+              "modeOfTransport": "VESSEL",
+              "motDirectionIndicator": "LOCAL",
+              "rateBaseType": "DOCUMENT",
+              "seaFreightIndicator": false,
+              "pcIndicator": "PREPAID",
+              "invoiceItemGroup": 2
+            }
+          ],
+          "valueAddedServices": [
+            {
+              "vasId": "24595eb0-5cfc-4381-9c3a-cedc1975e6ff",
+              "vasGroup": "ShipGreen",
+              "vasCode": "BI25",
+              "name": "Ship Green 25 %",
+              "description": "Ship Green 25 % is a special service for decarbonisation",
+              "included": false,
+              "vasRates": [
+                {
+                  "chargeTypeCode": "SGD",
+                  "currency": "USD",
+                  "unitOfMeasure": "CONTAINER",
+                  "amount": 30.0,
+                  "subjectToGri": false,
+                  "included": false,
+                  "chargeable": true,
+                  "exclusiveRate": false,
+                  "locationProposal": "MAIN_CARRIAGE",
+                  "modeOfTransport": "VESSEL",
+                  "motDirectionIndicator": "LOCAL",
+                  "rateBaseType": "CONTAINER",
+                  "seaFreightIndicator": false
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "potentialQuotationValidFrom": "2026-12-05",
+      "potentialQuotationValidTo": "2026-12-28",
+      "potentialQuotationExpiryDate": "2026-12-01"
+    },
+    {
+      "carrierOfferRequestReference": "24595eb0-5cfc-4381-9c3a-cedc1975e9bb",
+      "productIdentifier": "QUICK_QUOTES",
+      "placeOfReceipt": "BRSSZ",
+      "placeOfReceiptDate": "2026-12-10T08:00:00.000Z",
+      "placeOfDelivery": "DEHAM",
+      "placeOfDeliveryDateTime": "2027-01-08T06:00:00.000Z",
+      "portOfLoading": "BRSSZ",
+      "portOfLoadingDateTime": "2026-12-12T14:00:00.000Z",
+      "portOfDischarge": "DEHAM",
+      "portOfDischargeDateTime": "2027-01-05T19:00:00.000Z",
+      "receiptTypeAtOrigin": "CY",
+      "deliveryTypeAtDestination": "CY",
+      "transitTime": 29,
+      "offerValidTo": "2026-12-08T23:59:59.000Z",
+      "termsAndConditions": ["QUICK_QUOTES terms apply"],
+      "legs": [
+        {
+          "modeOfTransport": "VESSEL",
+          "departureLocation": { "unLocationCode": "BRSSZ" },
+          "departureDateTime": "2026-12-12T14:00:00.000Z",
+          "arrivalLocation": { "unLocationCode": "DEHAM" },
+          "arrivalDateTime": "2027-01-05T19:00:00.000Z",
+          "vesselName": "ATLANTIC STAR",
+          "vesselImoNumber": "9400123",
+          "carrierServiceName": "ASA",
+          "scheduleVoyageNumber": "050E"
+        }
+      ],
+      "offeredEquipment": [
+        {
+          "requestedEquipment": {
+            "requestedEquipmentSizeType": "22G1",
+            "requestedEquipmentUnits": 2,
+            "isNonOperatingReefer": false,
+            "shippersOwnedContainer": false
+          },
+          "rates": [
+            {
+              "chargeTypeCode": "SEA",
+              "currency": "USD",
+              "unitOfMeasure": "CONTAINER",
+              "amount": 1610.25,
+              "subjectToGri": true,
+              "included": true,
+              "chargeable": true,
+              "exclusiveRate": false,
+              "locationProposal": "MAIN_CARRIAGE",
+              "modeOfTransport": "VESSEL",
+              "motDirectionIndicator": "LOCAL",
+              "rateBaseType": "CONTAINER",
+              "seaFreightIndicator": true,
+              "pcIndicator": "PREPAID"
+            }
+          ]
+        }
+      ],
+      "potentialQuotationValidFrom": "2026-12-12",
+      "potentialQuotationValidTo": "2027-01-05",
+      "potentialQuotationExpiryDate": "2026-12-08"
+    }
+  ]
+}

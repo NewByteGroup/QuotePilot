@@ -1,0 +1,15 @@
+{
+  "id": "gen-chat-bad0000",
+  "model": "qwen/qwen3-32b",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 0,
+    "total_tokens": 120
+  }
+}

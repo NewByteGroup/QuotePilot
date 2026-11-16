@@ -1,0 +1,18 @@
+{
+  "name": "@quotepilot/contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./web-api": "./generated/ts/web-api.ts"
+  },
+  "scripts": {
+    "generate": "openapi-typescript openapi/web-api.yaml -o generated/ts/web-api.ts",
+    "lint": "redocly lint openapi/web-api.yaml"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.76.0",
+    "openapi-typescript": "^7.13.0",
+    "typescript": "~5.9.3"
+  }
+}

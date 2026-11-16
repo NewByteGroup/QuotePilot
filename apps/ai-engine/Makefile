@@ -1,7 +1,9 @@
 .PHONY: test lint
 
 test:
-	@echo "stub: would run pytest"
+	python -m pytest --cov=. --cov-report=term-missing
 
 lint:
-	@echo "stub: would run ruff format --check, ruff check, type check"
+	ruff format --check .
+	ruff check .
+	mypy .

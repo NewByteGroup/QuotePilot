@@ -111,6 +111,10 @@ jobs:
           if grep -q '^\[tool\.mypy\]' pyproject.toml 2>/dev/null \
             || compgen -G 'mypy.ini' > /dev/null || compgen -G '.mypy.ini' > /dev/null; then
             python -m pip install --quiet 'mypy==1.19.1'
+            # Type checking needs the project's runtime deps (pydantic.mypy
+            # plugin, httpx imports) and dev extras (pytest is imported by the
+            # tests mypy checks); editable install mirrors the test step.
+            python -m pip install --quiet -e '.[dev]' || echo "notice: editable install failed; type check runs against the checkout"
             mypy .
           elif grep -q '^\[tool\.pyright\]' pyproject.toml 2>/dev/null || [ -f pyrightconfig.json ]; then
             python -m pip install --quiet 'pyright==1.1.414'  # pip wrapper bundles node
@@ -136,24 +140,24 @@ jobs:
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
-          npx eslint .
-          npx prettier --check .
-          npx tsc --noEmit
+          # pnpm workspace (root pnpm-lock.yaml): apps/web depends on packages/contracts.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
+          pnpm --filter @quotepilot/web lint
 
       - name: OpenAPI lint (packages/contracts)
         run: |
-          if ! find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print -quit | grep -q .; then
-            echo "stub: no OpenAPI spec yet — check activates when a spec lands under packages/contracts"
+          if [ ! -d packages/contracts/openapi ] \
+            || ! find packages/contracts/openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print -quit | grep -q .; then
+            echo "stub: no OpenAPI spec yet — check activates when a spec lands under packages/contracts/openapi"
             exit 0
           fi
-          # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3.
-          # packages/contracts also holds plain JSON Schema files; lint only
-          # files that actually declare an OpenAPI 3.x document.
-          find packages/contracts -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' \) -print0 \
-            | xargs -0 grep -lEZ 'openapi"?\s*:\s*"?3\.' \
-            | xargs -0 -r -n1 npx --yes @redocly/cli@2.76.0 lint
+          # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3; only the
+          # specs under packages/contracts/openapi are linted (other files in
+          # packages/contracts — package.json, the schemas/*.schema.json JSON
+          # Schemas — are not OpenAPI documents).
+          find packages/contracts/openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
+            | xargs -0 -n1 npx --yes @redocly/cli@2.76.0 lint
 
   test:
     name: test
@@ -197,10 +201,11 @@ jobs:
             echo "stub: no Python toolchain yet — check activates when apps/ai-engine/pyproject.toml or requirements*.txt lands"
             exit 0
           fi
-          # pytest 8.4.2 / pytest-cov 7.1.0 — pinned. Project deps come from the
+          # pytest 9.0.3 / pytest-cov 7.1.0 — pinned (9.0.3 fixes
+          # CVE-2025-71176 tmpdir handling). Project deps come from the
           # manifest itself; the editable install is best-effort so tests can
           # still run against the checkout if packaging is not ready yet.
-          python -m pip install --quiet 'pytest==8.4.2' 'pytest-cov==7.1.0'
+          python -m pip install --quiet 'pytest==9.0.3' 'pytest-cov==7.1.0'
           cd apps/ai-engine
           for req in requirements*.txt; do
             [ -f "$req" ] && python -m pip install --quiet -r "$req"
@@ -227,10 +232,11 @@ jobs:
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          # pnpm workspace (root pnpm-lock.yaml): apps/web depends on packages/contracts.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
           # vitest is wired through the package.json "test" script (ADR-008 layer 10).
-          npm test
+          pnpm --filter @quotepilot/web test
 
       # No coverage gate (ADR-008 section 9): artifacts are published for review.
       - name: Upload coverage artifact
@@ -455,6 +461,27 @@ jobs:
           untracked="$(git ls-files --others --exclude-standard -- apps/core-api)"
           if [ -n "$untracked" ]; then
             echo "contracts-drift: sqlc regeneration produced untracked files:"
+            echo "$untracked"
+            exit 1
+          fi
+
+      - name: Regenerate oapi-codegen and check for drift
+        run: |
+          if [ ! -f apps/core-api/oapi-codegen.yaml ]; then
+            echo "stub: no oapi-codegen config yet — check activates when apps/core-api/oapi-codegen.yaml lands"
+            exit 0
+          fi
+          # oapi-codegen v2.8.2 — pinned (ADR-002: std-http-server +
+          # strict-server, committed output). Runs from apps/core-api so the
+          # config's relative output path resolves; keep the version in sync
+          # with OAPI_CODEGEN_VERSION in packages/contracts/Makefile.
+          go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.8.2
+          (cd apps/core-api && "$(go env GOPATH)/bin/oapi-codegen" \
+            -config oapi-codegen.yaml ../../packages/contracts/openapi/core-api.yaml)
+          git diff --exit-code -- apps/core-api
+          untracked="$(git ls-files --others --exclude-standard -- apps/core-api)"
+          if [ -n "$untracked" ]; then
+            echo "contracts-drift: oapi-codegen regeneration produced untracked files:"
             echo "$untracked"
             exit 1
           fi
@@ -748,16 +775,17 @@ jobs:
           cache: ${{ hashFiles('apps/web/package-lock.json') != '' && 'npm' || '' }}
           cache-dependency-path: apps/web/package-lock.json
 
-      - name: npm audit (production dependencies only)
+      - name: pnpm audit (production dependencies only)
         run: |
           if [ ! -f apps/web/package.json ]; then
             echo "stub: no Node toolchain yet — check activates when apps/web/package.json lands"
             exit 0
           fi
-          cd apps/web
-          # npm audit reads the lockfile; generate it without installing when absent.
-          if [ ! -f package-lock.json ]; then npm install --package-lock-only; fi
-          npm audit --omit=dev
+          # pnpm workspace: npm cannot resolve workspace:* and has no lockfile
+          # here; audit the committed root pnpm-lock.yaml instead.
+          npm install -g pnpm@10.34.9
+          pnpm install --frozen-lockfile
+          pnpm audit --prod
 
       # Scans locally built images; when the registry/deploy story lands
       # (ADR-007) this should reuse the images produced by the `build` job

@@ -1,5 +1,6 @@
-// Package jobs hosts River job workers (ADR-004). The spike ships a single
-// echo worker proving a job runs under the RLS tenant context.
+// Package jobs hosts River job workers (ADR-004): the spike's echo worker,
+// which proved a job runs under the RLS tenant context, and the
+// auth_mail_send worker draining the magic-link outbox (migration 0004).
 package jobs
 
 import (

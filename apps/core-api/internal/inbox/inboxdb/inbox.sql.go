@@ -51,8 +51,8 @@ func (q *Queries) GetInboundMessage(ctx context.Context, arg GetInboundMessagePa
 
 const insertInboundMessage = `-- name: InsertInboundMessage :execrows
 
-INSERT INTO app.inbound_messages (organization_id, resend_message_id, subject, declared_value_usd)
-VALUES ($1, $2, $3, $4)
+INSERT INTO app.inbound_messages (organization_id, resend_message_id, subject, declared_value_usd, received_at)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (organization_id, resend_message_id) DO NOTHING
 `
 
@@ -61,6 +61,7 @@ type InsertInboundMessageParams struct {
 	ResendMessageID  string
 	Subject          string
 	DeclaredValueUsd decimal.Decimal
+	ReceivedAt       pgtype.Timestamptz
 }
 
 // Inbox queries. Schema lives in db/migrations; sqlc generates internal/inbox/inboxdb.
@@ -72,6 +73,7 @@ func (q *Queries) InsertInboundMessage(ctx context.Context, arg InsertInboundMes
 		arg.ResendMessageID,
 		arg.Subject,
 		arg.DeclaredValueUsd,
+		arg.ReceivedAt,
 	)
 	if err != nil {
 		return 0, err

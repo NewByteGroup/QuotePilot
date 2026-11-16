@@ -1,0 +1,16 @@
+{
+  "success": true,
+  "data": {
+    "markdown": "# Ocean Tariff — Santos (BRSSZ) to Hamburg (DEHAM)\n\n| Charge | Basis | Amount | Currency |\n|---|---|---|---|\n| Ocean Freight | per 40' HC | 1200.00 | USD |\n| BAF | per container | 150.00 | USD |\n| THC Origin | per container | 275.00 | BRL |\n\nValid until 2026-06-30.\n",
+    "metadata": {
+      "statusCode": 200,
+      "title": "Fake Carrier Tariff — Santos to Hamburg",
+      "url": "https://tariffs.example.com/santos-hamburg",
+      "description": "Ocean tariff rates for the Santos-Hamburg lane",
+      "language": "en",
+      "contentType": "text/html",
+      "scrapeId": "synthetic-fixture-id",
+      "creditsUsed": 1
+    }
+  }
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "offerId": 123,
+    "transitTime": "not-a-number",
+    "routingLegs": [
+      {
+        "legNumber": "one",
+        "departureDate": "yesterday"
+      }
+    ]
+  }
+]

@@ -12,10 +12,14 @@ integration-test:
 	go run ./cmd/migrate
 	go test -count=1 -race ./...
 
-# Regenerates internal/inbox/inboxdb from db/queries + db/migrations. Output is
-# committed; never edit generated files (CI contracts-drift checks the diff).
+# Regenerates committed codegen output — sqlc → internal/inbox/inboxdb from
+# db/queries + db/migrations; oapi-codegen → internal/auth/authapi from
+# packages/contracts/openapi/core-api.yaml (ADR-002). Output is committed;
+# never edit generated files (CI contracts-drift checks the diff). Both tools
+# must be on PATH; versions are pinned in .github/workflows/ci.yml.
 generate:
 	sqlc generate
+	oapi-codegen -config oapi-codegen.yaml ../../packages/contracts/openapi/core-api.yaml
 
 migrate:
 	go run ./cmd/migrate

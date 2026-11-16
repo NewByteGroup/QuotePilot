@@ -1,0 +1,9 @@
+packages:
+  - apps/web
+  - packages/contracts
+
+# GHSA-g3hv-75wg-m249: minimatch >=7 <11.0.1 (DoS via globparts
+# amplification) — rewrite only the 10.x specifiers pulled by the eslint
+# toolchain; older ranges (e.g. redocly's minimatch@5) stay untouched.
+overrides:
+  'minimatch@>=10 <11': '11.0.1'

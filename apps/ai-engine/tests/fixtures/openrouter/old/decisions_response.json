@@ -1,0 +1,30 @@
+{
+  "id": "gen-dec-9f3a2b1c4d5e",
+  "model": "typesafe/jev-1.14-2025-11-04",
+  "provider": "TypeSafe",
+  "answers": {
+    "is_bug": {
+      "type": "noul",
+      "noul": 0.96
+    },
+    "team": {
+      "type": "choice",
+      "choice": "payments",
+      "probabilities": { "payments": 0.78, "frontend": 0.22 },
+      "confidence": 0.67
+    },
+    "urgency": {
+      "type": "score",
+      "score": 1.99,
+      "legend": { "0": "low", "1": "mid", "2": "high" },
+      "probabilities": { "0": 0, "1": 0, "2": 1 },
+      "confidence": 0.99
+    },
+    "region": {
+      "type": "box",
+      "box": { "top": 0.1, "bottom": 0.4, "left": 0.6, "right": 0.9 },
+      "confidence": 0.95
+    }
+  },
+  "usage": { "input_tokens": 476, "output_tokens": 70, "cost": 0.000019992 }
+}

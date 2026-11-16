@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "data": {
+    "markdown": "",
+    "metadata": {
+      "statusCode": 404,
+      "url": "https://tariffs.example.com/dead-tariff-page",
+      "error": "Not Found"
+    }
+  }
+}

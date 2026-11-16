@@ -42,7 +42,14 @@ lint:
 	@echo "stub: would run actionlint and OpenAPI lint"
 
 contracts-drift:
-	@echo "stub: would regenerate Go, Pydantic and TypeScript from packages/contracts and sqlc, and fail on any diff"
+	$(MAKE) -C packages/contracts generate
+	cd apps/core-api && go run github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1 generate -f sqlc.yaml
+	git diff --exit-code
+	@untracked="$$(git ls-files --others --exclude-standard)"; \
+	if [ -n "$$untracked" ]; then \
+		echo "contracts-drift: regeneration produced untracked files:"; \
+		echo "$$untracked"; exit 1; \
+	fi
 
 # Local parity with the CI workflow (.github/workflows/ci.yml): lint, unit
 # tests, bring Postgres up, prove the role model, then the integration suite

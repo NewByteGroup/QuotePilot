@@ -10,3 +10,11 @@ docs/superpowers/
 docs/specs/private/
 docs/notion-comments-sections-4-5.md
 .claude/settings.local.json
+# Node
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Dev object-storage artifacts (QP_STORAGE_DIR default; see newStorage in cmd/server)
+.dev-storage/
