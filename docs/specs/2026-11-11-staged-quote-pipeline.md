@@ -187,26 +187,32 @@ freight-not-owed never reach the call; they checkpoint as not applicable.
     `NOT NULL` today; `offer_reference` and `expires_at` already are
     nullable), with a `CHECK` that only an `OFFER_FOUND` row carries
     content and an `OFFER_FOUND` row always does;
+  - `source` with the values `LIVE` and `MIRROR` — which connector
+    produced the row (see the mirror guards below);
   - ENABLE + FORCE RLS and the tenant policy stay exactly as shipped, and
     the table joins the ADR-008 isolation suite (pooled reuse A then B, no
     tenant context ⇒ 0 rows) in the same PR.
-
-  The same migration adds `review_reason` (see S3b).
 - **The connector sits behind an interface** owned by core (the worker
   depends on the interface, not on the Hapag client), so the demo can bind
   the mirror portal and tests bind a named fake. The real implementation
   stays the `ai-engine` Hapag connector (ADR-001); which one is bound is
   configuration. Two guards on the mirror (RFC-003: never used for real
   tenants' quotes):
-  - **startup assertion** — `core-api` refuses to boot when the mirror
-    binding is configured for real tenants, the same fail-closed shape as
-    the dev-mailer gate. ☐ The schema has no marker that distinguishes a
-    demo tenant from a real one today; how the assertion tells them apart
-    (environment-level only, or a per-organization flag, which is a schema
-    change) is Pedro's call before P3.
-  - **UI label** — an offer that came from the mirror is recorded as such
-    on its `carrier_offers` row and the UI must label it, and any quote
-    priced from it, as **simulated**.
+  - **startup assertion, environment-level only (Pedro, 2026-11-16)** —
+    `APP_ENV` is required at startup with the values `local`, `test`,
+    `demo` or `production`; empty or any other value refuses to boot.
+    `MIRROR_PORTAL_ENABLED=true` is refused when `APP_ENV=production`, and
+    so is the dev mailer (`AUTH_DEV_MAILER=true`), which today is gated
+    only by the Resend credentials being absent. There is no
+    per-organization flag: the demo runs in a separate environment with
+    its own database, so a real tenant never shares a process with the
+    mirror. P3 boot tests: `APP_ENV` unset fails; `production` + mirror
+    fails; `production` + dev mailer fails. P3 also adds `APP_ENV` to
+    `.env.example` (name only).
+  - **UI label** — every row written through the mirror has
+    `source = MIRROR`. The UI labels that offer, and any quote priced from
+    it, as **simulated** by reading the column — never by looking at the
+    environment, so the label survives a database copy or export.
 
 ### S3b `rfq_price` — deterministic pricing (queue `price`)
 
@@ -256,11 +262,18 @@ S4.
   deferred (§7); until then the analyst fixes the tariff and uses
   Reprocess.
 - **`review_reason` column (Pedro, 2026-11-16).** A new column on
-  `rfq_requests`, added in P3's migration, with controlled text values —
-  initial value `EXPORT_MATRIX_OPEN`, plus `MISSING_TARIFF` and
-  `STALE_TARIFF` from the rule above. It says why a human must look;
-  `failure_reason` is **not** reused, because it means something broke.
-  New codes are added by migration, never as free text.
+  `rfq_requests` only — a parked RFQ has no quote row — added in **P2's**
+  migration, because P2 is the first stage that parks (TARIFF_UPDATE, low
+  confidence). It says why a human must look; `failure_reason` is **not**
+  reused, because it means something broke.
+  - Plain `text`, no `CHECK`: adding a code is a code change, not a
+    migration.
+  - The codes live as Go constants in one list. P3 adds
+    `EXPORT_MATRIX_OPEN`, `MISSING_TARIFF` and `STALE_TARIFF`; P2 names
+    its own codes for TARIFF_UPDATE and low confidence.
+  - A real-Postgres test fails if any stored `review_reason` is not in
+    that list, and writes go through the constants only — never a string
+    literal at the call site.
 - **`FAILED` is reserved for technical failures after retries** (transport,
   provider 5xx, storage, a dead-lettered job). A business gap — unsupported
   scope, missing data, low confidence — is always `NEEDS_REVIEW` with a
@@ -269,16 +282,25 @@ S4.
 
 ### Reprocess — HTTP, synchronous (not a job)
 
-`POST /rfqs/{id}/reprocess` under `Authenticate` + `ResolveTenant`: for an
-RFQ parked in `NEEDS_REVIEW` (or `FAILED`), the tenant tx clears
+`POST /rfqs/{id}/reprocess` under `Authenticate` + `ResolveTenant` +
+`RequireRole(OWNER, ADMIN, PRICING_ANALYST)`: for an RFQ parked in
+`NEEDS_REVIEW` (or `FAILED`), the tenant tx clears
 `review_reason`/`failure_reason`, sets the status back to the stage being
 re-run and enqueues that stage's job by ID with `InsertTx` — the same shape
-as "reclassify as RFQ" (S2). It resumes from the earliest stage whose
-checkpoint is missing, so it never repeats the paid extraction or a carrier
-fetch that already has an outcome row; re-extraction stays a separate,
-explicit request (ADR-004). Every reprocess writes a `tenant_audit_logs`
-entry. ☐ Role set — the lean is the approval set (OWNER, ADMIN,
-PRICING_ANALYST).
+as "reclassify as RFQ" (S2).
+
+- **Resumes from the earliest missing checkpoint**, so it never repeats the
+  paid extraction or a carrier fetch that already has an outcome row;
+  re-extraction stays a separate, explicit request (ADR-004).
+- **Minimum interval per RFQ (Pedro, 2026-11-16).**
+  `REPROCESS_MIN_INTERVAL`, default 60s. A second reprocess of the same RFQ
+  inside the interval returns 429 with a `Retry-After` header and enqueues
+  nothing — a double click or a retry loop cannot fan out jobs or carrier
+  calls. The last reprocess time is read from the audit log, so it needs
+  no new column.
+- **Audit log entry with the actor.** Every accepted reprocess writes a
+  `tenant_audit_logs` row in the same tx: who (user id), which RFQ, the
+  `review_reason`/`failure_reason` it cleared and the stage it resumed.
 
 ### S4 `rfq_render` — draft quote document (queue `render`)
 
@@ -354,8 +376,8 @@ dedicated column Pedro approves at the next migration.
 | PR | Contents | Depends on |
 |---|---|---|
 | P1 | Job envelope + S1 `rfq_ingest` (Resend Receiving client, R2 put, receipt→rfq promote) | R2 credentials config ☐ |
-| P2 | S2 `rfq_extract` (ai-engine classify/extract seam, contract validation, confidence gate) | extraction contract in `packages/contracts` ☐ Pedro approval |
-| P3 | S3a `rfq_fetch_rates` (connector interface, three outcomes) + S3b `rfq_price` (provenance, `review_reason` parking for export and missing/stale tariff, never-silent-fallback test) + `POST /rfqs/{id}/reprocess` — one PR per behavior, the migration first | `internal/pricing` is implemented (import-only); migration: `carrier_offers` outcome/hash/unique/CHECK + `rfq_requests.review_reason`; offer contract in `packages/contracts` ☐ |
+| P2 | S2 `rfq_extract` (ai-engine classify/extract seam, contract validation, confidence gate, `review_reason` parking) | extraction contract in `packages/contracts` ☐ Pedro approval; migration ☐ Pedro approval: `rfq_requests.review_reason` (plain text) |
+| P3 | S3a `rfq_fetch_rates` (connector interface, three outcomes) + S3b `rfq_price` (provenance, `review_reason` parking for export and missing/stale tariff, never-silent-fallback test) + `POST /rfqs/{id}/reprocess` — one PR per behavior, the migration first | `internal/pricing` is implemented (import-only); migration ☐ Pedro approval: `carrier_offers` outcome/`request_hash`/unique key/`source`/nullable content + CHECK; offer contract in `packages/contracts` ☐ |
 | P4 | S4 `rfq_render` → `READY` | render endpoint contract ☐ |
 | P5 | `POST /quotes/{id}/approve` + S5 `quote_send` → `APPROVED_SENT` | — |
 | P6+ | Deferred items above | — |
@@ -371,19 +393,15 @@ Decided, recorded in the sections above: `outbound_deliveries` deferred
 headers kept (§6); conservative confidence constant with the
 no-send-without-approval guarantee (S2); 4A/4B split, the `carrier_offers`
 migration scope and mirror guards (S3a); rate provenance, export and
-missing/stale-tariff parking, `review_reason`, `FAILED` reserved for
-technical failures (S3b); Reprocess. `internal/pricing` is implemented.
+missing/stale-tariff parking, `review_reason` (P2 migration, Go
+constants), `FAILED` reserved for technical failures (S3b); Reprocess
+(roles, 60s interval, audit); `APP_ENV` required at startup (S3a). `internal/pricing` is implemented.
 
 Still open:
 
 - ☐ **Export scope** — Marcelo; default import-only if unanswered by
   2026-11-20 (S3b).
 - ☐ R2 credentials/`quotepilot-dev` env wiring for core-api — blocks P1.
-- ☐ How the mirror startup assertion identifies a real tenant (S3a).
-- ☐ `review_reason` lands in P3's migration, but P2 parks TARIFF_UPDATE
-  and low-confidence RFQs first; either those get their codes when P3
-  lands or the column moves forward into P2's migration.
-- ☐ Reprocess role set.
 - ☐ Remaining schema calls, each at its migration: index on
   `quotes.sent_outbound_message_id` (P5); SPF/DKIM results in
   `thread_headers_json` vs a dedicated column (P1).
