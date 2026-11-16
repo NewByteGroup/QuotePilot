@@ -51,11 +51,13 @@ func (r *spyRunner) InTenantReadTx(_ context.Context, _ uuid.UUID, _ func(contex
 }
 
 // post fires a body at a fresh server built on the given resolver and
-// returns the recorder plus the runner spy for assertions.
+// returns the recorder plus the runner spy for assertions. The enqueue seam
+// stays nil — unit tests pin routing and drops; the in-transaction chain
+// itself is integration-tested against real Postgres.
 func post(t *testing.T, resolver inbox.OrgResolver, body string) (*httptest.ResponseRecorder, *spyRunner) {
 	t.Helper()
 	runner := &spyRunner{}
-	srv := inbox.NewServer(runner, resolver, acceptAll{}, testLogger)
+	srv := inbox.NewServer(runner, resolver, acceptAll{}, nil, testLogger)
 	req := httptest.NewRequest("POST", "/webhooks/resend/inbound", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
