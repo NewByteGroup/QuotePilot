@@ -92,10 +92,20 @@ type SendArgs    struct { OrganizationID, CorrelationID, QuoteID uuid.UUID }
 - Queues (config, not code — ADR-004): `ingest`, `extract` (≈4 workers,
   LLM-bound), `price`, `render`, `send`. The existing `auth_mail_send`
   worker stays on `default`.
-- Retry/timeout policy per stage is a small table in code tuned later
-  (ADR-004 open item): fetch/send stages retry on transient errors;
-  validation failures are not retried — they go straight to their
-  checkpoint/terminal state.
+
+**Retry/timeout per stage** (decided — Pedro, 2026-11-16; ADR-004 open
+item closed). General rule: **classify the error first** — transient
+retries, deterministic cancels (`river.JobCancel`), so a pure-function
+failure never burns five attempts.
+
+| Stage | Attempts | Per-attempt timeout | Retries on | Window / notes |
+|---|---|---|---|---|
+| S1 `rfq_ingest` | 5 | — | transient | **Backoff must end ≈20–25 min total** — Resend `download_url`s expire ~1 h and a late attempt cannot re-fetch |
+| S3a offer fetch | 3 | ~15 s | transient | `FETCH_FAILED` releases pricing anyway, so waiting longer only delays the quote |
+| S2 `rfq_extract` | 3 | 120 s | transient only (timeout, 5xx, 429) | Contract-violating output: at most one retry, then `NEEDS_REVIEW` — each attempt costs money |
+| S3b `rfq_price` | 5 | — | transient DB errors only | `INCOMPLETE` is not an error and never retries; deterministic errors discard via `JobCancel` |
+| S4 `rfq_render` | 3 | — | transient | |
+| S5 `rfq_send` | 5 | — | transient | Resend idempotency key makes re-sends safe; total window <1 h; exhausted ⇒ `FAILED`, no automatic resend |
 
 ## 4. Stages
 
@@ -408,15 +418,26 @@ no-send-without-approval guarantee (S2); 4A/4B split, the `carrier_offers`
 migration scope and mirror guards (S3a); rate provenance, export and
 missing/stale-tariff parking, `review_reason` (P2 migration, Go
 constants), `FAILED` reserved for technical failures (S3b); Reprocess
-(roles, 60s interval, audit); `APP_ENV` required at startup (S3a). `internal/pricing` is implemented.
+(roles, 60s interval, audit); `APP_ENV` required at startup (S3a);
+retry/timeout table (§3). `internal/pricing` is implemented.
+
+- ✓ **Index on `quotes.sent_outbound_message_id` (P5, approved
+  2026-11-16)**: `UNIQUE` **partial** index `WHERE
+  sent_outbound_message_id IS NOT NULL`, **not** prefixed by
+  `organization_id` — provider ids are globally unique and uniqueness
+  guards against double-send. Scope warning recorded: this does **not**
+  enable MVP bounce handling — a bounce webhook arrives tenantless and
+  `platform_*` functions cannot read RLS tables, so bounces will need a
+  platform-side IDs-only registry (like the waiter registry), not a
+  lookup on this column. `outbound_deliveries` stays deferred.
+- ✓ **SPF/DKIM retention** — lives in `thread_headers_json` (implemented
+  in P1); no dedicated column.
+- ✓ **R2 bucket** — `quotepilot-dev` exists on the shared Cloudflare
+  account; only the bucket-scoped S3 keypair is still needed in `.env`
+  for the live attachment path (dev uses `QP_STORAGE_DIR` meanwhile).
 
 Still open:
 
 - ☐ **Export scope** — Marcelo; default import-only if unanswered by
   2026-11-20 (S3b).
-- ☐ R2 credentials/`quotepilot-dev` env wiring for core-api — blocks P1.
-- ☐ Remaining schema calls, each at its migration: index on
-  `quotes.sent_outbound_message_id` (P5); SPF/DKIM results in
-  `thread_headers_json` vs a dedicated column (P1).
 - ☐ Carrier offer wire contract in `packages/contracts` (P3).
-- ☐ Retry counts, backoff and timeouts per stage (ADR-004 open item).
