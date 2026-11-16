@@ -1,7 +1,10 @@
-.PHONY: test lint
+.PHONY: test lint build
 
 test:
-	@echo "stub: would run vitest"
+	pnpm test
 
 lint:
-	@echo "stub: would run eslint, prettier --check, tsc --noEmit"
+	pnpm lint
+
+build:
+	pnpm build
