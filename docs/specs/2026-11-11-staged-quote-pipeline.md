@@ -118,7 +118,16 @@ set status `PARSING`, enqueue S2.
 
 ### S2 `rfq_extract` — classify + extract + confidence gate (queue `extract`)
 
-`InTenantTx`: load bodies + `parsed_markdown`; call ai-engine classify
+`InTenantTx`: first, produce `parsed_markdown` for every attachment that
+lacks it — attachment→text conversion is ai-engine's lane (same untrusted
+rules): the worker calls its parser per attachment and writes
+`parsed_markdown` on the row in the same tenant tx. A per-attachment parse
+failure leaves the column NULL, is recorded in `tenant_audit_logs` and
+degrades into the confidence gate — an attachment-only RFQ that yields no
+usable text parks `NEEDS_REVIEW` (P2 review code) rather than paying an LLM
+call on nothing.
+
+Then, with bodies + `parsed_markdown` in hand: call ai-engine classify
 (Jev, ADR-006) → `OTHER` ⇒ `IGNORED`, done; `TARIFF_UPDATE` ⇒ ☐ park as
 `NEEDS_REVIEW` until the tariff-import path exists (RFC-002 open item);
 `RFQ` ⇒ structured extraction call + auditor confidence (pplx-decider,
@@ -156,7 +165,9 @@ persisted outcome and never calls the carrier again.
 Only when the validated extraction says FCL and the requesting customer owes
 ocean freight under the Incoterm does this job call the carrier connector —
 with tenant context fetched by core, no `organization_id` sent. AIR and
-freight-not-owed never reach the call; they checkpoint as not applicable.
+freight-not-owed never reach the call; they checkpoint as `NOT_APPLICABLE` —
+a row, not an absence, so retries and Reprocess can tell "fetch completed"
+apart from "fetch never ran".
 
 - **Terminal outcomes — every one releases pricing (enqueues S3b):**
 
@@ -165,6 +176,7 @@ freight-not-owed never reach the call; they checkpoint as not applicable.
   | `OFFER_FOUND` | Contract-valid, sanity-bounded offer persisted | the pinned offer |
   | `NO_OFFER` | Carrier answered, nothing usable for the request | no offer |
   | `FETCH_FAILED` | Retries exhausted (transport, 5xx, invalid payload) | no offer |
+  | `NOT_APPLICABLE` | No carrier call was owed (AIR, or the Incoterm puts ocean freight on the other party) | no offer |
 
   A carrier outage therefore never strands an RFQ: pricing runs on tariffs
   and the outcome travels into the quote's provenance (S3b). The outcome is
@@ -181,12 +193,13 @@ freight-not-owed never reach the call; they checkpoint as not applicable.
 - **P3 migration scope (Pedro, 2026-11-16) — extend `app.carrier_offers`,
   no new table.** One row per fetch attempt outcome:
   - `outcome` with the controlled values `OFFER_FOUND`, `NO_OFFER`,
-    `FETCH_FAILED` — this row is the S3a checkpoint;
+    `FETCH_FAILED`, `NOT_APPLICABLE` — this row is the S3a checkpoint;
   - `request_hash`, and `UNIQUE (rfq_id, carrier, request_hash)`;
   - the offer-content columns become nullable (`offer_payload_json` is
     `NOT NULL` today; `offer_reference` and `expires_at` already are
-    nullable), with a `CHECK` that only an `OFFER_FOUND` row carries
-    content and an `OFFER_FOUND` row always does;
+    nullable), with a `CHECK` that an `OFFER_FOUND` row always carries
+    offer content and `NO_OFFER`/`FETCH_FAILED`/`NOT_APPLICABLE` rows
+    never do;
   - `source` with the values `LIVE` and `MIRROR` — which connector
     produced the row (see the mirror guards below);
   - ENABLE + FORCE RLS and the tenant policy stay exactly as shipped, and
