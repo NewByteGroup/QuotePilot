@@ -2,7 +2,11 @@ package platform
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -11,12 +15,50 @@ import (
 // credentials; ai-engine receives content, never keys. The interface is
 // deliberately minimal for the P1 slice — the rfq_ingest worker only writes.
 // The real S3-compatible client lands with the R2 credentials (spec open
-// item); until then main binds FakeStorage so dev runs end-to-end.
+// item); until then main binds DirStorage so dev runs end-to-end without
+// losing attachment bytes on restart.
 type ObjectStorage interface {
 	// Put stores body under key (e.g. "tenants/{org}/rfqs/{rfq}/{file}").
 	// The caller builds tenant-safe keys; implementations must treat the key
 	// as an opaque path and never interpolate credentials or org data.
 	Put(ctx context.Context, key string, body []byte) error
+}
+
+// DirStorage is the dev binding for ObjectStorage: Put writes the object to
+// root/key on local disk, creating parent directories. Bytes survive a
+// restart — unlike FakeStorage — so the rfq_attachments rows they back stay
+// resolvable until the real R2 client lands (spec open item). Keys are
+// worker-generated, so the only guard is refusing ".." — a segment that
+// would let a malformed key climb out of the root.
+type DirStorage struct {
+	root string
+}
+
+// NewDirStorage returns a store rooted at dir (created lazily on first Put).
+//
+//	store := platform.NewDirStorage(".dev-storage")
+func NewDirStorage(root string) *DirStorage {
+	return &DirStorage{root: root}
+}
+
+// Root reports the configured directory — wiring tests assert on it;
+// workers never need it (the interface stays Put-only).
+func (d *DirStorage) Root() string { return d.root }
+
+// Put writes body to root/key (0o644, parents 0o755). The slash-separated
+// worker key maps through filepath.FromSlash so it stays portable.
+func (d *DirStorage) Put(_ context.Context, key string, body []byte) error {
+	if strings.Contains(key, "..") {
+		return fmt.Errorf("platform: storage key %q must not contain '..'", key)
+	}
+	p := filepath.Join(d.root, filepath.FromSlash(key))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return fmt.Errorf("platform: storage mkdir for %q: %w", key, err)
+	}
+	if err := os.WriteFile(p, body, 0o644); err != nil {
+		return fmt.Errorf("platform: storage write %q: %w", key, err)
+	}
+	return nil
 }
 
 // FakeStorage is the dev/test implementation of ObjectStorage: it captures

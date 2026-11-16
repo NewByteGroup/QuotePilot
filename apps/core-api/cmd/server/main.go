@@ -111,9 +111,11 @@ func buildEndpoints(cfg *platform.Config, db *tenantdb.DB, store *platform.Store
 // seam: the rfq_ingest job lands inside the receipt's tenant transaction —
 // one commit with the inbound_messages row (spec S1). Queue and uniqueness
 // come from IngestArgs.InsertOpts; a fresh correlation id roots the chain.
-func enqueueIngest(client *river.Client[pgx.Tx]) inbox.EnqueueIngestFunc {
+// The param is the JobInserter slice (not *river.Client) so wiring tests
+// can stand in a fake.
+func enqueueIngest(inserter jobs.JobInserter) inbox.EnqueueIngestFunc {
 	return func(ctx context.Context, tx pgx.Tx, org, correlationID, messageID uuid.UUID) error {
-		_, err := client.InsertTx(ctx, tx, jobs.IngestArgs{
+		_, err := inserter.InsertTx(ctx, tx, jobs.IngestArgs{
 			OrganizationID:   org,
 			CorrelationID:    correlationID,
 			InboundMessageID: messageID,
@@ -170,12 +172,17 @@ func newReceiver(cfg *platform.Config) resend.Receiver {
 }
 
 // newStorage binds the object-storage seam. R2 credentials are a pending
-// spec open item, so every environment gets the in-memory dev store for now
-// — attachment bytes live until restart; a later slice swaps in the real
-// S3-compatible client without touching the worker.
+// spec open item, so every environment gets the directory-backed dev store
+// for now — bytes land under QP_STORAGE_DIR (default .dev-storage) and
+// survive restarts, which keeps the rfq_attachments rows resolvable. The
+// real S3-compatible client swaps in later without touching the worker.
 func newStorage() platform.ObjectStorage {
-	slog.Warn("server: object storage not configured (R2 creds pending) — using in-memory dev storage")
-	return platform.NewFakeStorage()
+	dir := os.Getenv("QP_STORAGE_DIR")
+	if dir == "" {
+		dir = ".dev-storage"
+	}
+	slog.Warn("server: object storage not configured (R2 creds pending) — writing attachments under " + dir + " (dev only)")
+	return platform.NewDirStorage(dir)
 }
 
 // buildInbox mounts the Resend inbound webhook only when its Svix secret is

@@ -127,6 +127,9 @@ type ReceivingClient struct {
 	client *http.Client
 	// BaseURL defaults to receivingBaseURL; tests override with httptest.
 	BaseURL string
+	// Transport replaces the RoundTripper when set — tests stub the network
+	// deterministically; nil keeps the bounded default client.
+	Transport http.RoundTripper
 }
 
 // NewReceivingClient builds the production client.
@@ -141,6 +144,15 @@ func NewReceivingClient(apiKey string) *ReceivingClient {
 }
 
 var _ Receiver = (*ReceivingClient)(nil)
+
+// httpClient returns the bounded default client, or one built on the
+// stubbed Transport when a test sets it — the timeout still applies there.
+func (c *ReceivingClient) httpClient() *http.Client {
+	if c.Transport != nil {
+		return &http.Client{Timeout: receivingTimeout, Transport: c.Transport}
+	}
+	return c.client
+}
 
 // apiEmail is the GET /emails/receiving/{id} body as documented — every
 // field optional so missing keys parse to zero values.
@@ -239,7 +251,7 @@ func (c *ReceivingClient) get(ctx context.Context, op, path string, out any) err
 		return &FetchError{Op: op, Client: true, Detail: err.Error()}
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	resp, err := c.client.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("resend: %s: %w", op, stripURLError(err))
 	}
@@ -274,7 +286,7 @@ func (c *ReceivingClient) DownloadAttachment(ctx context.Context, downloadURL st
 	if err != nil {
 		return nil, &FetchError{Op: "download_attachment", Client: true, Detail: "invalid download_url"}
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("resend: download_attachment: %w", stripURLError(err))
 	}

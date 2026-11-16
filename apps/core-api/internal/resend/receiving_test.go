@@ -9,6 +9,7 @@ package resend_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -174,19 +175,28 @@ func TestDownloadAttachment(t *testing.T) {
 	assert.Equal(t, []byte("PDF-BYTES"), body)
 }
 
+// roundTripFunc stubs the network: http.Client.Do wraps its error in
+// *url.Error carrying the request URL — the same wrapper shape a real
+// transport failure produces, so the strip is exercised without a dial.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // TestDownloadAttachmentErrorHidesSignedURL pins nit-6: the download URL is
 // a credential-bearing signed link, and *url.Error echoes the whole URL —
-// the wrapper is stripped so signature query params can never ride an error
-// into logs or rfq_requests.failure_reason. (The hostname may still appear
-// inside the transport error; only the secret query is stripped.)
+// the wrapper is stripped so the signed link's query params can never ride
+// an error into logs or rfq_requests.failure_reason.
 func TestDownloadAttachmentErrorHidesSignedURL(t *testing.T) {
 	client := resend.NewReceivingClient("re_test_key")
-	// Unroutable TLD fails fast in the transport — the query is the secret.
-	signed := "https://cdn.invalid/att.pdf?X-Sig=SECRET123&X-Exp=1"
+	client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("stub transport failure")
+	})
+	signed := "https://cdn.example.test/att.pdf?X-Sig=SECRET123&X-Exp=1"
 	_, err := client.DownloadAttachment(context.Background(), signed)
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "stub transport failure")
 	assert.NotContains(t, err.Error(), "SECRET123")
-	assert.NotContains(t, err.Error(), "X-Sig")
+	assert.NotContains(t, err.Error(), "cdn.example.test")
 }
 
 func TestUnconfiguredReceiverFailsPermanently(t *testing.T) {
