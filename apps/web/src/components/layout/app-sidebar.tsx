@@ -1,7 +1,8 @@
-import { ChevronDown, Settings } from 'lucide-react'
+import { ChevronDown, LogOut, Settings } from 'lucide-react'
 import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router'
 
+import { useLogout } from '@/api/auth'
 import type { Schemas } from '@/api/client'
 import { initials } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -62,6 +63,7 @@ export function SidebarContent({
 }: SidebarContentProps) {
   const { pathname } = useLocation()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const logout = useLogout()
   const organization = session?.organization
   const user = session?.user
   const companyName = identity?.legalName ?? organization?.name
@@ -162,6 +164,15 @@ export function SidebarContent({
             className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5 transition-colors"
           >
             <Settings className="size-4" />
+          </button>
+          <button
+            type="button"
+            aria-label="Sair"
+            disabled={logout.isPending}
+            onClick={() => logout.mutate()}
+            className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5 transition-colors"
+          >
+            <LogOut className="size-4" />
           </button>
           <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} />
         </div>

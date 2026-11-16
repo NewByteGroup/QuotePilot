@@ -19,7 +19,7 @@ describe('Menu mobile', () => {
     renderApp('/')
     const user = userEvent.setup()
 
-    await user.click(screen.getByRole('button', { name: 'Abrir menu' }))
+    await user.click(await screen.findByRole('button', { name: 'Abrir menu' }))
     const drawer = await screen.findByRole('dialog', { name: 'Menu' })
 
     expect(within(drawer).getByRole('link', { name: 'Tarifas & regras' })).toBeInTheDocument()
