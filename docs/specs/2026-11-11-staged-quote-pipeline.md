@@ -269,12 +269,17 @@ S4.
   `review_reason = EXPORT_MATRIX_OPEN`, creates no quote, and keeps
   `extracted_payload_json` and the attachments intact so the analyst works
   from the extraction and nothing is re-extracted once export is
-  supported. It is not `FAILED`: nothing broke, the scope is undecided.
-  - **Scope conflict, pending Marcelo.** RFC-001 question 1 says import
-    and export; only its Incoterm matrix and the engine are import-only.
-    **Default if unanswered by 2026-11-20: import-only scope** — exports
-    stay parked as above and the scope statements in RFC-001, ADR-004 and
-    `docs/adr-rfc-plan.md` get corrected to match.
+  supported. It is not `FAILED`: nothing broke; the export matrix is
+  pending (see below), not the scope.
+  - **Export is in the MVP — decided by Pedro with the pilot stakeholder
+    on 2026-11-16** (supersedes the previous "pending Marcelo, default
+    import-only" note). The parking above is temporary until the export
+    matrix lands, not the end state: RFC-001 questions 13–16 (export
+    Incoterm matrix, terminal/handling source and basis, tariff coverage
+    and routes, quote currency and FX treatment) stay open with the pilot
+    companies, and `internal/pricing` needs a real export path
+    implemented once they are answered — a new engine deliverable, not
+    only a review flag.
 - **Missing or stale tariff parks the same way (Pedro, 2026-11-16).** The
   engine returns `INCOMPLETE`; the worker sets RFQ `NEEDS_REVIEW` with a
   distinct code — `MISSING_TARIFF` (no row for a required group) or
@@ -436,8 +441,11 @@ retry/timeout table (§3). `internal/pricing` is implemented.
   account; only the bucket-scoped S3 keypair is still needed in `.env`
   for the live attachment path (dev uses `QP_STORAGE_DIR` meanwhile).
 
+- ✓ **Export scope** — decided 2026-11-16: export is in the MVP (S3b).
+
 Still open:
 
-- ☐ **Export scope** — Marcelo; default import-only if unanswered by
-  2026-11-20 (S3b).
+- ☐ **Export matrix mechanics** — RFC-001 questions 13–16 with the pilot
+  companies; when answered, `internal/pricing` gains a real export path
+  and `EXPORT_MATRIX_OPEN` stops being emitted (S3b).
 - ☐ Carrier offer wire contract in `packages/contracts` (P3).
