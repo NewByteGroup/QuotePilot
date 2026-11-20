@@ -16,12 +16,14 @@ func passThroughSell(c candLine) decimal.Decimal {
 	return roundMoney(c.netBRL())
 }
 
-// toLine renders a priced candidate into an audit Line: source pin,
-// original currency amount, applied rate, rounded cost and sell, flags
-// sorted and deduplicated.
-func toLine(c candLine, sell decimal.Decimal) Line {
+// toLine renders a priced candidate into an audit Line: payload group,
+// source pin, original currency amount and sell, applied rate, rounded
+// BRL cost and sell, flags sorted and deduplicated. markedUp selects
+// the SellOriginal rule below.
+func toLine(c candLine, sell decimal.Decimal, markedUp bool) Line {
 	return Line{
 		Category:         c.cat,
+		Group:            payloadGroup(c.cat),
 		ChargeCode:       c.code,
 		Description:      c.desc,
 		SourceType:       c.src,
@@ -30,10 +32,77 @@ func toLine(c candLine, sell decimal.Decimal) Line {
 		CarrierOfferID:   c.offerID,
 		Currency:         c.ccy,
 		OriginalAmount:   c.net,
+		SellOriginal:     sellOriginal(c, sell, markedUp),
 		FXRateUsed:       c.rate,
 		CostBRL:          roundMoney(c.netBRL()),
 		SellBRL:          sell,
 		Flags:            sortedDedupe(c.flags),
+	}
+}
+
+// sellOriginal is the line's sell in its own currency — the
+// customer-facing amount (RFC-001 §5). Pass-through lines sell at cost,
+// so it is the original amount verbatim; marked-up freight lines
+// convert the rounded BRL sell back at the line's own pinned rate. The
+// markup is computed in the internal BRL space for determinism and the
+// margin check; dividing the rounded BRL sell by the same rate
+// expresses the same markup in the customer currency — the percentage
+// is invariant, and the USD-denominated floor correctly lands as a
+// freight-currency amount because the floor IS USD.
+func sellOriginal(c candLine, sellBRL decimal.Decimal, markedUp bool) decimal.Decimal {
+	if !markedUp {
+		return c.net
+	}
+	return roundMoney(sellBRL.Div(c.rate))
+}
+
+// groupTotals sums the original-currency cost and sell per (payload
+// group, currency) over the emitted lines — the customer-facing totals
+// (RFC-001 §5). Alternatives never contribute. The pairs accumulate in
+// a map for lookup only; emission sorts by the fixed group order then
+// currency ascending, so no map order reaches the Output.
+func groupTotals(lines []Line) []GroupTotal {
+	type key struct {
+		group PayloadGroup
+		ccy   string
+	}
+	sums := make(map[key]GroupTotal)
+	keys := make([]key, 0, len(lines))
+	for _, l := range lines {
+		k := key{l.Group, l.Currency}
+		if _, seen := sums[k]; !seen {
+			keys = append(keys, k)
+		}
+		t := sums[k]
+		t.Cost = t.Cost.Add(l.OriginalAmount)
+		t.Sell = t.Sell.Add(l.SellOriginal)
+		sums[k] = t
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		gi, gj := groupOrder(keys[i].group), groupOrder(keys[j].group)
+		if gi != gj {
+			return gi < gj
+		}
+		return keys[i].ccy < keys[j].ccy
+	})
+	out := make([]GroupTotal, 0, len(keys))
+	for _, k := range keys {
+		t := sums[k]
+		out = append(out, GroupTotal{Group: k.group, Currency: k.ccy, Cost: t.Cost, Sell: t.Sell})
+	}
+	return out
+}
+
+// groupOrder is the fixed customer-facing group order: international
+// freight, local fees, service taxes.
+func groupOrder(g PayloadGroup) int {
+	switch g {
+	case GroupInternationalFreight:
+		return 0
+	case GroupLocalFees:
+		return 1
+	default:
+		return 2
 	}
 }
 

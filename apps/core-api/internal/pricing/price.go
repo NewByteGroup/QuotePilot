@@ -61,6 +61,7 @@ func earlyOutput(out Output, e *earlyExit) Output {
 func emptyCollections(out *Output) {
 	out.Lines = []Line{}
 	out.Alternatives = []Line{}
+	out.Groups = []GroupTotal{}
 	out.Warnings = []string{}
 	out.FXApplied = []FXApplied{}
 }
@@ -234,9 +235,10 @@ func (a *assembly) missingFreight(v offerVerdict, res freightResult) {
 	}
 }
 
-// emitPass appends a pass-through line (sell = rounded cost, spec §5).
+// emitPass appends a pass-through line (sell = rounded cost, spec §5);
+// markedUp false keeps SellOriginal at the original amount.
 func (a *assembly) emitPass(c candLine) {
-	a.lines = append(a.lines, toLine(c, passThroughSell(c)))
+	a.lines = append(a.lines, toLine(c, passThroughSell(c), false))
 }
 
 func freightMissingParam(m Modal) string {
@@ -285,7 +287,7 @@ func (a *assembly) priceFreightWinners(winners []candLine) {
 		}
 	}
 	for i, sell := range sells {
-		a.lines = append(a.lines, toLine(winners[i], sell))
+		a.lines = append(a.lines, toLine(winners[i], sell, true))
 	}
 }
 
@@ -323,7 +325,7 @@ func (a *assembly) priceAlternates(res freightResult) {
 			c.flags = append(c.flags, FlagMinMarkupApplied)
 			c.flags = append(c.flags, floorFlags...)
 		}
-		a.alts = append(a.alts, toLine(c, sell))
+		a.alts = append(a.alts, toLine(c, sell, true))
 	}
 }
 
@@ -394,7 +396,7 @@ func (a *assembly) buildGroup(s groupSpec, resolved []TariffCandidate, v offerVe
 		a.emitPass(c)
 	}
 	for _, c := range res.alternates {
-		a.alts = append(a.alts, toLine(c, passThroughSell(c)))
+		a.alts = append(a.alts, toLine(c, passThroughSell(c), false))
 	}
 }
 
@@ -425,8 +427,10 @@ func (a *assembly) finishReasonsAndAssumptions() {
 	}
 }
 
-// render sorts every collection, sums the rounded line amounts and sets
-// the final status (spec §4 steps 8-9).
+// render sorts every collection, sums the rounded line amounts —
+// per-currency group totals for the customer payload, BRL totals for
+// the internal margin check — and sets the final status (spec §4
+// steps 8-9, RFC-001 §5).
 func (a *assembly) render(out Output) Output {
 	out.Lines = sortLines(a.lines)
 	out.Alternatives = sortLines(a.alts)
@@ -434,6 +438,7 @@ func (a *assembly) render(out Output) Output {
 	out.Reasons = sortedSet(a.reasons)
 	out.Warnings = sortedSet(a.warns)
 	out.Assumptions = sortedSet(a.assumps)
+	out.Groups = groupTotals(out.Lines)
 	for _, l := range out.Lines {
 		out.TotalCostBRL = out.TotalCostBRL.Add(l.CostBRL)
 		out.FinalPriceBRL = out.FinalPriceBRL.Add(l.SellBRL)
