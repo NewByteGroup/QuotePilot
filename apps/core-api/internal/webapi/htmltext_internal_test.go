@@ -97,6 +97,18 @@ func TestHTMLToText(t *testing.T) {
 			`text<a href="unclosed`,
 			"text",
 		},
+		{
+			// A quote closing exactly at EOF is closed — the unfinished
+			// tag falls back to literal text, not a discarded suffix.
+			"quoted run closing at EOF is literal",
+			`cost <b title="x"`,
+			`cost <b title="x"`,
+		},
+		{
+			"single-quoted run closing at EOF is literal",
+			`cost <b title='x'`,
+			`cost <b title='x'`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

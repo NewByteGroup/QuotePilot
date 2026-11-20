@@ -92,8 +92,9 @@ func emitTag(b *strings.Builder, src string, at int) int {
 			i++
 			continue
 		}
-		i = skipQuoted(src, i)
-		if i >= len(src) {
+		var closed bool
+		i, closed = skipQuoted(src, i)
+		if !closed {
 			return len(src) - at // unterminated quote: the tag is junk — eat it
 		}
 	}
@@ -110,15 +111,18 @@ func emitTag(b *strings.Builder, src string, at int) int {
 }
 
 // skipQuoted returns the index past the quoted attribute run opening at
-// i — src[i] is the quote char — or len(src) when the run never closes.
-func skipQuoted(src string, i int) int {
+// i — src[i] is the quote char — plus whether a closing quote existed.
+// closed=false means the run reached EOF unterminated: the tag is junk,
+// not literal text. A run closing exactly at EOF is closed — the caller
+// falls through to the unterminated-tag literal path.
+func skipQuoted(src string, i int) (int, bool) {
 	q := src[i]
 	for i++; i < len(src) && src[i] != q; i++ {
 	}
-	if i < len(src) {
-		i++ // past the closing quote
+	if i >= len(src) {
+		return i, false
 	}
-	return i
+	return i + 1, true // past the closing quote
 }
 
 // skipHiddenContent advances past the matching </name — case-insensitive;
