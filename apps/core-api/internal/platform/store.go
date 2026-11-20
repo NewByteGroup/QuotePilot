@@ -614,3 +614,43 @@ func (r orgRow) organization() (Organization, bool, error) {
 		Branding:          r.branding,
 	}, true, nil
 }
+
+// AuditEntry is one tenant_audit_logs row (migration 0002): the append-only
+// trail the approve endpoint and the pipeline workers write inside their
+// tenant transaction. ActorUserID is nil for worker actions — no user acts
+// there. Metadata marshals to metadata_json; nil leaves it NULL.
+type AuditEntry struct {
+	OrganizationID uuid.UUID
+	ActorUserID    *uuid.UUID
+	Action         string
+	EntityType     string
+	EntityID       uuid.UUID
+	Metadata       map[string]any
+}
+
+// InsertAuditLog appends one tenant_audit_logs row inside the caller's
+// tenant transaction — the table is INSERT-only for qp_app (UPDATE/DELETE
+// revoked, migration 0002), so this is the whole write surface, and RLS
+// scopes the row to the scoped org anyway.
+//
+//	id, err := platform.NewStore(tx).InsertAuditLog(ctx, platform.AuditEntry{
+//		OrganizationID: org, Action: "quote.approved", EntityType: "quote",
+//		EntityID: quoteID, Metadata: map[string]any{"version": 1},
+//	})
+func (s *Store) InsertAuditLog(ctx context.Context, e AuditEntry) (uuid.UUID, error) {
+	meta, err := json.Marshal(e.Metadata)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("platform: audit log %q metadata: %w", e.Action, err)
+	}
+	var id uuid.UUID
+	err = s.q.QueryRow(ctx, `
+		INSERT INTO app.tenant_audit_logs
+			(organization_id, actor_user_id, action, entity_type, entity_id, metadata_json)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id`,
+		e.OrganizationID, e.ActorUserID, e.Action, e.EntityType, e.EntityID, meta).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("platform: insert audit log %q: %w", e.Action, err)
+	}
+	return id, nil
+}
