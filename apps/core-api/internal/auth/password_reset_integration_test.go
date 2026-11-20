@@ -44,9 +44,13 @@ func TestPasswordResetEndToEnd(t *testing.T) {
 
 	// A live session exists BEFORE the reset — the OWASP leg must kill it —
 	// and a pending magic link rides alongside: the pending-token sweep is
-	// the same credential-class kill.
+	// the same credential-class kill. The refresh value is a fresh opaque
+	// token, not a literal — its hash is UNIQUE in auth_sessions, and a
+	// fixed string would collide on re-run against a persistent dev DB.
+	staleRefresh, err := platform.NewOpaqueToken()
+	require.NoError(t, err)
 	sessionID, err := store.CreateSession(
-		ctx, userID, platform.HashToken("stale-refresh"), time.Now().Add(24*time.Hour))
+		ctx, userID, platform.HashToken(staleRefresh), time.Now().Add(24*time.Hour))
 	require.NoError(t, err)
 	_, pendingHash := plantLoginToken(t, store, userID)
 
@@ -106,8 +110,10 @@ func TestPasswordResetEndToEnd(t *testing.T) {
 	// The real user-advisory barrier inside the function ran for this call
 	// — a concurrent interleave is not forceable in a deterministic test,
 	// so what this pins is the serialized outcome the lock guarantees.
+	nextRefresh, err := platform.NewOpaqueToken()
+	require.NoError(t, err)
 	_, _, rotated, found, err := store.RotateSession(
-		ctx, platform.HashToken("stale-refresh"), platform.HashToken("next-refresh"),
+		ctx, platform.HashToken(staleRefresh), platform.HashToken(nextRefresh),
 		time.Now().Add(24*time.Hour))
 	require.NoError(t, err)
 	assert.False(t, found, "a revoked generation cannot rotate — refresh answers 401")
