@@ -88,18 +88,14 @@ func emitTag(b *strings.Builder, src string, at int) int {
 		return 1
 	}
 	for i < len(src) && src[i] != '>' {
-		if q := src[i]; q == '"' || q == '\'' {
+		if src[i] != '"' && src[i] != '\'' {
 			i++
-			for i < len(src) && src[i] != q {
-				i++
-			}
-			if i >= len(src) {
-				return len(src) - at // unterminated quote: the tag is junk — eat it
-			}
-			i++ // past the closing quote
 			continue
 		}
-		i++
+		i = skipQuoted(src, i)
+		if i >= len(src) {
+			return len(src) - at // unterminated quote: the tag is junk — eat it
+		}
 	}
 	if i >= len(src) {
 		b.WriteByte('<')
@@ -111,6 +107,18 @@ func emitTag(b *strings.Builder, src string, at int) int {
 	}
 	emitBlockBreak(b, name, closing)
 	return i - at
+}
+
+// skipQuoted returns the index past the quoted attribute run opening at
+// i — src[i] is the quote char — or len(src) when the run never closes.
+func skipQuoted(src string, i int) int {
+	q := src[i]
+	for i++; i < len(src) && src[i] != q; i++ {
+	}
+	if i < len(src) {
+		i++ // past the closing quote
+	}
+	return i
 }
 
 // skipHiddenContent advances past the matching </name — case-insensitive;
