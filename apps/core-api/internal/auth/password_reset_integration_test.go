@@ -227,8 +227,8 @@ func TestUserSessionLockSerializesIssuers(t *testing.T) {
 	require.NoError(t, tx3.Rollback(ctx))
 
 	select {
-	case <-waiterDone:
-		t.Fatal("a same-user issuer crossed the barrier while the reset holder was uncommitted")
+	case err := <-waiterDone:
+		t.Fatalf("a same-user issuer crossed the barrier while the reset holder was uncommitted (lock returned %v)", err)
 	case <-time.After(250 * time.Millisecond):
 	}
 
