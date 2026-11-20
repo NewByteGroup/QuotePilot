@@ -62,12 +62,78 @@ func TestHTMLToText(t *testing.T) {
 			`text</p>tail`,
 			"text\n\ntail",
 		},
+		{
+			"less-than space is customer text",
+			`I <3 freight and pay < 500 per box`,
+			"I <3 freight and pay < 500 per box",
+		},
+		{
+			"empty and digit tags are literal",
+			`a<>b<3 kg>c`,
+			"a<>b<3 kg>c",
+		},
+		{
+			"closing slash then space is literal",
+			`x</ y`,
+			"x</ y",
+		},
+		{
+			"doctype is skipped, not text",
+			`<!DOCTYPE html>body`,
+			"body",
+		},
+		{
+			"xml prolog is skipped, not text",
+			`<?xml version="1.0"?>body`,
+			"body",
+		},
+		{
+			"gt inside a quoted attribute",
+			`<a href="http://x?a>b">link</a>`,
+			"link",
+		},
+		{
+			"unterminated quote eats the tag",
+			`text<a href="unclosed`,
+			"text",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, htmlToText(tc.in))
 		})
 	}
+}
+
+// TestHTMLToTextLiteralLessThan: the review's audit repro — a customer
+// constraint like "Weight < 500 kg" must survive the scan as text; the
+// old parser read '< 500 kg</p' as one broken tag and the constraint
+// vanished from the response.
+func TestHTMLToTextLiteralLessThan(t *testing.T) {
+	got := htmlToText(`<p>Weight < 500 kg; need 2x40HC</p>`)
+	assert.Contains(t, got, "Weight < 500 kg", "the '<' is literal text, not a tag opener")
+	assert.Contains(t, got, "2x40HC", "the rest of the paragraph still renders")
+}
+
+// TestHTMLToTextComments: comment contents are dropped through the
+// first '-->' — hidden markup must never reach the wire.
+func TestHTMLToTextComments(t *testing.T) {
+	got := htmlToText(`a<!-- <td>hidden</td> -->b`)
+	assert.Equal(t, "ab", got)
+	assert.NotContains(t, got, "hidden")
+
+	assert.Equal(t, "a", htmlToText(`a<!-- never ends`),
+		"an unterminated comment swallows the rest rather than leaking")
+}
+
+// TestHTMLToTextTableCells: td/th open tags emit a separating space so
+// adjacent cells stay separate tokens — row boundaries still come from
+// tr/table's paragraph breaks.
+func TestHTMLToTextTableCells(t *testing.T) {
+	got := htmlToText(`<table><tr><td>10</td><td>20</td></tr><tr><th>a</th><th>b</th></tr></table>`)
+	assert.Contains(t, got, "10 20", "adjacent cells must not merge into one token")
+	assert.NotContains(t, got, "1020")
+	assert.Contains(t, got, "a b")
 }
 
 // TestHTMLToTextHiddenBlocks: script and style contents — the CSS every
