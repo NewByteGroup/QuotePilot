@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
 // Defines values for ErrorCode.
@@ -22,7 +23,9 @@ const (
 	ErrorCodeForbidden           ErrorCode = "forbidden"
 	ErrorCodeInternal            ErrorCode = "internal"
 	ErrorCodeMissingOrganization ErrorCode = "missing_organization"
+	ErrorCodeNegativeMargin      ErrorCode = "negative_margin"
 	ErrorCodeNotFound            ErrorCode = "not_found"
+	ErrorCodeQuoteSuperseded     ErrorCode = "quote_superseded"
 	ErrorCodeRateLimited         ErrorCode = "rate_limited"
 	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
 )
@@ -38,7 +41,11 @@ func (e ErrorCode) Valid() bool {
 		return true
 	case ErrorCodeMissingOrganization:
 		return true
+	case ErrorCodeNegativeMargin:
+		return true
 	case ErrorCodeNotFound:
+		return true
+	case ErrorCodeQuoteSuperseded:
 		return true
 	case ErrorCodeRateLimited:
 		return true
@@ -85,6 +92,27 @@ func (e MembershipRole) Valid() bool {
 	}
 }
 
+// Defines values for QuoteStatus.
+const (
+	APPROVEDSENT QuoteStatus = "APPROVED_SENT"
+	DRAFT        QuoteStatus = "DRAFT"
+	SUPERSEDED   QuoteStatus = "SUPERSEDED"
+)
+
+// Valid indicates whether the value is a known member of the QuoteStatus enum.
+func (e QuoteStatus) Valid() bool {
+	switch e {
+	case APPROVEDSENT:
+		return true
+	case DRAFT:
+		return true
+	case SUPERSEDED:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ResendEmailReceivedType.
 const (
 	EmailReceived ResendEmailReceivedType = "email.received"
@@ -100,6 +128,23 @@ func (e ResendEmailReceivedType) Valid() bool {
 	}
 }
 
+// ApproveQuoteResponse defines model for ApproveQuoteResponse.
+type ApproveQuoteResponse struct {
+	// ApprovedAt Timestamp the first approval stamped.
+	ApprovedAt time.Time `json:"approved_at"`
+
+	// ApprovedByUserID User UUID of the approving analyst.
+	ApprovedByUserID string `json:"approved_by_user_id"`
+
+	// ID Quote version UUID.
+	ID string `json:"id"`
+
+	// Status Mirrors the `app.quote_status` enum (migration 0002). Approval
+	// leaves the version `DRAFT` — the send worker flips it to
+	// `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
+	Status QuoteStatus `json:"status"`
+}
+
 // Error defines model for Error.
 type Error struct {
 	// Error Machine-readable failure code. `unauthenticated`,
@@ -107,6 +152,8 @@ type Error struct {
 	// the middleware contract of spec section 7; `bad_request` covers
 	// malformed bodies and `rate_limited` the login bucket (spec section
 	// 8.1 leaves the code unpinned — this contract fixes it).
+	// `quote_superseded` and `negative_margin` are the two conflict
+	// refusals of quote approval (spec 2026-11-11 section 4).
 	Error ErrorCode `json:"error"`
 }
 
@@ -115,6 +162,8 @@ type Error struct {
 // the middleware contract of spec section 7; `bad_request` covers
 // malformed bodies and `rate_limited` the login bucket (spec section
 // 8.1 leaves the code unpinned — this contract fixes it).
+// `quote_superseded` and `negative_margin` are the two conflict
+// refusals of quote approval (spec 2026-11-11 section 4).
 type ErrorCode string
 
 // LoginRequest defines model for LoginRequest.
@@ -204,6 +253,11 @@ type PasswordSetRequest struct {
 	// a dead one.
 	Token string `json:"token"`
 }
+
+// QuoteStatus Mirrors the `app.quote_status` enum (migration 0002). Approval
+// leaves the version `DRAFT` — the send worker flips it to
+// `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
+type QuoteStatus string
 
 // ResendAttachment defines model for ResendAttachment.
 type ResendAttachment struct {
@@ -329,6 +383,12 @@ type OrganizationIDHeader = string
 // BadRequest defines model for BadRequest.
 type BadRequest = Error
 
+// Conflict defines model for Conflict.
+type Conflict = Error
+
+// Forbidden defines model for Forbidden.
+type Forbidden = Error
+
 // InternalError defines model for InternalError.
 type InternalError = Error
 
@@ -348,6 +408,16 @@ type PostAuthLogin200JSONResponseBody struct {
 
 // GetMeOrganizationParams defines parameters for GetMeOrganization.
 type GetMeOrganizationParams struct {
+	// XOrganizationID Organization the request scopes to — required by the middleware, not
+	// the binding layer (an absent value reaches ResolveTenant as empty and
+	// gets the 400 {"error":"missing_organization"} only after
+	// authentication). Also part of the CSRF posture, since a cross-site
+	// form cannot set headers (ADR-005 section 4).
+	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
+}
+
+// ApproveQuoteParams defines parameters for ApproveQuote.
+type ApproveQuoteParams struct {
 	// XOrganizationID Organization the request scopes to — required by the middleware, not
 	// the binding layer (an absent value reaches ResolveTenant as empty and
 	// gets the 400 {"error":"missing_organization"} only after
@@ -456,6 +526,9 @@ type ServerInterface interface {
 	// GetMeOrganization Resolve the requested organization — the end-to-end tenant proof.
 	// (GET /me/organization)
 	GetMeOrganization(w http.ResponseWriter, r *http.Request, params GetMeOrganizationParams)
+	// ApproveQuote Approve a quote version — releases the send job.
+	// (POST /quotes/{id}/approve)
+	ApproveQuote(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params ApproveQuoteParams)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -606,6 +679,56 @@ func (siw *ServerInterfaceWrapper) GetMeOrganization(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// ApproveQuote operation middleware
+func (siw *ServerInterfaceWrapper) ApproveQuote(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ApproveQuoteParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Organization-Id" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Organization-Id")]; found {
+		var XOrganizationID OrganizationIDHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Organization-Id", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Organization-Id", valueList[0], &XOrganizationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Organization-Id", Err: err})
+			return
+		}
+
+		params.XOrganizationID = &XOrganizationID
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ApproveQuote(w, r, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -734,11 +857,16 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.PostAuthLogout)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me", wrapper.GetMe)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me/organization", wrapper.GetMeOrganization)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/quotes/{id}/approve", wrapper.ApproveQuote)
 
 	return m
 }
 
 type BadRequestJSONResponse Error
+
+type ConflictJSONResponse Error
+
+type ForbiddenJSONResponse Error
 
 type InternalErrorJSONResponse Error
 
@@ -1231,6 +1359,113 @@ func (response GetMeOrganization500JSONResponse) VisitGetMeOrganizationResponse(
 	return err
 }
 
+type ApproveQuoteRequestObject struct {
+	ID     openapi_types.UUID `json:"id"`
+	Params ApproveQuoteParams
+}
+
+type ApproveQuoteResponseObject interface {
+	VisitApproveQuoteResponse(w http.ResponseWriter) error
+}
+
+type ApproveQuote200JSONResponse ApproveQuoteResponse
+
+func (response ApproveQuote200JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveQuote400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response ApproveQuote400JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveQuote401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ApproveQuote401JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveQuote403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ApproveQuote403JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveQuote404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response ApproveQuote404JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveQuote409JSONResponse struct{ ConflictJSONResponse }
+
+func (response ApproveQuote409JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ApproveQuote500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ApproveQuote500JSONResponse) VisitApproveQuoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// PostAuthLogin Log in — request a magic link, or authenticate with email + password.
@@ -1257,6 +1492,9 @@ type StrictServerInterface interface {
 	// GetMeOrganization Resolve the requested organization — the end-to-end tenant proof.
 	// (GET /me/organization)
 	GetMeOrganization(ctx context.Context, request GetMeOrganizationRequestObject) (GetMeOrganizationResponseObject, error)
+	// ApproveQuote Approve a quote version — releases the send job.
+	// (POST /quotes/{id}/approve)
+	ApproveQuote(ctx context.Context, request ApproveQuoteRequestObject) (ApproveQuoteResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1513,6 +1751,33 @@ func (sh *strictHandler) GetMeOrganization(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetMeOrganizationResponseObject); ok {
 		if err := validResponse.VisitGetMeOrganizationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ApproveQuote operation middleware
+func (sh *strictHandler) ApproveQuote(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params ApproveQuoteParams) {
+	var request ApproveQuoteRequestObject
+
+	request.ID = id
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ApproveQuote(ctx, request.(ApproveQuoteRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ApproveQuote")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ApproveQuoteResponseObject); ok {
+		if err := validResponse.VisitApproveQuoteResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
