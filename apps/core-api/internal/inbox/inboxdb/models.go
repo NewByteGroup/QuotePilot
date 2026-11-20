@@ -842,6 +842,8 @@ type AppRfqRequest struct {
 	FailureReason        *string
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
+	// Why a human must look at this NEEDS_REVIEW RFQ (spec 2026-11-11 S3b). Controlled vocabulary: internal/jobs ReviewReason — never failure_reason, which is reserved for technical failures after retries.
+	ReviewReason *string
 }
 
 type AppSuppressionList struct {

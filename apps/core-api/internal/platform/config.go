@@ -18,6 +18,7 @@ import (
 // Secret-adjacent fields (JWTKeys, ResendAPIKey, the DSNs) must never be
 // logged or echoed into errors.
 type Config struct {
+	AppEnv       string            // deployment environment: local | test | demo | production
 	AppDSN       string            // qp_app DSN — the only credential on request paths
 	AdminDSN     string            // qp_admin DSN — platform_* path only
 	WebURL       string            // base URL magic links are built from
@@ -40,10 +41,11 @@ const (
 )
 
 // LoadConfig builds a Config from environment variables read through getenv
-// (os.Getenv in production, a map in tests). Required: POSTGRES_DSN, WEB_URL
-// and at least one AUTH_JWT_KEYS entry; AUTH_JWT_ACTIVE_KID defaults to the
-// first listed kid. Errors name the offending variable and the expected
-// shape — never a secret value.
+// (os.Getenv in production, a map in tests). Required: APP_ENV (one of
+// local, test, demo or production), POSTGRES_DSN, WEB_URL and at least one
+// AUTH_JWT_KEYS entry; AUTH_JWT_ACTIVE_KID defaults to the first listed kid.
+// Errors name the offending variable and the expected shape — never a secret
+// value.
 //
 //	cfg, err := platform.LoadConfig(os.Getenv)
 func LoadConfig(getenv func(string) string) (Config, error) {
@@ -57,7 +59,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if err := cfg.loadCookieSecure(getenv); err != nil {
 		return Config{}, err
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.validate(getenv); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
@@ -67,6 +69,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 // defaults before the optional overrides land.
 func defaultConfig(getenv func(string) string) Config {
 	return Config{
+		AppEnv:       getenv("APP_ENV"),
 		AppDSN:       getenv("POSTGRES_DSN"),
 		AdminDSN:     getenv("QP_ADMIN_DSN"),
 		WebURL:       getenv("WEB_URL"),
@@ -201,11 +204,23 @@ func (c *Config) loadCookieSecure(getenv func(string) string) error {
 	return nil
 }
 
-// validate catches config the server cannot boot with. RESEND_API_KEY and
+// validate catches config the server cannot boot with. APP_ENV comes first:
+// it is the environment-level assertion the mirror portal and the dev mailer
+// are gated on (spec 2026-11-11-staged-quote-pipeline S3a, Pedro 2026-11-16)
+// — there is no per-organization flag, so an unrecognized deployment refuses
+// to boot rather than guess which affordances are safe. RESEND_API_KEY and
 // AUTH_MAGIC_FROM travel as a pair: the real sender needs both, and a half
 // pair means a misconfigured deploy — leaving both empty selects the
 // dev/test sender.
-func (c *Config) validate() error {
+func (c *Config) validate(getenv func(string) string) error {
+	switch c.AppEnv {
+	case "local", "test", "demo", "production":
+	default:
+		return fmt.Errorf("platform: APP_ENV must be one of local, test, demo or production, got %q", c.AppEnv)
+	}
+	if err := c.validateProductionGuards(getenv); err != nil {
+		return err
+	}
 	if c.AppDSN == "" {
 		return errors.New("platform: POSTGRES_DSN is required (expected postgres://qp_app:...@host/db)")
 	}
@@ -214,6 +229,25 @@ func (c *Config) validate() error {
 	}
 	if (c.ResendAPIKey == "") != (c.MagicFrom == "") {
 		return errors.New("platform: RESEND_API_KEY and AUTH_MAGIC_FROM must be set together (or neither)")
+	}
+	return nil
+}
+
+// validateProductionGuards refuses the two dev affordances in production:
+// the mirror portal (RFC-003 — never used for real tenants' quotes) and the
+// dev mailer, which is otherwise gated only on the Resend pair being absent.
+// Both vars are read here for validation only — they stay out of Config,
+// and the dev mailer keeps its os.Getenv read inside newMailer where the
+// sender is actually bound.
+func (c *Config) validateProductionGuards(getenv func(string) string) error {
+	if c.AppEnv != "production" {
+		return nil
+	}
+	if getenv("MIRROR_PORTAL_ENABLED") == "true" {
+		return errors.New("platform: MIRROR_PORTAL_ENABLED=true is refused when APP_ENV=production")
+	}
+	if getenv("AUTH_DEV_MAILER") == "true" {
+		return errors.New("platform: AUTH_DEV_MAILER=true is refused when APP_ENV=production")
 	}
 	return nil
 }

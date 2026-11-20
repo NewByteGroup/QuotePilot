@@ -54,6 +54,17 @@ type FXApplied struct {
 	Spread   decimal.Decimal `json:"spread"`
 }
 
+// NegativeMargin reports whether the quote sells below cost on the internal
+// BRL-normalized totals — the margin basis per RFC-001 section 5's currency
+// decision: BRL stays internal-only for the margin check and the audit even
+// though customer-facing output groups by original currency. Negative
+// margin is a hard block (spec 2026-11-11 S3b): approve (P5) and send (S5)
+// must both refuse when this is true — defense in depth, so the signal
+// lives on the output both endpoints read.
+func (o Output) NegativeMargin() bool {
+	return o.FinalPriceBRL.LessThan(o.TotalCostBRL)
+}
+
 // CanonicalJSON marshals the output deterministically: struct field
 // order plus pre-sorted slices make the bytes stable, which is what the
 // determinism test compares (spec §10).

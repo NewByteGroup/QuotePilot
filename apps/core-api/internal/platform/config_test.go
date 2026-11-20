@@ -19,6 +19,7 @@ func envOf(vars map[string]string) func(string) string {
 // baseEnv is the minimal valid environment; tests mutate a copy.
 func baseEnv() map[string]string {
 	return map[string]string{
+		"APP_ENV":       "test",
 		"POSTGRES_DSN":  "postgres://qp_app:pw@127.0.0.1:5432/quotepilot",
 		"WEB_URL":       "https://app.example.test",
 		"AUTH_JWT_KEYS": "k1=secret-one-0123456789abcdef012345678,k2=secret-two-0123456789abcdef012345678",
@@ -65,6 +66,26 @@ func TestLoadConfigValid(t *testing.T) {
 	assert.Equal(t, "signin@example.test", cfg.MagicFrom)
 }
 
+// TestLoadConfigAppEnv pins the deployment-environment contract: all four
+// spec values boot and land on Config, and the dev affordances stay legal
+// everywhere except production (spec S3a — the demo runs in its own
+// environment, so local/test/demo may bind mirror and dev mailer freely).
+func TestLoadConfigAppEnv(t *testing.T) {
+	for _, env := range []string{"local", "test", "demo", "production"} {
+		cfg, err := platform.LoadConfig(envOf(envWith(map[string]string{"APP_ENV": env})))
+		require.NoError(t, err, "APP_ENV=%q must be accepted", env)
+		assert.Equal(t, env, cfg.AppEnv)
+	}
+	for _, env := range []string{"local", "test", "demo"} {
+		_, err := platform.LoadConfig(envOf(envWith(map[string]string{
+			"APP_ENV":               env,
+			"MIRROR_PORTAL_ENABLED": "true",
+			"AUTH_DEV_MAILER":       "true",
+		})))
+		require.NoError(t, err, "APP_ENV=%q may bind the dev affordances", env)
+	}
+}
+
 // TestLoadConfigErrors pins the failure contract: the error names the
 // offending variable but never a secret value.
 func TestLoadConfigErrors(t *testing.T) {
@@ -73,6 +94,10 @@ func TestLoadConfigErrors(t *testing.T) {
 		overrides map[string]string
 		wantVar   string
 	}{
+		{"missing app env", map[string]string{"APP_ENV": ""}, "APP_ENV"},
+		{"invalid app env", map[string]string{"APP_ENV": "staging"}, "APP_ENV"},
+		{"production with mirror", map[string]string{"APP_ENV": "production", "MIRROR_PORTAL_ENABLED": "true"}, "MIRROR_PORTAL_ENABLED"},
+		{"production with dev mailer", map[string]string{"APP_ENV": "production", "AUTH_DEV_MAILER": "true"}, "AUTH_DEV_MAILER"},
 		{"missing dsn", map[string]string{"POSTGRES_DSN": ""}, "POSTGRES_DSN"},
 		{"missing web url", map[string]string{"WEB_URL": ""}, "WEB_URL"},
 		{"empty keys", map[string]string{"AUTH_JWT_KEYS": ""}, "AUTH_JWT_KEYS"},
