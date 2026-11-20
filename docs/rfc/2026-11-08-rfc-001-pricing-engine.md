@@ -22,9 +22,9 @@ The equation in spec section 4.4 is a good outline, but the engine cannot be wri
 ## 2. Scope and assumptions
 
 - **MVP covers imports into and exports from Brazil in FCL Hapag and AIR.** Quote only charges payable by the requesting customer (importer or exporter) under the Incoterm. The destination-terminal, CIF-band storage, THC and customs-dispatch examples below describe an import proposal; export charge allocation remains open for validation.
-- Import taxes and duties (II, IPI, ICMS, PIS/COFINS) are proposed outside the quote. **[business] confirm that exclusion; export-specific customs and tax treatment remains open in question 16.**
+- Import taxes and duties (II, IPI, ICMS, PIS/COFINS) are proposed outside the quote. Decided in the 2026-11-16 pilot meeting: taxes shown are **only those on the agency service** (ISS/CBS/IOF), presented as their own payload group; freight is a cost pass-through (repasse) and is never taxed — the invoice never levies on freight value.
 - FCL Hapag and air are in the MVP. LCL, Inland, Door-to-Door and AFRMM are outside the MVP, even if an enum or historical tariff still names them.
-- BRL output remains the current proposal. Confirm the export quote currency and FX treatment under open question 16. Foreign-currency amounts are converted line by line and every applied rate is recorded.
+- **Decided (pilot meeting, 2026-11-16): quote lines are always presented in the original currency** (USD/EUR as the carrier charges) — no conversion to BRL, no PTAX rate shown to the customer. Consequence: the quote's totals are per-currency groups (freight / local fees / service taxes) rather than one BRL total, and the carrier's own PTAX spread (up to ~10%) is input data on its charges, not a rate we compute. Supersedes the earlier "BRL output" proposal; see open question 16.
 
 ## 3. Inputs and outputs
 
@@ -117,7 +117,17 @@ The earlier alternatives of margin on the whole price or separate pass-through m
 | 13 | Export Incoterm matrix: which freight, origin/export customs, terminal, destination and fixed charges are payable by the requesting exporter or importer for each supported Incoterm? | To confirm with pilot companies | Open; current section 4 matrix applies to imports only |
 | 14 | Export terminal and handling charges: which source, location and calculation basis apply instead of import CIF-band destination storage? | To confirm with pilot companies | Open; do not reuse import CIF formula automatically |
 | 15 | Export tariff coverage and direction routing: can Hapag return FCL export offers for the pilot routes, and which AIR export tariffs are available; how are ambiguous or reverse routes handled? | To confirm with pilot companies | Open; no unverified reverse-route rate |
-| 16 | Export quote currency, FX source/timing and any export-specific customs or tax treatment? | To confirm with pilot companies | Open; keep current BRL output only as an explicit proposal |
+| 16 | Export quote currency, FX source/timing and any export-specific customs or tax treatment? | Pilot meeting | Resolved 2026-11-16: all lines in original currency, no conversion, no PTAX shown; service-only taxes as a separate group |
+
+**Business rules decided in the 2026-11-16 pilot meeting** (recorded here; the pipeline spec carries the pipeline-side consequences):
+
+- **Negative margin is a hard block** — a proposal priced below cost is never sent; the block fires at approval/send (systemic, not a warning).
+- **Quote validity**: the carrier sets the expiry (weeks, days, or a specific vessel for spot rates). A quote with under ~30 minutes left is not viable; ~5 business days is the preferred window.
+- **`free_time`** (container free time) is part of the commercial proposal payload.
+- **Payload grouping**: international freight, local fees and service taxes are separate groups in the quote payload; the front-end adapts to the payload shape.
+- **Import tariff sourcing**: for imports the Brazilian forwarder negotiates with the **overseas correspondent** (the selling agent), not directly with the carrier — the contract with the correspondent is what enables bookings.
+- **Carrier connectors**: CMA CGM API is approved and is the first connector; Hapag-Lloyd's API was not granted (internal security restrictions — a retry via the Centauro/NewByte registration is possible); a **Playwright fallback** validates the MVP while a custom-quota offer from the paid aggregator (Essential Pack, 10k calls) is negotiated down to ~100–500 calls.
+- **Confidence >95%**: processing is automatic (extract + price). Whether >95% may also auto-*send* is to be confirmed — the standing invariant remains human approval before send.
 
 ## 10. Impact
 

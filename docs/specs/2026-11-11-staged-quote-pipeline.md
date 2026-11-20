@@ -236,6 +236,20 @@ apart from "fetch never ran".
     `source = MIRROR`. The UI labels that offer, and any quote priced from
     it, as **simulated** by reading the column — never by looking at the
     environment, so the label survives a database copy or export.
+- **Connector order (pilot meeting, 2026-11-16).** **CMA CGM is the first
+  real connector** — its API was already approved and Pedro tests it. The
+  Hapag-Lloyd API was **not** granted (internal security restrictions; a
+  retry via the Centauro/NewByte registration is possible), so S3a ships
+  CMA-first and the interface keeps "Hapag" as one binding among others.
+  The **Playwright fallback** validates the MVP while the paid aggregator
+  (Essential Pack, ~10k calls) is negotiated down to ~100–500 calls — the
+  portal credential doubles as the Playwright session. The interface
+  already supports all three bindings (CMA API, Playwright, mirror).
+- **Import tariff provenance (pilot meeting, 2026-11-16).** For imports,
+  the Brazilian forwarder negotiates with the **overseas correspondent**
+  (the selling agent), not directly with the carrier — the correspondent
+  contract is what enables bookings. Tariff `source` rows record that
+  counterpart, not just the carrier the service runs on.
 
 ### S3b `rfq_price` — deterministic pricing (queue `price`)
 
@@ -307,6 +321,26 @@ S4.
   scope, missing data, low confidence — is always `NEEDS_REVIEW` with a
   `review_reason`.
 - Recalculation is a new `version`, never an overwrite (rule 9).
+- **Quote payload and validity rules (pilot meeting, 2026-11-16; business
+  rules recorded in RFC-001 §9):**
+  - **Original currency only.** Lines are presented in the currency the
+    carrier charged (USD/EUR) — no BRL conversion, no PTAX shown. Totals
+    are **per-currency groups**, so `pricing_result_json` groups the
+    payload as international freight / local fees / service taxes; the
+    single-BRL-total shape is superseded. Consequence flagged for the
+    pricing engine update, not this spec alone.
+  - **Service taxes only.** The taxes group carries ISS/CBS/IOF on the
+    agency service; freight is untaxed repasse (RFC-001 §2).
+  - **Negative margin is a hard block** — a proposal priced below cost is
+    never sent. The check fires at approval *and* at send (defense in
+    depth: the approving analyst sees it, and S5 refuses even if data
+    changed between approval and send).
+  - **Validity/SLA.** `expires_at` comes from the carrier; a spot rate is
+    bound to its vessel. A quote whose validity ends in under ~30 minutes
+    is not viable — it parks `NEEDS_REVIEW` (new review code, named in
+    P3) rather than being sent. ~5 business days is the preferred window.
+  - **`free_time`** (container free time) is a payload field on the
+    commercial proposal.
 
 ### Reprocess — HTTP, synchronous (not a job)
 
@@ -442,10 +476,19 @@ retry/timeout table (§3). `internal/pricing` is implemented.
   for the live attachment path (dev uses `QP_STORAGE_DIR` meanwhile).
 
 - ✓ **Export scope** — decided 2026-11-16: export is in the MVP (S3b).
+- ✓ **Pilot meeting 2026-11-16** — original-currency quotes, service-only
+  taxes, payload groups and `free_time` (S3b + RFC-001 §9); negative
+  margin hard block (S3b + S5); validity/SLA rules (S3b); CMA-first
+  connector + Playwright fallback and correspondent tariff provenance
+  (S3a); user+password login (ADR-005 amendment).
 
 Still open:
 
-- ☐ **Export matrix mechanics** — RFC-001 questions 13–16 with the pilot
-  companies; when answered, `internal/pricing` gains a real export path
-  and `EXPORT_MATRIX_OPEN` stops being emitted (S3b).
+- ☐ **Export matrix mechanics** — RFC-001 questions 13–15 with the pilot
+  companies (16 resolved); when answered, `internal/pricing` gains a real
+  export path and `EXPORT_MATRIX_OPEN` stops being emitted (S3b).
 - ☐ Carrier offer wire contract in `packages/contracts` (P3).
+- ☐ **>95% confidence auto-send** — Pedro to confirm with Marcelo whether
+  it was meant as auto-*process* (adopted: extract + price are already
+  automatic) or auto-*send* (would relax the no-send-without-approval
+  invariant — needs an explicit call before any change).
