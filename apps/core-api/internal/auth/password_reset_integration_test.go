@@ -175,56 +175,55 @@ func TestTokenPurposesDoNotExchangePostgres(t *testing.T) {
 // TestUserSessionLockSerializesIssuers is the regression pin for the
 // migration-0007 barrier itself (Devin Review): the E2E asserts the
 // serialized OUTCOME, which a lock-free implementation would also produce
-// — only this interleave proves the barrier exists. Two live connections
-// interleave deterministically: the holder of the user-scoped advisory
-// lock must block a second issuer for the SAME user until its commit,
-// while a different user never waits — the hashtextextended key formula
-// platform.LockUserSession and the definer functions share.
+// — only this interleave proves the barrier exists, and it goes through
+// the APPLICATION paths, not raw SQL: the reset side holds the lock via
+// the definer function RevokeUserSessions while an issuer waits on
+// Store.LockUserSession — the same user must block until commit and a
+// different user must never wait, proving both sides share one key.
 func TestUserSessionLockSerializesIssuers(t *testing.T) {
-	migrator := testenv.MigratorPool(t)
+	db := testenv.Open(t)
 	ctx := context.Background()
 	userA, userB := uuid.New(), uuid.New()
+	store := platform.NewStore(db.Pool())
 
-	// Holder: takes user A's barrier inside an open transaction — the
-	// pg_catalog function needs no grant, so any role proves the mechanics.
-	conn1, err := migrator.Acquire(ctx)
-	require.NoError(t, err)
-	defer conn1.Release()
-	tx1, err := conn1.Begin(ctx)
-	require.NoError(t, err)
-	_, err = tx1.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userA.String())
-	require.NoError(t, err)
+	// Holder: the reset side's real definer function takes user A's
+	// barrier inside an open transaction; the channel keeps the tx (and
+	// its lock) uncommitted while the test probes the other side.
+	holderLocked := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- store.InStoreTx(ctx, func(tx *platform.Store) error {
+			if err := tx.RevokeUserSessions(ctx, userA); err != nil {
+				return err
+			}
+			close(holderLocked)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	select {
+	case <-holderLocked:
+	case err := <-holderDone:
+		t.Fatalf("reset-side lock holder exited before locking: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("reset-side lock holder never acquired the barrier")
+	}
 
-	// Waiter: the SAME user's lock on a second transaction must block for
-	// as long as the holder stays uncommitted.
-	conn2, err := migrator.Acquire(ctx)
-	require.NoError(t, err)
-	defer conn2.Release()
+	// Waiter: the issuer side's real method on the SAME user must block
+	// for as long as the holder stays uncommitted.
 	waiterDone := make(chan error, 1)
 	go func() {
-		tx2, err := conn2.Begin(ctx)
-		if err == nil {
-			_, err = tx2.Exec(ctx,
-				`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userA.String())
-			_ = tx2.Rollback(ctx)
-		}
-		waiterDone <- err
+		waiterDone <- store.InStoreTx(ctx, func(tx *platform.Store) error {
+			return tx.LockUserSession(ctx, userA)
+		})
 	}()
 
 	// While the waiter sits on user A's barrier, a DIFFERENT user's lock
 	// must not even notice — the key is per-user, not a global write gate.
-	conn3, err := migrator.Acquire(ctx)
-	require.NoError(t, err)
-	defer conn3.Release()
-	tx3, err := conn3.Begin(ctx)
-	require.NoError(t, err)
-	require.NoError(t, func() error {
-		_, err := tx3.Exec(ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userB.String())
-		return err
-	}())
-	require.NoError(t, tx3.Rollback(ctx))
+	require.NoError(t, store.InStoreTx(ctx, func(tx *platform.Store) error {
+		return tx.LockUserSession(ctx, userB)
+	}))
 
 	select {
 	case err := <-waiterDone:
@@ -232,7 +231,8 @@ func TestUserSessionLockSerializesIssuers(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 	}
 
-	require.NoError(t, tx1.Commit(ctx))
+	close(releaseHolder)
+	require.NoError(t, <-holderDone)
 	select {
 	case err := <-waiterDone:
 		require.NoError(t, err, "the same-user issuer must proceed once the holder commits")
