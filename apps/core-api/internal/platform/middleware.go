@@ -19,10 +19,18 @@ import (
 // to the session endpoints; the middleware chain never reads it.
 const accessCookie = "qp_access"
 
-// orgHeader is the tenant header ResolveTenant requires (spec section 7).
-// Demanding a custom header — never a cookie or a query param — is part of
-// the CSRF posture: a cross-site form cannot set one (ADR-005 section 4).
-const orgHeader = "X-Organization-Id"
+// OrgHeader is the tenant header ResolveTenant prefers (spec section 7).
+// Demanding a custom header — never a query param, and a cookie only as
+// the fallback below — is part of the CSRF posture: a cross-site form
+// cannot set one (ADR-005 section 4).
+const OrgHeader = "X-Organization-Id"
+
+// OrgCookie carries the browser's active-organization choice written by
+// POST /v1/session/organization (the web v1 read surface). ResolveTenant
+// reads it only when OrgHeader is absent — SameSite=Lax keeps it off
+// cross-site posts, so the header-first CSRF posture still guards every
+// state-changing route while plain GETs resolve without JS.
+const OrgCookie = "qp_org"
 
 // requestIDHeader carries the per-request correlation id in and out;
 // maxRequestIDLen bounds a client-supplied value — anything longer is
@@ -187,13 +195,15 @@ func verifyAccessCookie(cfg *Config, r *http.Request) (uuid.UUID, uuid.UUID, boo
 	return userID, sessionID, true
 }
 
-// ResolveTenant resolves X-Organization-Id to a membership the authenticated
-// user holds right now — the check runs on every request and is never cached
-// (ADR-005 section 5), so removing a member takes effect on their next call.
-// An absent or non-UUID header is 400, before any lookup. A NULL from
-// get_membership covers non-member and nonexistent org indistinguishably and
-// maps to one 404 through the same writer — no "does the org exist" shortcut
-// exists for an oracle to observe (spec section 7).
+// ResolveTenant resolves the tenant to a membership the authenticated
+// user holds right now — the check runs on every request and is never
+// cached (ADR-005 section 5), so removing a member takes effect on their
+// next call. The tenant id comes from X-Organization-Id when present, else
+// the qp_org cookie POST /v1/session/organization sets; an absent or
+// non-UUID hint is 400 before any lookup. A NULL from get_membership
+// covers non-member and nonexistent org indistinguishably and maps to one
+// 404 through the same writer — no "does the org exist" shortcut exists
+// for an oracle to observe (spec section 7).
 //
 //	mux.Handle("GET /me/organization",
 //		platform.Authenticate(cfg)(platform.ResolveTenant(store)(orgHandler)))
@@ -211,13 +221,14 @@ func ResolveTenant(store *Store) func(http.Handler) http.Handler {
 	}
 }
 
-// resolveTenant runs the header and identity checks in order: the org header
-// is validated before any lookup, and a missing user context means the chain
-// was mis-mounted without Authenticate — answered as unauthenticated, never
-// passed through. false means the response is already written.
+// resolveTenant runs the transport and identity checks in order: the org
+// hint is validated before any lookup, and a missing user context means
+// the chain was mis-mounted without Authenticate — answered as
+// unauthenticated, never passed through. false means the response is
+// already written.
 func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.UUID, string, bool) {
-	orgID, err := uuid.Parse(r.Header.Get(orgHeader))
-	if err != nil {
+	orgID, ok := orgHint(r)
+	if !ok {
 		writeError(r.Context(), w, http.StatusBadRequest, errMissingOrg)
 		return uuid.Nil, "", false
 	}
@@ -227,6 +238,41 @@ func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.U
 		return uuid.Nil, "", false
 	}
 	return checkMembership(store, w, r, userID, orgID)
+}
+
+// orgHint resolves the tenant-id transport: the explicit
+// X-Organization-Id header wins (API clients); an absent header falls back
+// to the qp_org browser cookie. ok=false means both were absent or the
+// present value was not a UUID — resolveTenant answers the uniform 400.
+func orgHint(r *http.Request) (uuid.UUID, bool) {
+	if h := r.Header.Get(OrgHeader); h != "" {
+		id, err := uuid.Parse(h)
+		return id, err == nil
+	}
+	c, err := r.Cookie(OrgCookie)
+	if err != nil || c.Value == "" {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(c.Value)
+	return id, err == nil
+}
+
+// SetOrgCookie writes the qp_org transport POST /v1/session/organization
+// answers with: the same flag set as qp_access (HttpOnly, SameSite=Lax,
+// Path=/, Secure from cfg.CookieSecure) at the refresh lifetime — the org
+// choice must outlive the 15-minute access token and die with the session
+// family. Callers only ever pass a membership-proven org UUID, never raw
+// user input; ResolveTenant re-checks membership on every read.
+func SetOrgCookie(cfg *Config, w http.ResponseWriter, orgID uuid.UUID) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     OrgCookie,
+		Value:    orgID.String(),
+		Path:     "/",
+		MaxAge:   int(cfg.RefreshTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // checkMembership is the per-request membership probe: one get_membership

@@ -32,6 +32,7 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/webapi"
 )
 
 func main() {
@@ -77,8 +78,10 @@ func run(ctx context.Context) error {
 	endpoints := buildEndpoints(&cfg, db, store, enqueueAuthMail(riverClient))
 	// The strict surface's approve delegate needs the built River client
 	// for the in-transaction quote_send enqueue (post-build assignment,
-	// like ingest.Inserter above).
+	// like ingest.Inserter above); the web read surface joins it on the
+	// same generated mux.
 	endpoints.Approver = quotes.NewEndpoints(db, riverClient)
+	endpoints.Web = webapi.NewEndpoints(db, store, &cfg, time.Now)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -269,6 +272,20 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 				platform.RequireRole(
 					platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
 					authSrv)))))
+	// The web v1 read surface (core-api.yaml's web tag). The session pair
+	// mounts Authenticate only — GET /v1/session resolves its own org hint
+	// (OrgHints plants header + qp_org for the handler's fallback chain);
+	// the org switch is state-changing so CheckOrigin guards it. The two
+	// org-scoped reads run the full ResolveTenant chain — header first,
+	// qp_org cookie as fallback.
+	mux.Handle("GET /v1/session", platform.Correlation(
+		platform.Authenticate(cfg)(webapi.OrgHints(authSrv))))
+	mux.Handle("POST /v1/session/organization", platform.Correlation(
+		platform.CheckOrigin(cfg)(platform.Authenticate(cfg)(authSrv))))
+	mux.Handle("GET /v1/inbox/quotes", platform.Correlation(
+		platform.Authenticate(cfg)(platform.ResolveTenant(store)(authSrv))))
+	mux.Handle("GET /v1/quotes/{quoteId}", platform.Correlation(
+		platform.Authenticate(cfg)(platform.ResolveTenant(store)(authSrv))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}

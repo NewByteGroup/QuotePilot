@@ -98,9 +98,10 @@ func seedSend(t *testing.T, db *tenantdb.DB, o sendOpts) sendFixture {
 	require.NoError(t, db.InTenantTx(context.Background(), f.org, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `
 			INSERT INTO app.rfq_requests
-				(organization_id, resend_message_id, customer_email, subject,
+				(organization_id, rfq_number, resend_message_id, customer_email, subject,
 				 status, thread_headers_json)
-			VALUES ($1, $2, $3, $4, coalesce($5::app.rfq_status,'READY'), $6)
+			VALUES ($1, (SELECT coalesce(max(rfq_number),0)+1 FROM app.rfq_requests WHERE organization_id=$1),
+			        $2, $3, $4, coalesce($5::app.rfq_status,'READY'), $6)
 			RETURNING id`,
 			f.org, "resend-"+uuid.NewString(), o.customerEmail, o.subject,
 			emptyToNil(o.status), threadJSON).Scan(&f.rfq); err != nil {

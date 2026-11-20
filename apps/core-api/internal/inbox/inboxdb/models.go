@@ -668,6 +668,11 @@ type AppOrgQuoteCounter struct {
 	NextSeq        int32
 }
 
+type AppOrgRfqCounter struct {
+	OrganizationID pgtype.UUID
+	NextSeq        int32
+}
+
 type AppOrganization struct {
 	ID                pgtype.UUID
 	Name              string
@@ -846,6 +851,7 @@ type AppRfqRequest struct {
 	UpdatedAt            pgtype.Timestamptz
 	// Why a human must look at this NEEDS_REVIEW RFQ (spec 2026-11-11 S3b). Controlled vocabulary: internal/jobs ReviewReason — never failure_reason, which is reserved for technical failures after retries.
 	ReviewReason *string
+	RfqNumber    int32
 }
 
 type AppSuppressionList struct {
