@@ -3,7 +3,7 @@
 // River workers that own staged jobs (ADR-004). It holds only the qp_app
 // DSN — schema changes go through cmd/migrate as qp_migrator, never here.
 //
-//	PORT=8080 POSTGRES_DSN=postgres://qp_app:... WEB_URL=https://app.example \
+//	APP_ENV=local PORT=8080 POSTGRES_DSN=postgres://qp_app:... WEB_URL=https://app.example \
 //	  AUTH_JWT_KEYS=k1=<32+ chars> RESEND_API_KEY=... AUTH_MAGIC_FROM=... \
 //	  RESEND_WEBHOOK_SECRET=whsec_... go run ./cmd/server
 package main
