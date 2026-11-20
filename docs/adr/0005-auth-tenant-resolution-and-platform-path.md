@@ -168,3 +168,29 @@ Private network plus a bearer token in `AI_ENGINE_SERVICE_TOKEN`, sent as the `X
 - Rate limiting if `core-api` ever runs as more than one instance.
 - Where login-event audit records live and how long they are kept (LGPD).
 - Impersonation or support access for platform admins: not designed; out of scope until a need appears.
+
+## Amendments
+
+### 2026-11-16 — MVP login is user + password (pilot meeting decision)
+
+The pilot meeting decided the MVP login screen is username + password with a
+"forgot password" option — product expectation from the pilot companies, ratified
+by Pedro. This amends section 3:
+
+- `POST /auth/login` gains a password path: email + password verified against a
+  stored hash (**argon2id**), with per-email and per-IP attempt rate limiting and
+  the same anti-enumeration response shape.
+- `users` gains `password_hash` (nullable — provisioned accounts without a set
+  password still cannot log in).
+- "Forgot password" reuses the shipped machinery: the reset link goes out through
+  the platform outbox + token path (same hash-at-rest, single-use, short expiry),
+  and lands on a set-password page rather than starting a session directly.
+- The magic-link token pipeline is **retained** as the reset mechanism and stays
+  available as a fallback login path for the pilot; it is no longer the primary
+  UX.
+- Sessions, refresh tokens, org switch and everything downstream are unchanged —
+  only the credential check at login differs.
+
+Cost acknowledged: password auth adds hash storage, a reset flow and credential
+attack surface (throttling, lockout policy) that magic-link avoids entirely; the
+product call stands because the pilot companies expect conventional credentials.

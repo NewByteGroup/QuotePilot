@@ -92,10 +92,20 @@ type SendArgs    struct { OrganizationID, CorrelationID, QuoteID uuid.UUID }
 - Queues (config, not code — ADR-004): `ingest`, `extract` (≈4 workers,
   LLM-bound), `price`, `render`, `send`. The existing `auth_mail_send`
   worker stays on `default`.
-- Retry/timeout policy per stage is a small table in code tuned later
-  (ADR-004 open item): fetch/send stages retry on transient errors;
-  validation failures are not retried — they go straight to their
-  checkpoint/terminal state.
+
+**Retry/timeout per stage** (decided — Pedro, 2026-11-16; ADR-004 open
+item closed). General rule: **classify the error first** — transient
+retries, deterministic cancels (`river.JobCancel`), so a pure-function
+failure never burns five attempts.
+
+| Stage | Attempts | Per-attempt timeout | Retries on | Window / notes |
+|---|---|---|---|---|
+| S1 `rfq_ingest` | 5 | — | transient | **Backoff must end ≈20–25 min total** — Resend `download_url`s expire ~1 h and a late attempt cannot re-fetch |
+| S3a offer fetch | 3 | ~15 s | transient | `FETCH_FAILED` releases pricing anyway, so waiting longer only delays the quote |
+| S2 `rfq_extract` | 3 | 120 s | transient only (timeout, 5xx, 429) | Contract-violating output: at most one retry, then `NEEDS_REVIEW` — each attempt costs money |
+| S3b `rfq_price` | 5 | — | transient DB errors only | `INCOMPLETE` is not an error and never retries; deterministic errors discard via `JobCancel` |
+| S4 `rfq_render` | 3 | — | transient | |
+| S5 `rfq_send` | 5 | — | transient | Resend idempotency key makes re-sends safe; total window <1 h; exhausted ⇒ `FAILED`, no automatic resend |
 
 ## 4. Stages
 
@@ -135,7 +145,8 @@ RFC-004) → validate against the extraction contract + sanity bounds → write
 `extracted_payload_json`, `extraction_confidence` → confidence ≥ threshold
 ⇒ enqueue S3a (`PRICING`); below ⇒ `NEEDS_REVIEW` (human queue, fields
 pre-filled — the gate is the triage). Invalid/uncontracted ai-engine output
-⇒ `FAILED` with reason, never persisted.
+retries at most once (table above) then parks `NEEDS_REVIEW` with the reason —
+the invalid payload is never written to `extracted_payload_json`.
 
 - `TARIFF_UPDATE` parks as `NEEDS_REVIEW` (RFC-002: a tariff never enters
   pricing without a reviewed batch) — with Pedro's three requirements,
@@ -226,6 +237,20 @@ apart from "fetch never ran".
     `source = MIRROR`. The UI labels that offer, and any quote priced from
     it, as **simulated** by reading the column — never by looking at the
     environment, so the label survives a database copy or export.
+- **Connector order (pilot meeting, 2026-11-16).** **CMA CGM is the first
+  real connector** — its API was already approved and Pedro tests it. The
+  Hapag-Lloyd API was **not** granted (internal security restrictions; a
+  retry via the Centauro/NewByte registration is possible), so S3a ships
+  CMA-first and the interface keeps "Hapag" as one binding among others.
+  The **Playwright fallback** validates the MVP while the paid aggregator
+  (Essential Pack, ~10k calls) is negotiated down to ~100–500 calls — the
+  portal credential doubles as the Playwright session. The interface
+  already supports all three bindings (CMA API, Playwright, mirror).
+- **Import tariff provenance (pilot meeting, 2026-11-16).** For imports,
+  the Brazilian forwarder negotiates with the **overseas correspondent**
+  (the selling agent), not directly with the carrier — the correspondent
+  contract is what enables bookings. Tariff `source` rows record that
+  counterpart, not just the carrier the service runs on.
 
 ### S3b `rfq_price` — deterministic pricing (queue `price`)
 
@@ -259,12 +284,17 @@ S4.
   `review_reason = EXPORT_MATRIX_OPEN`, creates no quote, and keeps
   `extracted_payload_json` and the attachments intact so the analyst works
   from the extraction and nothing is re-extracted once export is
-  supported. It is not `FAILED`: nothing broke, the scope is undecided.
-  - **Scope conflict, pending Marcelo.** RFC-001 question 1 says import
-    and export; only its Incoterm matrix and the engine are import-only.
-    **Default if unanswered by 2026-11-20: import-only scope** — exports
-    stay parked as above and the scope statements in RFC-001, ADR-004 and
-    `docs/adr-rfc-plan.md` get corrected to match.
+  supported. It is not `FAILED`: nothing broke; the export matrix is
+  pending (see below), not the scope.
+  - **Export is in the MVP — decided by Pedro with the pilot stakeholder
+    on 2026-11-16** (supersedes the previous "pending Marcelo, default
+    import-only" note). The parking above is temporary until the export
+    matrix lands, not the end state: RFC-001 questions 13–16 (export
+    Incoterm matrix, terminal/handling source and basis, tariff coverage
+    and routes, quote currency and FX treatment) stay open with the pilot
+    companies, and `internal/pricing` needs a real export path
+    implemented once they are answered — a new engine deliverable, not
+    only a review flag.
 - **Missing or stale tariff parks the same way (Pedro, 2026-11-16).** The
   engine returns `INCOMPLETE`; the worker sets RFQ `NEEDS_REVIEW` with a
   distinct code — `MISSING_TARIFF` (no row for a required group) or
@@ -292,6 +322,26 @@ S4.
   scope, missing data, low confidence — is always `NEEDS_REVIEW` with a
   `review_reason`.
 - Recalculation is a new `version`, never an overwrite (rule 9).
+- **Quote payload and validity rules (pilot meeting, 2026-11-16; business
+  rules recorded in RFC-001 §9):**
+  - **Original currency only.** Lines are presented in the currency the
+    carrier charged (USD/EUR) — no BRL conversion, no PTAX shown. Totals
+    are **per-currency groups**, so `pricing_result_json` groups the
+    payload as international freight / local fees / service taxes; the
+    single-BRL-total shape is superseded. Consequence flagged for the
+    pricing engine update, not this spec alone.
+  - **Service taxes only.** The taxes group carries ISS/CBS/IOF on the
+    agency service; freight is untaxed repasse (RFC-001 §2).
+  - **Negative margin is a hard block** — a proposal priced below cost is
+    never sent. The check fires at approval *and* at send (defense in
+    depth: the approving analyst sees it, and S5 refuses even if data
+    changed between approval and send).
+  - **Validity/SLA.** `expires_at` comes from the carrier; a spot rate is
+    bound to its vessel. A quote whose validity ends in under ~30 minutes
+    is not viable — it parks `NEEDS_REVIEW` (new review code, named in
+    P3) rather than being sent. ~5 business days is the preferred window.
+  - **`free_time`** (container free time) is a payload field on the
+    commercial proposal.
 
 ### Reprocess — HTTP, synchronous (not a job)
 
@@ -408,15 +458,38 @@ no-send-without-approval guarantee (S2); 4A/4B split, the `carrier_offers`
 migration scope and mirror guards (S3a); rate provenance, export and
 missing/stale-tariff parking, `review_reason` (P2 migration, Go
 constants), `FAILED` reserved for technical failures (S3b); Reprocess
-(roles, 60s interval, audit); `APP_ENV` required at startup (S3a). `internal/pricing` is implemented.
+(roles, 60s interval, audit); `APP_ENV` required at startup (S3a);
+retry/timeout table (§3). `internal/pricing` is implemented.
+
+- ✓ **Index on `quotes.sent_outbound_message_id` (P5, approved
+  2026-11-16)**: `UNIQUE` **partial** index `WHERE
+  sent_outbound_message_id IS NOT NULL`, **not** prefixed by
+  `organization_id` — provider ids are globally unique and uniqueness
+  guards against double-send. Scope warning recorded: this does **not**
+  enable MVP bounce handling — a bounce webhook arrives tenantless and
+  `platform_*` functions cannot read RLS tables, so bounces will need a
+  platform-side IDs-only registry (like the waiter registry), not a
+  lookup on this column. `outbound_deliveries` stays deferred.
+- ✓ **SPF/DKIM retention** — lives in `thread_headers_json` (implemented
+  in P1); no dedicated column.
+- ✓ **R2 bucket** — `quotepilot-dev` exists on the shared Cloudflare
+  account; only the bucket-scoped S3 keypair is still needed in `.env`
+  for the live attachment path (dev uses `QP_STORAGE_DIR` meanwhile).
+
+- ✓ **Export scope** — decided 2026-11-16: export is in the MVP (S3b).
+- ✓ **Pilot meeting 2026-11-16** — original-currency quotes, service-only
+  taxes, payload groups and `free_time` (S3b + RFC-001 §9); negative
+  margin hard block (S3b + S5); validity/SLA rules (S3b); CMA-first
+  connector + Playwright fallback and correspondent tariff provenance
+  (S3a); user+password login (ADR-005 amendment).
+
+- ✓ **>95% confidence semantics** — confirmed 2026-11-16: high confidence
+  means auto-*process* (extract, fetch, price without pausing), never
+  auto-*send*. Human approval stays mandatory for every quote.
 
 Still open:
 
-- ☐ **Export scope** — Marcelo; default import-only if unanswered by
-  2026-11-20 (S3b).
-- ☐ R2 credentials/`quotepilot-dev` env wiring for core-api — blocks P1.
-- ☐ Remaining schema calls, each at its migration: index on
-  `quotes.sent_outbound_message_id` (P5); SPF/DKIM results in
-  `thread_headers_json` vs a dedicated column (P1).
+- ☐ **Export matrix mechanics** — RFC-001 questions 13–15 with the pilot
+  companies (16 resolved); when answered, `internal/pricing` gains a real
+  export path and `EXPORT_MATRIX_OPEN` stops being emitted (S3b).
 - ☐ Carrier offer wire contract in `packages/contracts` (P3).
-- ☐ Retry counts, backoff and timeouts per stage (ADR-004 open item).
