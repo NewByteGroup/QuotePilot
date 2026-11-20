@@ -183,6 +183,28 @@ type OrganizationResponse struct {
 	Slug              string `json:"slug"`
 }
 
+// PasswordResetRequest defines model for PasswordResetRequest.
+type PasswordResetRequest struct {
+	// Email RFC 5322 addr-spec, same normalization as `LoginRequest.email` —
+	// an unknown address answers the identical 200.
+	Email string `json:"email"`
+}
+
+// PasswordSetRequest defines model for PasswordSetRequest.
+type PasswordSetRequest struct {
+	// Password The new secret — the 8..128 policy is declared here and enforced
+	// by the endpoint (violations answer the uniform 400). Only its
+	// argon2id PHC ever reaches the store.
+	Password string `json:"password"`
+
+	// Token Base64url 32-byte token from the reset link — `SessionRequest`'s
+	// transport story verbatim: it crosses the wire once and the server
+	// stores only its SHA-256. Must come from a
+	// `purpose='password_reset'` row; a login token is the same 401 as
+	// a dead one.
+	Token string `json:"token"`
+}
+
 // ResendAttachment defines model for ResendAttachment.
 type ResendAttachment struct {
 	// ContentDisposition `inline` or `attachment`.
@@ -337,6 +359,12 @@ type GetMeOrganizationParams struct {
 // PostAuthLoginJSONRequestBody defines body for PostAuthLogin for application/json ContentType.
 type PostAuthLoginJSONRequestBody = LoginRequest
 
+// PostAuthPasswordJSONRequestBody defines body for PostAuthPassword for application/json ContentType.
+type PostAuthPasswordJSONRequestBody = PasswordSetRequest
+
+// PostAuthPasswordResetJSONRequestBody defines body for PostAuthPasswordReset for application/json ContentType.
+type PostAuthPasswordResetJSONRequestBody = PasswordResetRequest
+
 // PostAuthSessionJSONRequestBody defines body for PostAuthSession for application/json ContentType.
 type PostAuthSessionJSONRequestBody = SessionRequest
 
@@ -410,6 +438,12 @@ type ServerInterface interface {
 	// PostAuthLogout Revoke the session family and clear both cookies.
 	// (POST /auth/logout)
 	PostAuthLogout(w http.ResponseWriter, r *http.Request)
+	// PostAuthPassword Set a new password from a reset token — answers no session.
+	// (POST /auth/password)
+	PostAuthPassword(w http.ResponseWriter, r *http.Request)
+	// PostAuthPasswordReset Request a password-reset link — never enumerates.
+	// (POST /auth/password-reset)
+	PostAuthPasswordReset(w http.ResponseWriter, r *http.Request)
 	// PostAuthRefresh Rotate the refresh cookie and mint a new access cookie.
 	// (POST /auth/refresh)
 	PostAuthRefresh(w http.ResponseWriter, r *http.Request)
@@ -452,6 +486,34 @@ func (siw *ServerInterfaceWrapper) PostAuthLogout(w http.ResponseWriter, r *http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PostAuthLogout(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostAuthPassword operation middleware
+func (siw *ServerInterfaceWrapper) PostAuthPassword(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostAuthPassword(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostAuthPasswordReset operation middleware
+func (siw *ServerInterfaceWrapper) PostAuthPasswordReset(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostAuthPasswordReset(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -665,6 +727,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/login", wrapper.PostAuthLogin)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/password-reset", wrapper.PostAuthPasswordReset)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/password", wrapper.PostAuthPassword)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/session", wrapper.PostAuthSession)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/refresh", wrapper.PostAuthRefresh)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/auth/logout", wrapper.PostAuthLogout)
@@ -780,6 +844,162 @@ func (response PostAuthLogout204Response) VisitPostAuthLogoutResponse(w http.Res
 type PostAuthLogout500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response PostAuthLogout500JSONResponse) VisitPostAuthLogoutResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPasswordRequestObject struct {
+	Body *PostAuthPasswordJSONRequestBody
+}
+
+type PostAuthPasswordResponseObject interface {
+	VisitPostAuthPasswordResponse(w http.ResponseWriter) error
+}
+
+type PostAuthPassword200JSONResponse LoginResponse
+
+func (response PostAuthPassword200JSONResponse) VisitPostAuthPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPassword400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response PostAuthPassword400JSONResponse) VisitPostAuthPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPassword401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PostAuthPassword401JSONResponse) VisitPostAuthPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPassword429JSONResponse struct{ RateLimitedJSONResponse }
+
+func (response PostAuthPassword429JSONResponse) VisitPostAuthPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPassword500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response PostAuthPassword500JSONResponse) VisitPostAuthPasswordResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPasswordResetRequestObject struct {
+	Body *PostAuthPasswordResetJSONRequestBody
+}
+
+type PostAuthPasswordResetResponseObject interface {
+	VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error
+}
+
+type PostAuthPasswordReset200JSONResponse LoginResponse
+
+func (response PostAuthPasswordReset200JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPasswordReset400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response PostAuthPasswordReset400JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPasswordReset401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PostAuthPasswordReset401JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPasswordReset429JSONResponse struct{ RateLimitedJSONResponse }
+
+func (response PostAuthPasswordReset429JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthPasswordReset500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response PostAuthPasswordReset500JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -1033,6 +1253,12 @@ type StrictServerInterface interface {
 	// PostAuthLogout Revoke the session family and clear both cookies.
 	// (POST /auth/logout)
 	PostAuthLogout(ctx context.Context, request PostAuthLogoutRequestObject) (PostAuthLogoutResponseObject, error)
+	// PostAuthPassword Set a new password from a reset token — answers no session.
+	// (POST /auth/password)
+	PostAuthPassword(ctx context.Context, request PostAuthPasswordRequestObject) (PostAuthPasswordResponseObject, error)
+	// PostAuthPasswordReset Request a password-reset link — never enumerates.
+	// (POST /auth/password-reset)
+	PostAuthPasswordReset(ctx context.Context, request PostAuthPasswordResetRequestObject) (PostAuthPasswordResetResponseObject, error)
 	// PostAuthRefresh Rotate the refresh cookie and mint a new access cookie.
 	// (POST /auth/refresh)
 	PostAuthRefresh(ctx context.Context, request PostAuthRefreshRequestObject) (PostAuthRefreshResponseObject, error)
@@ -1134,6 +1360,68 @@ func (sh *strictHandler) PostAuthLogout(w http.ResponseWriter, r *http.Request) 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PostAuthLogoutResponseObject); ok {
 		if err := validResponse.VisitPostAuthLogoutResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PostAuthPassword operation middleware
+func (sh *strictHandler) PostAuthPassword(w http.ResponseWriter, r *http.Request) {
+	var request PostAuthPasswordRequestObject
+
+	var body PostAuthPasswordJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PostAuthPassword(ctx, request.(PostAuthPasswordRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PostAuthPassword")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PostAuthPasswordResponseObject); ok {
+		if err := validResponse.VisitPostAuthPasswordResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// PostAuthPasswordReset operation middleware
+func (sh *strictHandler) PostAuthPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var request PostAuthPasswordResetRequestObject
+
+	var body PostAuthPasswordResetJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PostAuthPasswordReset(ctx, request.(PostAuthPasswordResetRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PostAuthPasswordReset")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PostAuthPasswordResetResponseObject); ok {
+		if err := validResponse.VisitPostAuthPasswordResetResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
