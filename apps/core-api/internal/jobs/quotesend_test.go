@@ -429,6 +429,11 @@ func TestQuoteSendPermanentErrorCancels(t *testing.T) {
 	s := loadSendState(t, db, f)
 	assert.Equal(t, "DRAFT", s.Status, "a cancelled send leaves the quote approvable-retryable state untouched")
 	assert.Equal(t, "READY", s.RfqState)
+	// The rejection is audited in a fresh tx — a cancelled delivery must
+	// never be invisible to the tenant.
+	n, meta := auditCount(t, db, f.org, "quote.send_refused")
+	assert.Equal(t, 1, n)
+	assert.Equal(t, "provider_permanent", meta["reason"])
 }
 
 // TestQuoteSendDeadLetterMarksFailed: the fifth attempt's transient

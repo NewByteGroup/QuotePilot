@@ -37,6 +37,10 @@ const (
 	refuseSuperseded     = "superseded"
 	refuseNoRecipient    = "no_recipient"
 	refuseQuoteMissing   = "quote_missing"
+	// refuseProviderPermanent marks a provider's deterministic rejection
+	// (4xx other than 408/429, or an unconfigured client) — audited in a
+	// fresh tx because the send's own tx already rolled back.
+	refuseProviderPermanent = "provider_permanent"
 )
 
 // QuoteSendWorker is S5 quote_send (spec section 4): the last pipeline
@@ -78,6 +82,13 @@ func (w *QuoteSendWorker) Work(ctx context.Context, job *river.Job[SendArgs]) er
 	cancelCause, err := w.run(ctx, args)
 	if err != nil {
 		if resend.IsPermanent(err) {
+			// A deterministic provider rejection cancels — but not
+			// invisibly: the tenant audit row lands in a fresh tx (the
+			// send's own tx rolled back). The audit write failing must
+			// not mask the original error — join, like writeSendFailed.
+			if aerr := w.writeProviderRefusal(ctx, args); aerr != nil {
+				return errors.Join(err, aerr)
+			}
 			return river.JobCancel(err)
 		}
 		if job.JobRow != nil && job.MaxAttempts > 0 && job.Attempt >= job.MaxAttempts {
@@ -216,6 +227,16 @@ func (w *QuoteSendWorker) recordSent(ctx context.Context, tx pgx.Tx, args SendAr
 	}
 	return auditSend(ctx, tx, args.OrganizationID, "quote.sent", q.ID,
 		map[string]any{"message_id": messageID})
+}
+
+// writeProviderRefusal audits a permanent provider rejection in a fresh
+// tenant transaction — the send's own tx rolled back, so without this row
+// the cancelled delivery would be invisible to the tenant.
+func (w *QuoteSendWorker) writeProviderRefusal(ctx context.Context, args SendArgs) error {
+	return w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
+		return auditSend(ctx, tx, args.OrganizationID, "quote.send_refused", args.QuoteID,
+			map[string]any{"reason": refuseProviderPermanent})
+	})
 }
 
 // writeSendFailed is the dead-letter half of S5: retries exhausted on a
