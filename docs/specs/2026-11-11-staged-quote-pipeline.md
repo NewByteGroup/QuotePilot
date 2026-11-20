@@ -482,13 +482,13 @@ retry/timeout table (§3). `internal/pricing` is implemented.
   connector + Playwright fallback and correspondent tariff provenance
   (S3a); user+password login (ADR-005 amendment).
 
+- ✓ **>95% confidence semantics** — confirmed 2026-11-16: high confidence
+  means auto-*process* (extract, fetch, price without pausing), never
+  auto-*send*. Human approval stays mandatory for every quote.
+
 Still open:
 
 - ☐ **Export matrix mechanics** — RFC-001 questions 13–15 with the pilot
   companies (16 resolved); when answered, `internal/pricing` gains a real
   export path and `EXPORT_MATRIX_OPEN` stops being emitted (S3b).
 - ☐ Carrier offer wire contract in `packages/contracts` (P3).
-- ☐ **>95% confidence auto-send** — Pedro to confirm with Marcelo whether
-  it was meant as auto-*process* (adopted: extract + price are already
-  automatic) or auto-*send* (would relax the no-send-without-approval
-  invariant — needs an explicit call before any change).

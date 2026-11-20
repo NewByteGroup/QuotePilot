@@ -127,7 +127,7 @@ The earlier alternatives of margin on the whole price or separate pass-through m
 - **Payload grouping**: international freight, local fees and service taxes are separate groups in the quote payload; the front-end adapts to the payload shape.
 - **Import tariff sourcing**: for imports the Brazilian forwarder negotiates with the **overseas correspondent** (the selling agent), not directly with the carrier — the contract with the correspondent is what enables bookings.
 - **Carrier connectors**: CMA CGM API is approved and is the first connector; Hapag-Lloyd's API was not granted (internal security restrictions — a retry via the Centauro/NewByte registration is possible); a **Playwright fallback** validates the MVP while a custom-quota offer from the paid aggregator (Essential Pack, 10k calls) is negotiated down to ~100–500 calls.
-- **Confidence >95%**: processing is automatic (extract + price). Whether >95% may also auto-*send* is to be confirmed — the standing invariant remains human approval before send.
+- **Confidence >95%** (confirmed 2026-11-16): the whole pipeline processes automatically — extract, fetch offers, price — without pausing for review. It does **not** authorize auto-send: a human approves every quote before it leaves, regardless of confidence.
 
 ## 10. Impact
 
