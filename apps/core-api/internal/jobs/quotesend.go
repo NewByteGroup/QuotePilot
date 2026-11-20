@@ -54,13 +54,18 @@ type QuoteSendWorker struct {
 	Sender resend.Sender
 	// Storage fetches the rendered PDF by pdf_storage_key.
 	Storage platform.ObjectStorage
+	// OutboundFrom is the verified platform mailbox Resend accepts as the
+	// From: domain (QP_OUTBOUND_FROM) — the tenant's outbound_reply_to
+	// rides as Reply-To instead, so customer answers still land on the
+	// tenant while the send domain stays platform-verified.
+	OutboundFrom string
 }
 
 // NewQuoteSendWorker builds the worker.
 //
-//	w := jobs.NewQuoteSendWorker(db, sender, storage)
-func NewQuoteSendWorker(runner tenantdb.TenantRunner, sender resend.Sender, store platform.ObjectStorage) *QuoteSendWorker {
-	return &QuoteSendWorker{Runner: runner, Sender: sender, Storage: store}
+//	w := jobs.NewQuoteSendWorker(db, sender, storage, cfg.OutboundFrom)
+func NewQuoteSendWorker(runner tenantdb.TenantRunner, sender resend.Sender, store platform.ObjectStorage, outboundFrom string) *QuoteSendWorker {
+	return &QuoteSendWorker{Runner: runner, Sender: sender, Storage: store, OutboundFrom: outboundFrom}
 }
 
 // Work runs S5 for one approved quote version. Deterministic failures —
@@ -157,7 +162,7 @@ func (w *QuoteSendWorker) deliver(ctx context.Context, tx pgx.Tx, args SendArgs,
 	if err != nil {
 		return nil, fmt.Errorf("jobs: quote_send: load org branding: %w", err)
 	}
-	req, err := buildSendRequest(q, rfq, branding, pdf, args.QuoteID)
+	req, err := w.buildSendRequest(q, rfq, branding, pdf, args.QuoteID)
 	if err != nil {
 		return w.refuse(ctx, tx, args, refuseNoRecipient, err)
 	}
@@ -320,12 +325,12 @@ func recheckMargin(raw []byte) (bool, error) {
 // buildSendRequest composes the minimal send (spec S5: the PDF, the quote
 // number in the text, thread headers so the reply lands in the customer's
 // existing conversation — S4's render owns the real HTML later).
-func buildSendRequest(q sendQuote, rfq sendRfq, b sendBranding, pdf []byte, quoteID uuid.UUID) (*resend.SendRequest, error) {
+func (w *QuoteSendWorker) buildSendRequest(q sendQuote, rfq sendRfq, b sendBranding, pdf []byte, quoteID uuid.UUID) (*resend.SendRequest, error) {
 	to, err := recipient(rfq.CustomerEmail)
 	if err != nil {
 		return nil, err
 	}
-	from, err := fromAddress(b)
+	from, err := fromAddress(b, w.OutboundFrom)
 	if err != nil {
 		return nil, err
 	}
@@ -355,16 +360,19 @@ func recipient(email string) (string, error) {
 	return addr.Address, nil
 }
 
-// fromAddress builds "Name <reply-to>": the org's outbound pair is the
-// entire envelope schema gives the worker (migration 0002 has no separate
-// from-mailbox column), so the customer's answer threads back to the same
-// address the quote appeared to come from.
-func fromAddress(b sendBranding) (string, error) {
-	name := strings.TrimSpace(b.FromName)
-	addr := strings.TrimSpace(b.ReplyTo)
+// fromAddress builds "Name <platform-addr>" — From must be a Resend-
+// verified domain, and the tenant's reply_to is not one (sending From an
+// unverified domain is a permanent 4xx). The tenant's name still fronts
+// the message and its outbound_reply_to rides as Reply-To, so the customer
+// sees and answers the tenant's address either way. An empty outboundFrom
+// is a wiring bug — a plain error, not a refusal, so it surfaces as a
+// retryable job failure instead of a silent cancel.
+func fromAddress(b sendBranding, outboundFrom string) (string, error) {
+	addr := strings.TrimSpace(outboundFrom)
 	if addr == "" {
-		return "", errors.New("jobs: quote_send: org outbound_reply_to is empty")
+		return "", errors.New("jobs: quote_send: outbound From address not configured (QP_OUTBOUND_FROM)")
 	}
+	name := strings.TrimSpace(b.FromName)
 	if name == "" {
 		return addr, nil
 	}

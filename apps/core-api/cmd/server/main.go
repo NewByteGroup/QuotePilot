@@ -65,7 +65,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage())
+	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg))
 	if err != nil {
 		return err
 	}
@@ -188,6 +188,29 @@ func newSender(cfg *platform.Config) resend.Sender {
 	return resend.UnconfiguredSender{}
 }
 
+// devDefaultOutboundFrom is the boot fallback when RESEND_API_KEY is set
+// but QP_OUTBOUND_FROM is not: Resend's own always-verified sender, so dev
+// keeps delivering without a verified domain. Production must set
+// QP_OUTBOUND_FROM — the warn below is the alarm; sending From an
+// unverified domain is a permanent 4xx that would cancel every send.
+const devDefaultOutboundFrom = "onboarding@resend.dev"
+
+// newOutboundFrom resolves the verified From: mailbox for quote_send. The
+// fail-soft rule matches the receiver/sender stubs: warn loudly, never
+// refuse boot — a missing QP_OUTBOUND_FROM degrades to the dev-safe
+// default rather than killing the server, because refusing boot would make
+// a missing cosmetic var a stricter gate than the API key itself (and a
+// wrong-domain From already fails loudly as an audited permanent error).
+func newOutboundFrom(cfg *platform.Config) string {
+	if cfg.OutboundFrom != "" {
+		return cfg.OutboundFrom
+	}
+	if cfg.ResendAPIKey != "" {
+		slog.Warn("server: QP_OUTBOUND_FROM unset — quote_send From falls back to " + devDefaultOutboundFrom + " (dev-safe only; set a verified domain)")
+	}
+	return devDefaultOutboundFrom
+}
+
 // newStorage binds the object-storage seam. R2 credentials are a pending
 // spec open item, so every environment gets the directory-backed dev store
 // for now — bytes land under QP_STORAGE_DIR (default .dev-storage) and
@@ -258,13 +281,13 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 // rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
 // is disabled (its fast schedule was a spike affordance; production never
 // owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage) (*river.Client[pgx.Tx], error) {
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
-	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage))
+	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		// Only queues with registered workers are declared: rfq_ingest
 		// chains rfq_extract into the `extract` queue, whose worker lands in

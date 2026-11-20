@@ -36,9 +36,13 @@ type sendRig struct {
 	storage *platform.FakeStorage
 }
 
+// rigOutboundFrom is the verified platform mailbox the fixtures send From —
+// the value QP_OUTBOUND_FROM carries in production.
+const rigOutboundFrom = "quotes@platform.test"
+
 func newSendRig(db *tenantdb.DB, sender *resend.FakeSender, store *platform.FakeStorage) *sendRig {
 	return &sendRig{
-		worker:  jobs.NewQuoteSendWorker(db, sender, store),
+		worker:  jobs.NewQuoteSendWorker(db, sender, store, rigOutboundFrom),
 		sender:  sender,
 		storage: store,
 	}
@@ -236,11 +240,11 @@ func TestQuoteSendHappyPath(t *testing.T) {
 	assert.Equal(t, f.number+".pdf", req.Attachments[0].Filename)
 	assert.Equal(t, pdf, req.Attachments[0].Content)
 	assert.Contains(t, req.TextBody, f.number)
-	// Branding (spec S5): SeedOrganization writes outbound_from_name
-	// "Test <slug>" and outbound_reply_to ops@<slug>.test — the From shows
-	// the forwarder pair and replies land on the reply-to.
+	// Branding (spec S5 + the verified-domain rule): From is the tenant's
+	// display name on the platform's verified mailbox; the tenant's
+	// outbound_reply_to stays Reply-To so answers land on the tenant.
 	assert.Equal(t, "ops@"+f.slug+".test", req.ReplyTo)
-	assert.Equal(t, "Test "+f.slug+" <ops@"+f.slug+".test>", req.From)
+	assert.Equal(t, "Test "+f.slug+" <"+rigOutboundFrom+">", req.From)
 
 	s := loadSendState(t, db, f)
 	assert.Equal(t, "APPROVED_SENT", s.Status)
