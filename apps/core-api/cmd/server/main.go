@@ -65,7 +65,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newStorage())
+	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage())
 	if err != nil {
 		return err
 	}
@@ -176,6 +176,18 @@ func newReceiver(cfg *platform.Config) resend.Receiver {
 	return resend.UnconfiguredReceiver{}
 }
 
+// newSender picks the Resend Sending client for the quote_send worker —
+// the same fail-soft contract as the receiver: without RESEND_API_KEY the
+// unconfigured stub binds and sends fail loudly as permanent errors, so a
+// staged send cancels instead of retrying a credential that cannot appear.
+func newSender(cfg *platform.Config) resend.Sender {
+	if cfg.ResendAPIKey != "" {
+		return resend.NewSendingClient(cfg.ResendAPIKey)
+	}
+	slog.Warn("server: RESEND_API_KEY unset — quote_send binds the unconfigured sender (sends fail loudly)")
+	return resend.UnconfiguredSender{}
+}
+
 // newStorage binds the object-storage seam. R2 credentials are a pending
 // spec open item, so every environment gets the directory-backed dev store
 // for now — bytes land under QP_STORAGE_DIR (default .dev-storage) and
@@ -246,12 +258,13 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 // rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
 // is disabled (its fast schedule was a spike affordance; production never
 // owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, storage platform.ObjectStorage) (*river.Client[pgx.Tx], error) {
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
+	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		// Only queues with registered workers are declared: rfq_ingest
 		// chains rfq_extract into the `extract` queue, whose worker lands in
@@ -260,6 +273,7 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
+			jobs.QueueSend:     {MaxWorkers: 4},
 		},
 		Workers:           workers,
 		Schema:            "river",
