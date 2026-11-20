@@ -447,6 +447,19 @@ jobs:
             exit 1
           fi
 
+      # Behavior suite for the hand-written JSON Schemas (KG air tariffs,
+      # declared freight/insurance inputs). Self-gating on the suite's
+      # presence so it is quiet until packages/contracts/tests lands —
+      # then it runs the Makefile `test` target on every contract change.
+      - name: Contract schema behavior tests
+        run: |
+          if [ ! -f packages/contracts/tests/test_contract_schemas.py ] || ! grep -q '^test:' packages/contracts/Makefile; then
+            echo "stub: no schema behavior suite yet — check activates when packages/contracts/tests + Makefile test land"
+            exit 0
+          fi
+          pip install --requirement packages/contracts/requirements.txt
+          make -C packages/contracts test
+
       - name: Regenerate sqlc and check for drift
         run: |
           if [ ! -f apps/core-api/sqlc.yaml ]; then
