@@ -25,11 +25,15 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 )
 
-// tokenRec is one auth_login_tokens row as consume_login_token sees it.
+// tokenRec is one auth_login_tokens row as the consume functions see it
+// (migration 0007): purpose is the credential class the consumes filter
+// on — "login" mints sessions, "password_reset" sets passwords, and the
+// two never exchange.
 type tokenRec struct {
 	userID    uuid.UUID
 	expiresAt time.Time
 	consumed  bool
+	purpose   string
 }
 
 // profileRec is one get_user_profile row; fullName "" stands in for NULL —
@@ -109,6 +113,8 @@ type sessionQuerier struct {
 	fail         map[string]error
 	consumes     []string
 	creates      []sessionCreate
+	userLocks    []uuid.UUID
+	order        []string
 	listed       []string
 	profileCalls []uuid.UUID
 }
@@ -117,6 +123,8 @@ var _ platform.Querier = (*sessionQuerier)(nil)
 
 func (q *sessionQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	switch {
+	case strings.Contains(sql, "pg_advisory_xact_lock"):
+		return q.userLockRow(args)
 	case strings.Contains(sql, "consume_login_token"):
 		return q.consumeRow(args)
 	case strings.Contains(sql, "get_user_profile"):
@@ -148,8 +156,9 @@ func (q *sessionQuerier) Query(_ context.Context, sql string, args ...any) (pgx.
 
 // consumeRow answers SELECT app.consume_login_token($1) with the function's
 // atomic semantics: a hit marks the token consumed and a second consume —
-// like an expired or unknown hash — scans NULL, the (Nil, false, nil) miss
-// the Store maps.
+// like an expired, wrong-purpose or unknown hash — scans NULL, the
+// (Nil, false, nil) miss the Store maps. The purpose check mirrors the
+// migration-0007 predicate, so a planted reset token misses here.
 func (q *sessionQuerier) consumeRow(args []any) pgx.Row {
 	return stubRow{scan: func(dest ...any) error {
 		if err := q.fail["consume_login_token"]; err != nil {
@@ -159,7 +168,7 @@ func (q *sessionQuerier) consumeRow(args []any) pgx.Row {
 		q.consumes = append(q.consumes, hash)
 		out := dest[0].(**uuid.UUID)
 		tok, ok := q.tokens[hash]
-		if !ok || tok.consumed || !q.now().Before(tok.expiresAt) {
+		if !ok || tok.purpose != platform.MailPurposeLogin || tok.consumed || !q.now().Before(tok.expiresAt) {
 			*out = nil
 			return nil
 		}
@@ -209,7 +218,25 @@ func (q *sessionQuerier) createRow(args []any) pgx.Row {
 			sessionID: uuid.New(),
 		}
 		q.creates = append(q.creates, call)
+		q.order = append(q.order, "create_session")
 		*(dest[0].(*uuid.UUID)) = call.sessionID
+		return nil
+	}}
+}
+
+// userLockRow answers SELECT 1 FROM pg_catalog.pg_advisory_xact_lock(...) —
+// migration 0007's issue-vs-revoke barrier that issueSession now takes
+// before minting. The fake cannot serialize, so it records the acquisition
+// (user id plus its position in the order log): the tests assert the lock
+// preceded create_session on the exchange path.
+func (q *sessionQuerier) userLockRow(args []any) pgx.Row {
+	return stubRow{scan: func(dest ...any) error {
+		if err := q.fail["pg_advisory_xact_lock"]; err != nil {
+			return err
+		}
+		q.userLocks = append(q.userLocks, args[0].(uuid.UUID))
+		q.order = append(q.order, "lock")
+		*(dest[0].(*int)) = 1
 		return nil
 	}}
 }
@@ -304,9 +331,17 @@ func newSessionRig(t *testing.T, cfg *platform.Config) *sessionRig {
 // the token for the request body.
 func (r *sessionRig) plantToken(t *testing.T, userID uuid.UUID, expiresAt time.Time) string {
 	t.Helper()
+	return r.plantTokenPurpose(t, userID, expiresAt, platform.MailPurposeLogin)
+}
+
+// plantTokenPurpose records a token of an arbitrary credential class — the
+// cross-purpose proofs plant a 'password_reset' row and assert the session
+// consume still misses it.
+func (r *sessionRig) plantTokenPurpose(t *testing.T, userID uuid.UUID, expiresAt time.Time, purpose string) string {
+	t.Helper()
 	token, err := platform.NewOpaqueToken()
 	require.NoError(t, err)
-	r.q.tokens[platform.HashToken(token)] = &tokenRec{userID: userID, expiresAt: expiresAt}
+	r.q.tokens[platform.HashToken(token)] = &tokenRec{userID: userID, expiresAt: expiresAt, purpose: purpose}
 	return token
 }
 

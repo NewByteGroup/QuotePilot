@@ -114,6 +114,92 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /auth/password-reset:
+    post:
+      operationId: postAuthPasswordReset
+      tags: [auth]
+      summary: Request a password-reset link — never enumerates.
+      description: |
+        The amendment's "forgot password" request (ADR-005 amendment
+        2026-11-16 — the magic-link pipeline is retained as the reset
+        mechanism): if `email` belongs to a provisioned user the server
+        stages a `purpose='password_reset'` token and queues
+        `${WEB_URL}/auth/set-password?token=…` through the same
+        outbox + token machinery as the magic link — same hash-at-rest,
+        single use, short expiry; otherwise it does nothing. The 200
+        `{"status":"ok"}` body is identical either way — the endpoint
+        cannot enumerate users (spec section 8). The link lands on a
+        set-password page and never starts a session, and a reset token
+        is not a magic-link token: `POST /auth/session` will not consume
+        it — the two token classes are not interchangeable in either
+        direction. Rate limited like `/auth/login`: per email and per IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+      responses:
+        '200':
+          description: |
+            `{"status":"ok"}` for any well-formed email — existing user or
+            not. Identical to the magic-link request's uniform answer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/password:
+    post:
+      operationId: postAuthPassword
+      tags: [auth]
+      summary: Set a new password from a reset token — answers no session.
+      description: |
+        The set-password side of "forgot password" (ADR-005 amendment
+        2026-11-16): consumes a `purpose='password_reset'` token
+        (`consume_password_reset_token` — the same single-use row-lock
+        consume as the magic-link token), stores the argon2id hash
+        (`set_user_password`) and revokes every live session of the user
+        (`revoke_user_sessions` — OWASP: a credential reset invalidates
+        existing sessions), all in one transaction. Success is
+        `{"status":"ok"}` only: the set-password page does not start a
+        session, the user logs in through `/auth/login`'s password path
+        next. A used, expired or unknown token — including a LOGIN token
+        presented here — gets the single uniform 401, byte-identical to
+        `/auth/session`'s. Rate limited per IP (no email key exists on
+        this route).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordSetRequest'
+      responses:
+        '200':
+          description: |
+            Password updated and existing sessions revoked. No cookie is
+            set and no session is created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /auth/session:
     post:
       operationId: postAuthSession
@@ -406,6 +492,37 @@ components:
           type: string
           enum: [ok]
           description: Always `ok` for a well-formed email — uniform by design.
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          description: |
+            RFC 5322 addr-spec, same normalization as `LoginRequest.email` —
+            an unknown address answers the identical 200.
+    PasswordSetRequest:
+      type: object
+      additionalProperties: false
+      required: [token, password]
+      properties:
+        token:
+          type: string
+          description: |
+            Base64url 32-byte token from the reset link — `SessionRequest`'s
+            transport story verbatim: it crosses the wire once and the server
+            stores only its SHA-256. Must come from a
+            `purpose='password_reset'` row; a login token is the same 401 as
+            a dead one.
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: |
+            The new secret — the 8..128 policy is declared here and enforced
+            by the endpoint (violations answer the uniform 400). Only its
+            argon2id PHC ever reaches the store.
     SessionRequest:
       type: object
       additionalProperties: false

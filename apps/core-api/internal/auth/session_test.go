@@ -102,6 +102,14 @@ func TestSessionIssuesCookiePair(t *testing.T) {
 	assert.NotEqual(t, refresh.Value, r.q.creates[0].hash,
 		"the hash must never cross the wire")
 	assert.Equal(t, r.clock.now.Add(r.cfg.RefreshTTL), r.q.creates[0].expiresAt)
+
+	// The issue-vs-revoke barrier (migration 0007): the per-user advisory
+	// lock precedes the session write, so a concurrent credential reset
+	// either already revoked (and the pending-token sweep killed this link)
+	// or waits for this commit and kills the session it produces.
+	require.Equal(t, []uuid.UUID{userID}, r.q.userLocks)
+	assert.Equal(t, []string{"lock", "create_session"}, r.q.order,
+		"the user lock must be held before the session write")
 }
 
 // TestSessionUniform401 is the no-enumeration proof: a used, an expired and

@@ -65,6 +65,14 @@ type credRec struct {
 	hash   string
 }
 
+// passwordSet records one set_user_password call — the user id and the PHC
+// the handler hashed (never the raw password; the fake must see only what
+// the store sees).
+type passwordSet struct {
+	userID uuid.UUID
+	hash   string
+}
+
 // loginQuerier is an in-memory platform.Querier for the login path: a users
 // table keyed on the function's own lower/btrim normalization, a credential
 // table for the password path, the profile/membership/session rows the
@@ -73,16 +81,27 @@ type credRec struct {
 // over it, so the SQL text and NULL handling are the production ones —
 // only the transport is faked.
 type loginQuerier struct {
-	users         map[string]uuid.UUID
-	creds         map[string]credRec
-	profiles      map[uuid.UUID]profileRec
-	members       map[string][]platform.Membership
-	fail          map[string]error
-	finds         []string
-	authFinds     []string
-	creates       []createCall
-	sessions      []sessionCreate
-	outboxCreates []outboxCall
+	now            func() time.Time
+	users          map[string]uuid.UUID
+	creds          map[string]credRec
+	profiles       map[uuid.UUID]profileRec
+	members        map[string][]platform.Membership
+	tokens         map[string]*tokenRec
+	fail           map[string]error
+	finds          []string
+	authFinds      []string
+	creates        []createCall
+	resetCreates   []createCall
+	loginConsumes  []string
+	resetConsumes  []string
+	passwordSets   []passwordSet
+	sessionRevokes []uuid.UUID
+	pendingRevokes []uuid.UUID
+	userLocks      []uuid.UUID
+	sessions       []sessionCreate
+	outboxCreates  []outboxCall
+	credsShift     map[string]credRec
+	order          []string
 }
 
 var _ platform.Querier = (*loginQuerier)(nil)
@@ -95,8 +114,22 @@ func (q *loginQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.
 		return q.findRow(args)
 	case strings.Contains(sql, "get_user_profile"):
 		return q.profileRow(args)
+	case strings.Contains(sql, "create_password_reset_token"):
+		return q.resetCreateRow(args)
 	case strings.Contains(sql, "create_login_token"):
 		return q.createRow(args)
+	case strings.Contains(sql, "consume_password_reset_token"):
+		return q.resetConsumeRow(args)
+	case strings.Contains(sql, "consume_login_token"):
+		return q.loginConsumeRow(args)
+	case strings.Contains(sql, "pg_advisory_xact_lock"):
+		return q.userLockRow(args)
+	case strings.Contains(sql, "set_user_password"):
+		return q.passwordSetRow(args)
+	case strings.Contains(sql, "revoke_user_sessions"):
+		return q.sessionRevokeRow(args)
+	case strings.Contains(sql, "revoke_user_pending_tokens"):
+		return q.pendingRevokeRow(args)
 	case strings.Contains(sql, "create_session"):
 		return q.sessionRow(args)
 	case strings.Contains(sql, "create_mail_outbox"):
@@ -154,7 +187,15 @@ func (q *loginQuerier) authRow(args []any) pgx.Row {
 		}
 		email := args[0].(string)
 		q.authFinds = append(q.authFinds, email)
-		cred, ok := q.creds[strings.ToLower(strings.TrimSpace(email))]
+		norm := strings.ToLower(strings.TrimSpace(email))
+		cred, ok := q.creds[norm]
+		// credsShift is the stale-credential seam: once set for an email,
+		// every lookup AFTER the first returns the shifted row — the way a
+		// reset committing between the outside read and the in-tx re-read
+		// presents to passwordLogin's recheck.
+		if shifted, has := q.credsShift[norm]; has && countOf(q.authFinds, email) > 1 {
+			cred, ok = shifted, true
+		}
 		if !ok {
 			return pgx.ErrNoRows
 		}
@@ -207,7 +248,30 @@ func (q *loginQuerier) sessionRow(args []any) pgx.Row {
 			sessionID: uuid.New(),
 		}
 		q.sessions = append(q.sessions, call)
+		q.order = append(q.order, "create_session")
 		*(dest[0].(*uuid.UUID)) = call.sessionID
+		return nil
+	}}
+}
+
+// loginConsumeRow answers SELECT app.consume_login_token($1): the reset
+// rig's half of the cross-purpose proof — a planted 'password_reset' row
+// misses the login filter, so /auth/session answers 401 on a reset token.
+func (q *loginQuerier) loginConsumeRow(args []any) pgx.Row {
+	return stubRow{scan: func(dest ...any) error {
+		if err := q.fail["consume_login_token"]; err != nil {
+			return err
+		}
+		hash := args[0].(string)
+		q.loginConsumes = append(q.loginConsumes, hash)
+		out := dest[0].(**uuid.UUID)
+		tok, ok := q.tokens[hash]
+		if !ok || tok.purpose != platform.MailPurposeLogin || tok.consumed || !q.now().Before(tok.expiresAt) {
+			*out = nil
+			return nil
+		}
+		tok.consumed = true
+		*out = &tok.userID
 		return nil
 	}}
 }
@@ -274,11 +338,14 @@ func newRig(t *testing.T, ipCap, emailCap int) *rig {
 	clock := &fakeClock{now: time.Now()}
 	cfg := sessionConfig()
 	q := &loginQuerier{
-		users:    map[string]uuid.UUID{},
-		creds:    map[string]credRec{},
-		profiles: map[uuid.UUID]profileRec{},
-		members:  map[string][]platform.Membership{},
-		fail:     map[string]error{},
+		now:        clock.Now,
+		users:      map[string]uuid.UUID{},
+		creds:      map[string]credRec{},
+		profiles:   map[uuid.UUID]profileRec{},
+		members:    map[string][]platform.Membership{},
+		tokens:     map[string]*tokenRec{},
+		fail:       map[string]error{},
+		credsShift: map[string]credRec{},
 	}
 	enq := &fakeEnqueue{}
 	store := platform.NewStore(q)
@@ -294,8 +361,17 @@ func newRig(t *testing.T, ipCap, emailCap int) *rig {
 // httptest.NewRequest RemoteAddr is "192.0.2.1:1234" — IP "192.0.2.1".
 func (r *rig) postLogin(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	r.handler.ServeHTTP(rec, req)
-	return rec
+	return r.postPath(t, "/auth/login", body)
+}
+
+// countOf reports how many times needle appears in hay — the credsShift
+// seam counts prior get_user_auth_by_email calls for the same email.
+func countOf(hay []string, needle string) int {
+	n := 0
+	for _, v := range hay {
+		if v == needle {
+			n++
+		}
+	}
+	return n
 }

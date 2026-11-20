@@ -29,14 +29,25 @@ type Membership struct {
 	Role  string
 }
 
-// MailOutbox is one pending magic-link send as read_mail_outbox returns it:
-// the link, the recipient resolved through the login token (the job carries
-// only the outbox id — SendMagicLink still needs a destination), and the
-// token's expiry so the worker owns the dead-link policy.
+// The auth_login_tokens.purpose values (migration 0007): the credential
+// class a token row — and the mail built from it — belongs to. The two are
+// not interchangeable: the consumes filter on purpose, and the
+// auth_mail_send worker picks its template from this field.
+const (
+	MailPurposeLogin         = "login"
+	MailPurposePasswordReset = "password_reset"
+)
+
+// MailOutbox is one pending send as read_mail_outbox returns it: the link,
+// the recipient resolved through the login token (the job carries only the
+// outbox id — the mailer still needs a destination), the token's expiry so
+// the worker owns the dead-link policy, and the token's purpose so the
+// worker picks the mail template (migration 0007).
 type MailOutbox struct {
 	Link      string
 	Email     string
 	ExpiresAt time.Time
+	Purpose   string
 }
 
 // Organization is the resolved tenant's registry row as
@@ -401,18 +412,129 @@ func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link st
 	return id, nil
 }
 
-// ReadMailOutbox returns one pending send — link, recipient and expiry.
-// Idempotent reads are the point: a River retry re-reads the row its
-// predecessor crashed before deleting, so delivery is at-least-once and a
-// resent link is the SAME link. ok=false means the job is done — already
-// sent, never queued, or the token died — never an error.
+// CreatePasswordResetToken inserts one reset token and returns its id —
+// CreateLoginToken's twin for the amendment's forgot-password path
+// (migration 0007): same hash-at-rest, same caller-chosen expiry, but the
+// row records purpose='password_reset' so it can never mint a session.
+//
+//	id, err := store.CreatePasswordResetToken(ctx, userID, platform.HashToken(token), expiry)
+func (s *Store) CreatePasswordResetToken(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.q.QueryRow(ctx,
+		`SELECT app.create_password_reset_token($1, $2, $3)`, userID, tokenHash, expiresAt).Scan(&id)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("platform: create_password_reset_token: %w", err)
+	}
+	return id, nil
+}
+
+// ConsumePasswordResetToken spends a reset token — ConsumeLoginToken's
+// twin: the same atomic row-lock single use, but filtered to
+// purpose='password_reset', so a magic-link hash is a miss. Consumed,
+// expired, wrong-purpose and unknown all collapse to (uuid.Nil, false, nil).
+//
+//	userID, ok, err := store.ConsumePasswordResetToken(ctx, platform.HashToken(token))
+func (s *Store) ConsumePasswordResetToken(ctx context.Context, tokenHash string) (uuid.UUID, bool, error) {
+	var userID *uuid.UUID
+	err := s.q.QueryRow(ctx,
+		`SELECT app.consume_password_reset_token($1)`, tokenHash).Scan(&userID)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: consume_password_reset_token: %w", err)
+	}
+	if userID == nil {
+		return uuid.Nil, false, nil
+	}
+	return *userID, true, nil
+}
+
+// SetUserPassword writes the argon2id PHC through the set-password
+// transaction — the only qp_app-side write to users.password_hash
+// (migration 0007). The function refuses a NULL or blank hash itself; an
+// error here abandons the caller's transaction.
+//
+//	err := store.SetUserPassword(ctx, userID, phc)
+func (s *Store) SetUserPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+	var one int
+	err := s.q.QueryRow(ctx,
+		`SELECT 1 FROM app.set_user_password($1, $2)`, userID, passwordHash).Scan(&one)
+	if err != nil {
+		return fmt.Errorf("platform: set_user_password: %w", err)
+	}
+	return nil
+}
+
+// RevokeUserSessions kills every live session of the user — the OWASP leg
+// of the credential reset: a session minted on a stolen password must not
+// outlive the password change (migration 0007). The function takes the
+// per-user advisory lock itself; callers inside a wider critical section
+// take LockUserSession first — same key, same barrier, idempotent within
+// one transaction.
+//
+//	err := store.RevokeUserSessions(ctx, userID)
+func (s *Store) RevokeUserSessions(ctx context.Context, userID uuid.UUID) error {
+	var one int
+	err := s.q.QueryRow(ctx,
+		`SELECT 1 FROM app.revoke_user_sessions($1)`, userID).Scan(&one)
+	if err != nil {
+		return fmt.Errorf("platform: revoke_user_sessions: %w", err)
+	}
+	return nil
+}
+
+// RevokeUserPendingTokens consumes every live auth_login_tokens row of the
+// user — the reset transaction's token kill (migration 0007): outstanding
+// magic links and reset links are the same credential class as the
+// password, so none of them may outlive the reset.
+//
+//	err := store.RevokeUserPendingTokens(ctx, userID)
+func (s *Store) RevokeUserPendingTokens(ctx context.Context, userID uuid.UUID) error {
+	var one int
+	err := s.q.QueryRow(ctx,
+		`SELECT 1 FROM app.revoke_user_pending_tokens($1)`, userID).Scan(&one)
+	if err != nil {
+		return fmt.Errorf("platform: revoke_user_pending_tokens: %w", err)
+	}
+	return nil
+}
+
+// LockUserSession takes the per-user advisory transaction lock
+// (hashtextextended on the user id — migration 0007's issue-vs-revoke
+// barrier). Session issuers hold it before writing: mintSession's callers
+// and, in SQL, rotate_session; revoke_user_sessions holds it on the reset
+// side, so "issue a session" and "revoke all of them" are mutually
+// exclusive per user. A pg_catalog function needs no grant and no app
+// wrapper — the barrier is lock-order discipline, not privilege: every
+// path must take it before any family or row lock. The lock is
+// transaction-scoped (pg_advisory_xact_lock) — it releases at commit or
+// rollback, and re-acquiring the same key inside one transaction is a
+// no-op, so callers wider than one statement and the SQL functions may
+// both take it.
+//
+//	err := tx.LockUserSession(ctx, userID)
+func (s *Store) LockUserSession(ctx context.Context, userID uuid.UUID) error {
+	var one int
+	err := s.q.QueryRow(ctx,
+		`SELECT 1 FROM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 0))`,
+		userID).Scan(&one)
+	if err != nil {
+		return fmt.Errorf("platform: lock user session: %w", err)
+	}
+	return nil
+}
+
+// ReadMailOutbox returns one pending send — link, recipient, expiry and
+// the token's purpose so the worker picks the mail template. Idempotent
+// reads are the point: a River retry re-reads the row its predecessor
+// crashed before deleting, so delivery is at-least-once and a resent link
+// is the SAME link. ok=false means the job is done — already sent, never
+// queued, or the token died — never an error.
 //
 //	pending, ok, err := store.ReadMailOutbox(ctx, outboxID)
 func (s *Store) ReadMailOutbox(ctx context.Context, id uuid.UUID) (MailOutbox, bool, error) {
 	var out MailOutbox
 	err := s.q.QueryRow(ctx,
 		`SELECT * FROM app.read_mail_outbox($1)`, id).
-		Scan(&out.Link, &out.Email, &out.ExpiresAt)
+		Scan(&out.Link, &out.Email, &out.ExpiresAt, &out.Purpose)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MailOutbox{}, false, nil
 	}
