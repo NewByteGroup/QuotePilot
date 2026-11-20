@@ -8,13 +8,12 @@ package auth_test
 // job carrying the outbox id alone. Malformed bodies get the uniform 400,
 // driver and enqueue failures the uniform 500, an exhausted bucket the
 // uniform 429. Everything runs through auth.NewServer — the same strict
-// handler, middleware and error hooks production mounts.
+// handler, middleware and error hooks production mounts; the doubles live
+// in login_fake_test.go, the password path's own proofs in
+// login_password_test.go.
 
 import (
-	"context"
 	"encoding/base64"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +21,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -30,170 +28,6 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 )
-
-var errBoom = errors.New("boom")
-
-// fakeClock is the injected time source shared by both limiters and the
-// token expiry, so rate-limit and TTL assertions are exact.
-type fakeClock struct{ now time.Time }
-
-func (f *fakeClock) Now() time.Time          { return f.now }
-func (f *fakeClock) Advance(d time.Duration) { f.now = f.now.Add(d) }
-
-// stubRow is a one-row pgx.Row whose Scan the test controls.
-type stubRow struct{ scan func(dest ...any) error }
-
-func (r stubRow) Scan(dest ...any) error { return r.scan(dest...) }
-
-// createCall records one create_login_token invocation: the hash the store
-// was asked to keep, the expiry the handler computed and the row id the
-// fake returned — the id the outbox row must link to inside the same tx.
-type createCall struct {
-	userID    uuid.UUID
-	hash      string
-	expiresAt time.Time
-	id        uuid.UUID
-}
-
-// outboxCall records one create_mail_outbox invocation: the login token row
-// id the outbox links to, the rendered link, and the outbox id the fake
-// returned — the value the handler must hand the enqueue.
-type outboxCall struct {
-	tokenID  uuid.UUID
-	link     string
-	outboxID uuid.UUID
-}
-
-// loginQuerier is an in-memory platform.Querier for the login path: a users
-// table keyed on the function's own lower/btrim normalization, a record of
-// find/create/stage calls, and per-function driver-error injection. The real
-// platform.Store runs over it, so the SQL text and NULL handling are the
-// production ones — only the transport is faked.
-type loginQuerier struct {
-	users         map[string]uuid.UUID
-	fail          map[string]error
-	finds         []string
-	creates       []createCall
-	outboxCreates []outboxCall
-}
-
-var _ platform.Querier = (*loginQuerier)(nil)
-
-func (q *loginQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
-	switch {
-	case strings.Contains(sql, "find_user_by_email"):
-		return q.findRow(args)
-	case strings.Contains(sql, "create_login_token"):
-		return q.createRow(args)
-	case strings.Contains(sql, "create_mail_outbox"):
-		return q.outboxRow(args)
-	default:
-		return stubRow{scan: func(...any) error {
-			return fmt.Errorf("loginQuerier: unexpected sql %q", sql)
-		}}
-	}
-}
-
-func (q *loginQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("loginQuerier: Query is not on the login path")
-}
-
-// findRow answers SELECT app.find_user_by_email($1): the normalized lookup
-// hits q.users or scans NULL — the (Nil, false, nil) miss the Store maps.
-func (q *loginQuerier) findRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["find_user_by_email"]; err != nil {
-			return err
-		}
-		email := args[0].(string)
-		q.finds = append(q.finds, email)
-		id, ok := q.users[strings.ToLower(strings.TrimSpace(email))]
-		out := dest[0].(**uuid.UUID)
-		if !ok {
-			*out = nil
-			return nil
-		}
-		*out = &id
-		return nil
-	}}
-}
-
-// createRow answers SELECT app.create_login_token($1, $2, $3): it records the
-// arguments (so tests can diff hash vs token) and returns a fresh row id.
-func (q *loginQuerier) createRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["create_login_token"]; err != nil {
-			return err
-		}
-		call := createCall{
-			userID:    args[0].(uuid.UUID),
-			hash:      args[1].(string),
-			expiresAt: args[2].(time.Time),
-			id:        uuid.New(),
-		}
-		q.creates = append(q.creates, call)
-		*(dest[0].(*uuid.UUID)) = call.id
-		return nil
-	}}
-}
-
-// outboxRow answers SELECT app.create_mail_outbox($1, $2): it records the
-// (token row id, link) pair and returns a fresh outbox id. Like migration
-// 0004's function, a blank link is refused — it would queue a send that can
-// never deliver.
-func (q *loginQuerier) outboxRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["create_mail_outbox"]; err != nil {
-			return err
-		}
-		link := args[1].(string)
-		if strings.TrimSpace(link) == "" {
-			return errors.New("create_mail_outbox: link_url must be a non-empty string")
-		}
-		call := outboxCall{tokenID: args[0].(uuid.UUID), link: link, outboxID: uuid.New()}
-		q.outboxCreates = append(q.outboxCreates, call)
-		*(dest[0].(*uuid.UUID)) = call.outboxID
-		return nil
-	}}
-}
-
-// rig is a mounted auth surface plus the test's windows into it.
-type rig struct {
-	handler http.Handler
-	clock   *fakeClock
-	cfg     *platform.Config
-	q       *loginQuerier
-	enq     *fakeEnqueue
-}
-
-// newRig wires the endpoints the way cmd/server will: real Store over the
-// fake Querier, real Limiters at the given capacities on the fake clock, the
-// recording EnqueueMailFunc standing in for the River InsertTx closure,
-// mounted through auth.NewServer.
-func newRig(t *testing.T, ipCap, emailCap int) *rig {
-	t.Helper()
-	clock := &fakeClock{now: time.Unix(1_700_000_000, 0)}
-	cfg := &platform.Config{WebURL: "https://web.test", LoginTTL: 15 * time.Minute}
-	q := &loginQuerier{users: map[string]uuid.UUID{}, fail: map[string]error{}}
-	enq := &fakeEnqueue{}
-	store := platform.NewStore(q)
-	endpoints := auth.NewEndpoints(cfg,
-		store, directInTx(store), &neverRunner{t}, enq.run,
-		platform.NewLimiter(ipCap, platform.LimitWindow, clock.Now),
-		platform.NewLimiter(emailCap, platform.LimitWindow, clock.Now),
-		clock.Now)
-	return &rig{handler: auth.NewServer(endpoints), clock: clock, cfg: cfg, q: q, enq: enq}
-}
-
-// postLogin fires one JSON body at the mounted mux. The default
-// httptest.NewRequest RemoteAddr is "192.0.2.1:1234" — IP "192.0.2.1".
-func (r *rig) postLogin(t *testing.T, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	r.handler.ServeHTTP(rec, req)
-	return rec
-}
 
 // TestLoginKnownEmailQueuesMagicLink covers the provisioned path: the
 // uniform 200 body plus the three-write staging of migration 0004 — the

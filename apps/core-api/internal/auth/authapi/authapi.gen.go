@@ -120,10 +120,16 @@ type ErrorCode string
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
 	// Email RFC 5322 addr-spec; matched case-insensitively
-	// (`find_user_by_email` lower-cases and trims). Plain `string` on
-	// purpose — see `OrganizationIdHeader` for the format/dependency
-	// trade-off.
+	// (`find_user_by_email` and `get_user_auth_by_email` lower-case and
+	// trim). Plain `string` on purpose — see `OrganizationIdHeader` for
+	// the format/dependency trade-off.
 	Email string `json:"email"`
+
+	// Password Present — even as the empty string — selects the password-login
+	// path (ADR-005 amendment 2026-11-16); absent selects the magic-link
+	// request. Deliberately no `minLength`: an empty password is just a
+	// wrong one and earns the same uniform 401.
+	Password *string `json:"password,omitempty"`
 }
 
 // LoginResponse defines model for LoginResponse.
@@ -312,6 +318,11 @@ type RateLimited = Error
 // Unauthorized defines model for Unauthorized.
 type Unauthorized = Error
 
+// PostAuthLogin200JSONResponseBody defines parameters for PostAuthLogin.
+type PostAuthLogin200JSONResponseBody struct {
+	union json.RawMessage
+}
+
 // GetMeOrganizationParams defines parameters for GetMeOrganization.
 type GetMeOrganizationParams struct {
 	// XOrganizationID Organization the request scopes to — required by the middleware, not
@@ -328,9 +339,71 @@ type PostAuthLoginJSONRequestBody = LoginRequest
 // PostAuthSessionJSONRequestBody defines body for PostAuthSession for application/json ContentType.
 type PostAuthSessionJSONRequestBody = SessionRequest
 
+// AsLoginResponse returns the union data inside the PostAuthLogin200JSONResponseBody as a LoginResponse
+func (t PostAuthLogin200JSONResponseBody) AsLoginResponse() (LoginResponse, error) {
+	var body LoginResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromLoginResponse overwrites any union data inside the PostAuthLogin200JSONResponseBody as the provided LoginResponse
+func (t *PostAuthLogin200JSONResponseBody) FromLoginResponse(v LoginResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeLoginResponse performs a merge with any union data inside the PostAuthLogin200JSONResponseBody, using the provided LoginResponse
+func (t *PostAuthLogin200JSONResponseBody) MergeLoginResponse(v LoginResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionResponse returns the union data inside the PostAuthLogin200JSONResponseBody as a SessionResponse
+func (t PostAuthLogin200JSONResponseBody) AsSessionResponse() (SessionResponse, error) {
+	var body SessionResponse
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionResponse overwrites any union data inside the PostAuthLogin200JSONResponseBody as the provided SessionResponse
+func (t *PostAuthLogin200JSONResponseBody) FromSessionResponse(v SessionResponse) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionResponse performs a merge with any union data inside the PostAuthLogin200JSONResponseBody, using the provided SessionResponse
+func (t *PostAuthLogin200JSONResponseBody) MergeSessionResponse(v SessionResponse) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t PostAuthLogin200JSONResponseBody) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *PostAuthLogin200JSONResponseBody) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
-	// PostAuthLogin Request a magic-link login email.
+	// PostAuthLogin Log in — request a magic link, or authenticate with email + password.
 	// (POST /auth/login)
 	PostAuthLogin(w http.ResponseWriter, r *http.Request)
 	// PostAuthLogout Revoke the session family and clear both cookies.
@@ -618,12 +691,12 @@ type PostAuthLoginResponseObject interface {
 	VisitPostAuthLoginResponse(w http.ResponseWriter) error
 }
 
-type PostAuthLogin200JSONResponse LoginResponse
+type PostAuthLogin200JSONResponse = PostAuthLogin200JSONResponseBody
 
 func (response PostAuthLogin200JSONResponse) VisitPostAuthLoginResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+	if err := json.NewEncoder(&buf).Encode(response.union); err != nil {
 		return err
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -642,6 +715,20 @@ func (response PostAuthLogin400JSONResponse) VisitPostAuthLoginResponse(w http.R
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type PostAuthLogin401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PostAuthLogin401JSONResponse) VisitPostAuthLoginResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -939,7 +1026,7 @@ func (response GetMeOrganization500JSONResponse) VisitGetMeOrganizationResponse(
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
-	// PostAuthLogin Request a magic-link login email.
+	// PostAuthLogin Log in — request a magic link, or authenticate with email + password.
 	// (POST /auth/login)
 	PostAuthLogin(ctx context.Context, request PostAuthLoginRequestObject) (PostAuthLoginResponseObject, error)
 	// PostAuthLogout Revoke the session family and clear both cookies.

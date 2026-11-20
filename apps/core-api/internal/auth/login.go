@@ -59,15 +59,20 @@ func clientIPFromContext(ctx context.Context) (string, bool) {
 	return ip, ok
 }
 
-// PostAuthLogin implements POST /auth/login (spec section 8): any well-formed
-// email earns the uniform 200 {"status":"ok"} — a provisioned user gets a
-// magic link, an unknown one gets nothing, and the two paths answer with the
-// same response object so the wire cannot tell them apart.
+// PostAuthLogin implements POST /auth/login's two paths (spec section 8,
+// ADR-005 amendment 2026-11-16). `password` absent is the magic-link path:
+// any well-formed email earns the uniform 200 {"status":"ok"} — a
+// provisioned user gets a link, an unknown one gets nothing, and the two
+// answer with the same response object so the wire cannot tell them apart.
+// `password` present — even empty — is the password path: verify the
+// argon2id hash and answer exactly like POST /auth/session on success, or
+// the single uniform 401 on any failure.
 //
-// Check order: the IP bucket is spent before the email is even parsed — spec
-// section 8.1 meters requests and the route chain is rate-limit → handler —
-// while the per-email bucket is spent only on a well-formed recipient, so a
-// malformed "email" can never drain a real user's magic-link budget.
+// Check order is the same on both paths: the IP bucket is spent before the
+// email is even parsed — spec section 8.1 meters requests and the route
+// chain is rate-limit → handler — while the per-email bucket is spent only
+// on a well-formed recipient, so a malformed "email" can never drain a real
+// user's budget and every password attempt pays both buckets.
 func (e *Endpoints) PostAuthLogin(
 	ctx context.Context,
 	request authapi.PostAuthLoginRequestObject,
@@ -89,10 +94,13 @@ func (e *Endpoints) PostAuthLogin(
 	if !e.emailLimiter.Allow(email) {
 		return loginRateLimited(), nil
 	}
+	if request.Body.Password != nil {
+		return e.passwordLogin(ctx, email, *request.Body.Password)
+	}
 	if err := e.deliverMagicLink(ctx, email); err != nil {
 		return nil, err
 	}
-	return authapi.PostAuthLogin200JSONResponse{Status: authapi.Ok}, nil
+	return loginStatusOK()
 }
 
 // parseLoginEmail accepts only a bare RFC 5322 addr-spec — no display name,
@@ -170,6 +178,108 @@ func (e *Endpoints) stageMagicLink(
 // slash on WEB_URL would otherwise double the path's first separator.
 func magicLinkURL(webURL, token string) string {
 	return strings.TrimRight(webURL, "/") + "/auth/exchange?token=" + token
+}
+
+// passwordLogin is the amendment's credential path. Rejection collapses to
+// the session endpoint's single 401 — unknown email, a NULL/empty stored
+// hash and a wrong password are indistinguishable on the wire — and every
+// rejection pays one argon2id verification: the dummy hash stands in for a
+// missing row or column value, so the store's answer cannot be timed apart
+// from a real wrong-password verify (password.go carries the why).
+//
+// The session-issue mirrors runExchange: profile reads and the session row
+// commit inside ONE transaction through e.inTx, so a signing or insert
+// failure leaves nothing half-created behind — only the response/cookie
+// assembly stays outside it.
+func (e *Endpoints) passwordLogin(
+	ctx context.Context,
+	email, password string,
+) (authapi.PostAuthLoginResponseObject, error) {
+	userID, stored, found, err := e.store.GetUserAuthByEmail(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("auth: password login lookup: %w", err)
+	}
+	hash := stored
+	if !found || hash == "" {
+		hash = dummyPasswordHash
+	}
+	verified := verifyPassword(password, hash)
+	if !found || stored == "" || !verified {
+		return loginUnauthenticated(), nil
+	}
+	var grant *sessionGrant
+	err = e.inTx(ctx, func(tx *platform.Store, _ pgx.Tx) error {
+		profile, memberships, err := e.loadProfile(ctx, tx, userID)
+		if err != nil {
+			return err
+		}
+		grant, err = e.issueSession(ctx, tx, userID, profile, memberships)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return e.passwordGrantResponse(grant)
+}
+
+// passwordGrantResponse builds the password path's 200: the contract's oneOf
+// second arm is SessionResponse — the same switcher payload POST
+// /auth/session returns — wrapped with the cookie pair the generated
+// response object cannot carry (sessionOK's recipe, on this operation's
+// visit method). A union marshal cannot fail on this shape; if it ever does,
+// the error is a plain 500 like every other path failure.
+func (e *Endpoints) passwordGrantResponse(grant *sessionGrant) (authapi.PostAuthLoginResponseObject, error) {
+	var body authapi.PostAuthLogin200JSONResponse
+	if err := body.FromSessionResponse(authapi.SessionResponse{
+		Profile:     grant.profile,
+		Memberships: grant.memberships,
+	}); err != nil {
+		return nil, fmt.Errorf("auth: encode password login response: %w", err)
+	}
+	return loginSessionOK{
+		body:    body,
+		access:  e.accessCookie(grant.access),
+		refresh: e.refreshCookie(grant.refresh),
+	}, nil
+}
+
+// loginStatusOK is the magic-link path's uniform 200 {"status":"ok"} — the
+// contract's oneOf first arm. An encode failure is theoretically a 500 like
+// any other path fault; the constant shape cannot produce one in practice.
+func loginStatusOK() (authapi.PostAuthLoginResponseObject, error) {
+	var body authapi.PostAuthLogin200JSONResponse
+	if err := body.FromLoginResponse(authapi.LoginResponse{Status: authapi.Ok}); err != nil {
+		return nil, fmt.Errorf("auth: encode login response: %w", err)
+	}
+	return body, nil
+}
+
+// loginSessionOK is the password path's cookie-carrying 200 — sessionOK's
+// twin for this operation (authapi/doc.go recipe: the generated type cannot
+// emit Set-Cookie, so a wrapper writes both cookies first, then delegates
+// status and body to it).
+type loginSessionOK struct {
+	body    authapi.PostAuthLogin200JSONResponse
+	access  *http.Cookie
+	refresh *http.Cookie
+}
+
+// VisitPostAuthLoginResponse emits the two Set-Cookie headers before the
+// body — a header written after WriteHeader would be silently dropped.
+func (r loginSessionOK) VisitPostAuthLoginResponse(w http.ResponseWriter) error {
+	http.SetCookie(w, r.access)
+	http.SetCookie(w, r.refresh)
+	return r.body.VisitPostAuthLoginResponse(w)
+}
+
+// loginUnauthenticated is the password path's single 401 — the same
+// {"error":"unauthenticated"} body POST /auth/session emits for a dead
+// token, so a wrong password, an unknown email and an unset password are
+// byte-identical on the wire (ADR-005 amendment's anti-enumeration contract).
+func loginUnauthenticated() authapi.PostAuthLoginResponseObject {
+	return authapi.PostAuthLogin401JSONResponse{
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+	}
 }
 
 // loginBadRequest is the typed 400 the handler returns for request-shape

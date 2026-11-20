@@ -60,16 +60,31 @@ paths:
     post:
       operationId: postAuthLogin
       tags: [auth]
-      summary: Request a magic-link login email.
+      summary: Log in — request a magic link, or authenticate with email + password.
       description: |
-        If `email` belongs to a provisioned user, the server stores a
-        `create_login_token` hash and sends `${WEB_URL}/auth/exchange?token=…`
-        through the platform sender; otherwise it does nothing. The 200 body
-        is identical either way — this endpoint cannot enumerate users (spec
-        section 8). Rate limited per email and per IP (spec section 8.1:
-        proposed 5 tokens/email/hour and 30 requests/IP/hour); the link opens
-        a page and the state change is this POST, so mail scanners prefetching
-        it consume nothing.
+        Two paths keyed on the request body (ADR-005 amendment 2026-11-16 —
+        the pilot meeting made user + password the MVP login, with the
+        magic-link pipeline retained as the reset mechanism and a fallback):
+
+        - `password` ABSENT — the magic-link path: if `email` belongs to a
+          provisioned user, the server stores a `create_login_token` hash and
+          sends `${WEB_URL}/auth/exchange?token=…` through the platform
+          sender; otherwise it does nothing. The 200 `{"status":"ok"}` body is
+          identical either way — the endpoint cannot enumerate users (spec
+          section 8). The link opens a page and the state change is this POST,
+          so mail scanners prefetching it consume nothing.
+        - `password` PRESENT — even as the empty string — the password path:
+          the password is verified against the argon2id hash
+          `get_user_auth_by_email` returns. Success answers exactly like
+          `POST /auth/session`: the `qp_access`/`qp_refresh` cookie pair plus
+          the profile and memberships the organization switcher renders.
+          Failure is the single uniform 401 `{"error":"unauthenticated"}` —
+          an unknown email, an unset password (NULL hash) and a wrong
+          password are indistinguishable on the wire.
+
+        Rate limited per email and per IP on both paths (spec section 8.1:
+        proposed 5 tokens/email/hour and 30 requests/IP/hour); every password
+        attempt spends both buckets.
       security: []
       requestBody:
         required: true
@@ -80,14 +95,20 @@ paths:
       responses:
         '200':
           description: |
-            Always `{"status":"ok"}` for any well-formed email — existing
-            user or not.
+            Magic-link path: `{"status":"ok"}` for any well-formed email —
+            existing user or not. Password path: session created — the
+            `qp_access`/`qp_refresh` cookie pair is set as described in the
+            operation description and the body carries the switcher payload.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LoginResponse'
+                oneOf:
+                  - $ref: '#/components/schemas/LoginResponse'
+                  - $ref: '#/components/schemas/SessionResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -357,9 +378,16 @@ components:
           type: string
           description: |
             RFC 5322 addr-spec; matched case-insensitively
-            (`find_user_by_email` lower-cases and trims). Plain `string` on
-            purpose — see `OrganizationIdHeader` for the format/dependency
-            trade-off.
+            (`find_user_by_email` and `get_user_auth_by_email` lower-case and
+            trim). Plain `string` on purpose — see `OrganizationIdHeader` for
+            the format/dependency trade-off.
+        password:
+          type: string
+          description: |
+            Present — even as the empty string — selects the password-login
+            path (ADR-005 amendment 2026-11-16); absent selects the magic-link
+            request. Deliberately no `minLength`: an empty password is just a
+            wrong one and earns the same uniform 401.
     LoginResponse:
       type: object
       additionalProperties: false
