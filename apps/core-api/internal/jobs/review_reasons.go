@@ -24,6 +24,11 @@ const (
 	// ReviewReasonStaleTariff means tariff rows exist but none is valid on
 	// the quote date — the analyst refreshes validity, then reprocesses.
 	ReviewReasonStaleTariff ReviewReason = "STALE_TARIFF"
+	// ReviewReasonNegativeMargin parks the RFQ when S5's defense-in-depth
+	// re-check finds the approved quote priced below cost (spec S5: a
+	// negative-margin quote is never sent; the analyst reprices as a new
+	// version — nothing broke, the margin gate did its job).
+	ReviewReasonNegativeMargin ReviewReason = "NEGATIVE_MARGIN"
 )
 
 // ReviewReasons is the closed list the stored-value test checks against:
@@ -32,4 +37,5 @@ var ReviewReasons = []ReviewReason{
 	ReviewReasonExportMatrixOpen,
 	ReviewReasonMissingTariff,
 	ReviewReasonStaleTariff,
+	ReviewReasonNegativeMargin,
 }

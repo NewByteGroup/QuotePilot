@@ -112,5 +112,14 @@ type SendArgs struct {
 // Kind returns the River job kind.
 func (SendArgs) Kind() string { return "quote_send" }
 
-// InsertOpts routes the job to the send queue with entity uniqueness.
-func (SendArgs) InsertOpts() river.InsertOpts { return entityUnique(QueueSend) }
+// sendMaxAttempts pins the spec-§3 row: S5 gets five attempts, transient
+// errors only — a permanent refusal cancels long before that.
+const sendMaxAttempts = 5
+
+// InsertOpts routes the job to the send queue with entity uniqueness and
+// the stage's five-attempt budget.
+func (SendArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueueSend)
+	opts.MaxAttempts = sendMaxAttempts
+	return opts
+}

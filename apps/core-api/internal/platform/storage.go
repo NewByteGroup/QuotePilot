@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,18 +11,27 @@ import (
 	"sync"
 )
 
+// ErrObjectNotFound is Get's miss signal — a distinct error so the
+// quote_send worker can tell "the render artifact is gone" (deterministic,
+// refuse) from a transient storage failure (retry).
+var ErrObjectNotFound = errors.New("platform: object not found")
+
 // ObjectStorage is the object-storage seam for pipeline artifacts (ADR-003:
 // Cloudflare R2 bucket quotepilot-dev). Only core-api ever holds storage
 // credentials; ai-engine receives content, never keys. The interface is
-// deliberately minimal for the P1 slice — the rfq_ingest worker only writes.
-// The real S3-compatible client lands with the R2 credentials (spec open
-// item); until then main binds DirStorage so dev runs end-to-end without
-// losing attachment bytes on restart.
+// deliberately minimal: P1's rfq_ingest writes attachments, P5's quote_send
+// reads the rendered PDF back. The real S3-compatible client lands with the
+// R2 credentials (spec open item); until then main binds DirStorage so dev
+// runs end-to-end without losing attachment bytes on restart.
 type ObjectStorage interface {
 	// Put stores body under key (e.g. "tenants/{org}/rfqs/{rfq}/{file}").
 	// The caller builds tenant-safe keys; implementations must treat the key
 	// as an opaque path and never interpolate credentials or org data.
 	Put(ctx context.Context, key string, body []byte) error
+	// Get returns the bytes stored under key; ErrObjectNotFound when the
+	// key is absent. Implementations copy the buffer out — mutating the
+	// returned slice must not corrupt the stored object.
+	Get(ctx context.Context, key string) ([]byte, error)
 }
 
 // DirStorage is the dev binding for ObjectStorage: Put writes the object to
@@ -42,7 +52,7 @@ func NewDirStorage(root string) *DirStorage {
 }
 
 // Root reports the configured directory — wiring tests assert on it;
-// workers never need it (the interface stays Put-only).
+// workers never need it (they hold the Put/Get interface only).
 func (d *DirStorage) Root() string { return d.root }
 
 // Put writes body to root/key (0o600, parents 0o750 — tenant bytes stay
@@ -60,6 +70,22 @@ func (d *DirStorage) Put(_ context.Context, key string, body []byte) error {
 		return fmt.Errorf("platform: storage write %q: %w", key, err)
 	}
 	return nil
+}
+
+// Get reads root/key back; a missing file is ErrObjectNotFound — the same
+// ".." guard applies so a malformed key cannot climb out of the root.
+func (d *DirStorage) Get(_ context.Context, key string) ([]byte, error) {
+	if strings.Contains(key, "..") {
+		return nil, fmt.Errorf("platform: storage key %q must not contain '..'", key)
+	}
+	body, err := os.ReadFile(filepath.Join(d.root, filepath.FromSlash(key)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrObjectNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("platform: storage read %q: %w", key, err)
+	}
+	return body, nil
 }
 
 // FakeStorage is the dev/test implementation of ObjectStorage: it captures
@@ -89,17 +115,19 @@ func (f *FakeStorage) Put(_ context.Context, key string, body []byte) error {
 	return nil
 }
 
-// Get returns a copy of the stored object; ok=false when the key is absent.
-func (f *FakeStorage) Get(key string) ([]byte, bool) {
+// Get returns a copy of the stored object, ErrObjectNotFound when the key
+// is absent — the interface contract a worker's miss-vs-transient
+// classification depends on.
+func (f *FakeStorage) Get(_ context.Context, key string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	body, ok := f.objects[key]
 	if !ok {
-		return nil, false
+		return nil, ErrObjectNotFound
 	}
 	cp := make([]byte, len(body))
 	copy(cp, body)
-	return cp, true
+	return cp, nil
 }
 
 // Keys returns the sorted set of stored keys — deterministic for assertions.

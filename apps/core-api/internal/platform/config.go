@@ -27,8 +27,9 @@ type Config struct {
 	AccessTTL    time.Duration     // access JWT lifetime (default 15m, spec section 4)
 	RefreshTTL   time.Duration     // refresh cookie lifetime (default 30d)
 	LoginTTL     time.Duration     // magic-link token lifetime (default 15m)
-	ResendAPIKey string            // magic-link sender credential
+	ResendAPIKey string            // magic-link + quote sender credential
 	MagicFrom    string            // From: address of magic-link mail
+	OutboundFrom string            // verified From: mailbox for quote_send (spec S5)
 	CookieSecure bool              // Secure flag on auth cookies; false only for local http
 }
 
@@ -75,6 +76,7 @@ func defaultConfig(getenv func(string) string) Config {
 		WebURL:       getenv("WEB_URL"),
 		ResendAPIKey: getenv("RESEND_API_KEY"),
 		MagicFrom:    getenv("AUTH_MAGIC_FROM"),
+		OutboundFrom: getenv("QP_OUTBOUND_FROM"),
 		AccessTTL:    defaultAccessTTL,
 		RefreshTTL:   defaultRefreshTTL,
 		LoginTTL:     defaultLoginTTL,

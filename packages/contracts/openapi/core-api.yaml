@@ -54,6 +54,10 @@ tags:
     description: |
       Caller identity and the end-to-end tenant-resolution proof — request →
       JWT → membership → `InTenantTx` (spec section 8).
+  - name: quotes
+    description: |
+      Quote lifecycle endpoints of the staged pipeline (spec
+      2026-11-11-staged-quote-pipeline section 4).
 
 paths:
   /auth/login:
@@ -354,6 +358,58 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /quotes/{id}/approve:
+    post:
+      operationId: approveQuote
+      tags: [quotes]
+      summary: Approve a quote version — releases the send job.
+      description: |
+        The analyst's central act (spec section 4 "Approval"):
+        `Authenticate` + `ResolveTenant` +
+        `RequireRole(OWNER, ADMIN, PRICING_ANALYST)` — the same user may
+        prepare and approve. Inside one tenant transaction the handler
+        row-locks the quote, refuses a `SUPERSEDED` version (409
+        `quote_superseded`) and a negative-margin price (409
+        `negative_margin`, audited as `quote.approve_refused`), stamps
+        `approved_at`/`approved_by_user_id`/`approved_via='api'`, audits
+        `quote.approved` and enqueues the S5 `quote_send` job — one commit.
+        Re-approving an already-approved version is an idempotent no-op
+        returning the stored approval; an unknown or other-tenant quote id
+        gets the same uniform 404.
+      security:
+        - qpAccess: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Quote version UUID (`app.quotes.id`).
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/OrganizationIdHeader'
+      responses:
+        '200':
+          description: |
+            The approved version's status and stored approval stamp —
+            identical on a re-approve (the no-op returns what the first
+            approval wrote).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApproveQuoteResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     qpAccess:
@@ -407,6 +463,8 @@ components:
         the middleware contract of spec section 7; `bad_request` covers
         malformed bodies and `rate_limited` the login bucket (spec section
         8.1 leaves the code unpinned — this contract fixes it).
+        `quote_superseded` and `negative_margin` are the two conflict
+        refusals of quote approval (spec 2026-11-11 section 4).
       enum:
         - bad_request
         - unauthenticated
@@ -415,6 +473,8 @@ components:
         - forbidden
         - rate_limited
         - internal
+        - quote_superseded
+        - negative_margin
     Error:
       type: object
       additionalProperties: false
@@ -560,6 +620,30 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Membership'
+    QuoteStatus:
+      type: string
+      description: |
+        Mirrors the `app.quote_status` enum (migration 0002). Approval
+        leaves the version `DRAFT` — the send worker flips it to
+        `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
+      enum: [DRAFT, SUPERSEDED, APPROVED_SENT]
+    ApproveQuoteResponse:
+      type: object
+      additionalProperties: false
+      required: [id, status, approved_at, approved_by_user_id]
+      properties:
+        id:
+          type: string
+          description: Quote version UUID.
+        status:
+          $ref: '#/components/schemas/QuoteStatus'
+        approved_at:
+          type: string
+          format: date-time
+          description: Timestamp the first approval stamped.
+        approved_by_user_id:
+          type: string
+          description: User UUID of the approving analyst.
     OrganizationResponse:
       type: object
       additionalProperties: false
@@ -731,6 +815,24 @@ components:
         Byte-identical `{"error":"not_found"}` for non-member and
         nonexistent organization alike — the indistinguishability is the
         security property (spec section 7).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: |
+        `{"error":"forbidden"}` — the caller is a member but its role is
+        outside the operation's allowed set (spec section 7).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: |
+        `{"error":"quote_superseded"}` or `{"error":"negative_margin"}` —
+        the two business refusals of quote approval (spec 2026-11-11
+        section 4): a retired version and a below-cost price are both hard
+        blocks, machine-readable so the client can route each differently.
       content:
         application/json:
           schema:

@@ -115,10 +115,13 @@ func (e *FetchError) Permanent() bool {
 	return e.StatusCode >= 400 && e.StatusCode < 500
 }
 
-// IsPermanent unwraps err and reports whether it is a permanent FetchError.
+// IsPermanent unwraps err and reports whether it is a permanent client
+// error — FetchError and SendError share the classification (spec section
+// 3: deterministic cancels, transient retries). An untyped error stays
+// transient, which is the safe default for a retryable worker.
 func IsPermanent(err error) bool {
-	var fe *FetchError
-	return errors.As(err, &fe) && fe.Permanent()
+	var p interface{ Permanent() bool }
+	return errors.As(err, &p) && p.Permanent()
 }
 
 // ReceivingClient calls the Resend Receiving API over a bounded http.Client.

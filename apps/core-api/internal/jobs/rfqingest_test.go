@@ -207,8 +207,8 @@ func TestRfqIngestHappyPath(t *testing.T) {
 	for _, k := range keys {
 		assert.Contains(t, k, "tenants/"+org.String()+"/rfqs/"+r.ID.String()+"/")
 	}
-	got, ok := rig.storage.Get(keys[0])
-	require.True(t, ok)
+	got, err := rig.storage.Get(context.Background(), keys[0])
+	require.NoError(t, err)
 	assert.NotEmpty(t, got)
 	assert.Equal(t, 1, recv.getCalls)
 	assert.Equal(t, 2, recv.dlCalls)

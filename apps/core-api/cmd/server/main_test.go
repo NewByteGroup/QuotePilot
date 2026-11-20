@@ -107,6 +107,29 @@ func TestMuxMeOrganizationRejectsBadJWT(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+// TestMuxApproveRequiresJWT proves Authenticate wraps POST
+// /quotes/{id}/approve: no qp_access cookie dies at the uniform 401 and
+// the endpoint never sees the request.
+func TestMuxApproveRequiresJWT(t *testing.T) {
+	mux := buildMux(testConfig(), platform.NewStore(nil), markerHandler("auth"), nil)
+	rec := fire(mux, "POST", "/quotes/"+uuid.NewString()+"/approve")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.NotEqual(t, "auth", rec.Body.String())
+}
+
+// TestMuxApproveRequiresTenant proves ResolveTenant precedes the handler on
+// the approve route: a valid JWT without X-Organization-Id gets the header
+// check's 400 — ResolveTenant ran, and the endpoint never did.
+func TestMuxApproveRequiresTenant(t *testing.T) {
+	cfg := testConfig()
+	token, err := cfg.SignAccess(uuid.New(), uuid.New(), time.Now())
+	require.NoError(t, err)
+	mux := buildMux(cfg, platform.NewStore(nil), markerHandler("auth"), nil)
+	rec := fire(mux, "POST", "/quotes/"+uuid.NewString()+"/approve", "Cookie", "qp_access="+token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.NotEqual(t, "auth", rec.Body.String())
+}
+
 // TestMuxWebhookMount covers both inbox states: unmounted when buildInbox
 // returned nil (secret unset), served when the handler exists.
 func TestMuxWebhookMount(t *testing.T) {
@@ -148,6 +171,19 @@ func TestNewMailerRequiresOptIn(t *testing.T) {
 	t.Setenv("AUTH_DEV_MAILER", "")
 	_, err := newMailer(&platform.Config{})
 	require.ErrorContains(t, err, "no mail path")
+}
+
+// TestNewOutboundFrom pins the config resolution: a configured value is
+// trimmed and honored, and a blank or whitespace-only value degrades to
+// the dev-safe default instead of reaching the worker as an unusable
+// sender (Devin Review regression — whitespace once slipped the raw
+// check and cancelled every send as no_recipient).
+func TestNewOutboundFrom(t *testing.T) {
+	require.Equal(t, "quotes@platform.test",
+		newOutboundFrom(&platform.Config{ResendAPIKey: "re_x", OutboundFrom: " quotes@platform.test "}))
+	require.Equal(t, devDefaultOutboundFrom,
+		newOutboundFrom(&platform.Config{ResendAPIKey: "re_x", OutboundFrom: "   "}))
+	require.Equal(t, devDefaultOutboundFrom, newOutboundFrom(&platform.Config{}))
 }
 
 // recording collects drain events in call order.
