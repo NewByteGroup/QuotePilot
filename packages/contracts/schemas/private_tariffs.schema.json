@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quotepilot.dev/contracts/private_tariffs.schema.json",
+  "title": "PrivateTariff",
+  "description": "One normalized private-tariff row as produced by the ai-engine tariff pipeline (ADR-006 section 3) for append-only insertion into app.private_tariffs by core-api. The natural key is (carrier_or_agent, modal, origin_locode, dest_locode, equipment_or_unit, charge_category, charge_code) per RFC-002 step 3. Every row is either a priced line or a tombstone (is_removed) that retires its natural key — see oneOf; batch assignment is applied by core-api and is not part of the wire shape.",
+  "type": "object",
+  "required": [
+    "carrier_or_agent",
+    "modal",
+    "charge_category",
+    "charge_code",
+    "origin_locode",
+    "dest_locode",
+    "equipment_or_unit",
+    "is_removed",
+    "source"
+  ],
+  "properties": {
+    "carrier_or_agent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Carrier or agent issuing the rate, normalized (e.g. HAPAG, MAEU, or the origin-agent name as written by the tenant)."
+    },
+    "modal": { "$ref": "./common.schema.json#/$defs/FreightModal" },
+    "charge_category": {
+      "type": "string",
+      "enum": [
+        "OCEAN_FREIGHT",
+        "AIR_FREIGHT",
+        "SURCHARGE",
+        "ORIGIN_CHARGE",
+        "DESTINATION_CHARGE",
+        "TERMINAL",
+        "CUSTOMS",
+        "OTHER"
+      ],
+      "description": "Mirrors app.charge_category: the platform's coarse grouping. Only OCEAN_FREIGHT and the AIR_FREIGHT base are markup-eligible (RFC-001 v1.3); everything else passes through at cost."
+    },
+    "charge_code": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Free-text carrier-specific code (BAF, THC, FSC...). Deliberately not an enum: codes arrive from tariffs the platform does not control."
+    },
+    "origin_locode": { "$ref": "./common.schema.json#/$defs/Locode" },
+    "dest_locode": { "$ref": "./common.schema.json#/$defs/Locode" },
+    "equipment_or_unit": { "$ref": "./common.schema.json#/$defs/EquipmentOrUnit" },
+    "is_removed": {
+      "type": "boolean",
+      "description": "Tombstone flag (RFC-002 step 3), required on the wire: true marks this natural key as removed in the batch and the row carries no price (see oneOf); false on a normal priced row. Written to the row by core-api."
+    },
+    "currency": {
+      "$ref": "./common.schema.json#/$defs/Iso4217Currency",
+      "description": "Required on priced rows, forbidden on tombstones (see oneOf)."
+    },
+    "net_amount": {
+      "$ref": "./common.schema.json#/$defs/DecimalString",
+      "description": "Net rate per unit (per container for FCL, per chargeable kg for AIR base freight, per unit otherwise). Decimal string, never a JSON number (ADR-008): a JSON number parses as float on first touch. Required on priced rows, forbidden on tombstones (see oneOf)."
+    },
+    "min_amount": {
+      "$ref": "./common.schema.json#/$defs/DecimalString",
+      "description": "Minimum charge applied instead of net_amount when the computed amount is lower (AIR: max(min_amount, chargeable_kg x net_amount)). Optional on priced rows, forbidden on tombstones."
+    },
+    "valid_from": {
+      "$ref": "./common.schema.json#/$defs/IsoDate",
+      "description": "Required on priced rows, forbidden on tombstones (see oneOf)."
+    },
+    "valid_until": {
+      "$ref": "./common.schema.json#/$defs/IsoDate",
+      "description": "Inclusive. core-api enforces valid_from <= valid_until as a deterministic check. Required on priced rows, forbidden on tombstones."
+    },
+    "search_description": {
+      "type": "string",
+      "description": "Canonical service description embedded for retrieval ranking (codes filter first; vectors only rank valid rows). Required on priced rows, forbidden on tombstones."
+    },
+    "embedding": {
+      "$ref": "./common.schema.json#/$defs/Embedding",
+      "description": "Optional and nullable (Pedro, 2026-11-16): absent/null means ranking falls back to deterministic order. Forbidden on tombstones."
+    },
+    "embedding_model": {
+      "type": "string",
+      "description": "Pinned embedding model id (qwen/qwen3-embedding-8b in the MVP). Optional on priced rows, forbidden on tombstones."
+    },
+    "source": {
+      "type": "object",
+      "description": "Provenance of this row (decided by Pedro, 2026-11-16): where it came from, when, and with what content. content_hash + fetched_at are what the Devin repair loop and the audit screen use to state 'this line came from this file at this version'.",
+      "required": ["schema_version", "kind", "ref", "fetched_at", "content_hash"],
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Version of this source object's shape, so it can evolve without breaking previously persisted rows."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["CSV_UPLOAD", "RESEND_INBOUND", "FIRECRAWL_PUBLIC"],
+          "description": "Mirrors app.tariff_source_type ('CSV_UPLOAD','RESEND_INBOUND') plus FIRECRAWL_PUBLIC for portal-scraped tariffs. The FIRECRAWL_* value requires a new app.tariff_source_type enum value via a later migration — schema change pending Pedro's approval at that migration."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Source locator: portal URL for FIRECRAWL_PUBLIC, file name for CSV_UPLOAD, resend_message_id for RESEND_INBOUND."
+        },
+        "fetched_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the source content was retrieved."
+        },
+        "content_hash": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Hash of the fetched payload (e.g. sha256 hex); pins the row to an exact source version for audit and repair."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    {
+      "title": "PricedTariffRow",
+      "description": "A live rate: the value (net_amount) and its currency are REQUIRED, the value is a decimal string and never a JSON number (Pedro, 2026-11-16; ADR-008).",
+      "required": ["currency", "net_amount", "valid_from", "valid_until", "search_description"],
+      "properties": {
+        "is_removed": { "const": false }
+      }
+    },
+    {
+      "title": "TombstoneTariffRow",
+      "description": "A removal marker for the natural key (RFC-002 step 3): carries no price, so value fields are forbidden — a missing value can never slip through as 'optional'.",
+      "properties": {
+        "is_removed": { "const": true },
+        "currency": false,
+        "net_amount": false,
+        "min_amount": false,
+        "valid_from": false,
+        "valid_until": false,
+        "search_description": false,
+        "embedding": false,
+        "embedding_model": false
+      }
+    }
+  ],
+  "additionalProperties": false
+}

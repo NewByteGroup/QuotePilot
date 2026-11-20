@@ -154,7 +154,8 @@ jobs:
           fi
           # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3; only the
           # specs under packages/contracts/openapi are linted (other files in
-          # packages/contracts, e.g. package.json, are not OpenAPI documents).
+          # packages/contracts — package.json, the schemas/*.schema.json JSON
+          # Schemas — are not OpenAPI documents).
           find packages/contracts/openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
             | xargs -0 -n1 npx --yes @redocly/cli@2.76.0 lint
 
