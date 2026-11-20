@@ -173,9 +173,15 @@ func (w *QuoteSendWorker) deliver(ctx context.Context, tx pgx.Tx, args SendArgs,
 	if err != nil {
 		return nil, fmt.Errorf("jobs: quote_send: load org branding: %w", err)
 	}
-	req, err := w.buildSendRequest(q, rfq, branding, pdf, args.QuoteID)
+	to, err := recipient(rfq.CustomerEmail)
 	if err != nil {
 		return w.refuse(ctx, tx, args, refuseNoRecipient, err)
+	}
+	req, err := w.buildSendRequest(q, rfq, branding, pdf, args.QuoteID, to)
+	if err != nil {
+		// Sender/configuration faults are not recipient refusals: they
+		// propagate as job errors — loud, retried, then dead-lettered.
+		return nil, err
 	}
 	messageID, err := w.Sender.Send(ctx, *req)
 	if err != nil {
@@ -346,11 +352,7 @@ func recheckMargin(raw []byte) (bool, error) {
 // buildSendRequest composes the minimal send (spec S5: the PDF, the quote
 // number in the text, thread headers so the reply lands in the customer's
 // existing conversation — S4's render owns the real HTML later).
-func (w *QuoteSendWorker) buildSendRequest(q sendQuote, rfq sendRfq, b sendBranding, pdf []byte, quoteID uuid.UUID) (*resend.SendRequest, error) {
-	to, err := recipient(rfq.CustomerEmail)
-	if err != nil {
-		return nil, err
-	}
+func (w *QuoteSendWorker) buildSendRequest(q sendQuote, rfq sendRfq, b sendBranding, pdf []byte, quoteID uuid.UUID, to string) (*resend.SendRequest, error) {
 	from, err := fromAddress(b, w.OutboundFrom)
 	if err != nil {
 		return nil, err

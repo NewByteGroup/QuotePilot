@@ -304,6 +304,31 @@ func TestQuoteSendUnapprovedRefuses(t *testing.T) {
 	assert.Equal(t, "unapproved", meta["reason"])
 }
 
+// TestQuoteSendEmptySenderIsJobError is the Devin-Review regression pin:
+// an empty outbound sender is a wiring fault, not a recipient refusal —
+// Work must return a plain error (retried, eventually dead-lettered as a
+// technical failure), send nothing, and write no send_refused audit.
+func TestQuoteSendEmptySenderIsJobError(t *testing.T) {
+	db := testenv.Open(t)
+	f := seedSend(t, db, healthyFixture())
+	storage := platform.NewFakeStorage()
+	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
+	sender := &resend.FakeSender{MessageID: "x"}
+	worker := jobs.NewQuoteSendWorker(db, sender, storage, "   ")
+
+	err := worker.Work(context.Background(), sendJob(f.org, f.quote))
+	require.Error(t, err)
+	var jce *rivertype.JobCancelError
+	assert.False(t, errors.As(err, &jce), "a sender wiring fault must retry, not JobCancel")
+	assert.Equal(t, 0, sender.Calls())
+
+	s := loadSendState(t, db, f)
+	assert.Equal(t, "DRAFT", s.Status)
+	assert.Equal(t, "READY", s.RfqState)
+	n, _ := auditCount(t, db, f.org, "quote.send_refused")
+	assert.Equal(t, 0, n, "no refusal audit — the refusal vocabulary is for recipient/data defects")
+}
+
 // TestQuoteSendMarginFlipRefuses is the defense-in-depth check: data
 // changed between approval and send → the RFQ parks NEEDS_REVIEW with
 // NEGATIVE_MARGIN (the controlled constant), the refusal is audited and

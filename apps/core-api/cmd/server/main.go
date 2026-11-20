@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -202,8 +203,8 @@ const devDefaultOutboundFrom = "onboarding@resend.dev"
 // a missing cosmetic var a stricter gate than the API key itself (and a
 // wrong-domain From already fails loudly as an audited permanent error).
 func newOutboundFrom(cfg *platform.Config) string {
-	if cfg.OutboundFrom != "" {
-		return cfg.OutboundFrom
+	if from := strings.TrimSpace(cfg.OutboundFrom); from != "" {
+		return from
 	}
 	if cfg.ResendAPIKey != "" {
 		slog.Warn("server: QP_OUTBOUND_FROM unset — quote_send From falls back to " + devDefaultOutboundFrom + " (dev-safe only; set a verified domain)")

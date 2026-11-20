@@ -173,6 +173,19 @@ func TestNewMailerRequiresOptIn(t *testing.T) {
 	require.ErrorContains(t, err, "no mail path")
 }
 
+// TestNewOutboundFrom pins the config resolution: a configured value is
+// trimmed and honored, and a blank or whitespace-only value degrades to
+// the dev-safe default instead of reaching the worker as an unusable
+// sender (Devin Review regression — whitespace once slipped the raw
+// check and cancelled every send as no_recipient).
+func TestNewOutboundFrom(t *testing.T) {
+	require.Equal(t, "quotes@platform.test",
+		newOutboundFrom(&platform.Config{ResendAPIKey: "re_x", OutboundFrom: " quotes@platform.test "}))
+	require.Equal(t, devDefaultOutboundFrom,
+		newOutboundFrom(&platform.Config{ResendAPIKey: "re_x", OutboundFrom: "   "}))
+	require.Equal(t, devDefaultOutboundFrom, newOutboundFrom(&platform.Config{}))
+}
+
 // recording collects drain events in call order.
 type recording struct {
 	mu     sync.Mutex
