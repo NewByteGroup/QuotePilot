@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,6 +193,11 @@ func TestUserSessionLockSerializesIssuers(t *testing.T) {
 	holderLocked := make(chan struct{})
 	releaseHolder := make(chan struct{})
 	holderDone := make(chan error, 1)
+	// Any failed assertion below must still release the holder — a Fatalf
+	// that skips this would strand its goroutine on releaseHolder holding a
+	// pooled connection, and the testenv cleanup would hang (Devin Review).
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseHolder) })
 	go func() {
 		holderDone <- store.InStoreTx(ctx, func(tx *platform.Store) error {
 			if err := tx.RevokeUserSessions(ctx, userA); err != nil {
@@ -231,7 +237,7 @@ func TestUserSessionLockSerializesIssuers(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 	}
 
-	close(releaseHolder)
+	releaseOnce.Do(func() { close(releaseHolder) })
 	require.NoError(t, <-holderDone)
 	select {
 	case err := <-waiterDone:
