@@ -108,7 +108,7 @@ Stage transitions write the RFQ status and notify through Postgres `NOTIFY`. `co
 
 ## Open items
 
-- Exact retry counts, backoff and timeouts per stage (tune during the spike).
+- ~~Exact retry counts, backoff and timeouts per stage (tune during the spike).~~ **Resolved 2026-11-16:** per-stage attempts, timeouts and retry classes are decided in `docs/specs/2026-11-11-staged-quote-pipeline.md` §3 — classify first, transient retries, deterministic cancels via `river.JobCancel`.
 - 4A/4B sequence: accepted 2026-11-16 (see Pipeline stages). Still open under it: the exact Hapag offer wire contract in `packages/contracts` and the `app.carrier_offers` migration (outcome, `request_hash`, unique key), both needing Pedro's approval at their PRs.
 - ~~AIR fallback for a missing or expired tariff.~~ **Resolved 2026-11-16:** there is no fallback price. The engine returns `INCOMPLETE` and the RFQ parks in `NEEDS_REVIEW` with `review_reason` `MISSING_TARIFF` or `STALE_TARIFF`; the analyst fixes the tariff and reprocesses. See `docs/specs/2026-11-11-staged-quote-pipeline.md`, S3b and Reprocess.
 - ~~Whether tariff-update emails reuse this pipeline or get their own import path.~~ **Resolved 2026-11-12:** a `TARIFF_UPDATE` email never enters pricing; it parks in `NEEDS_REVIEW` with its classification reason and a "reclassify as RFQ" action, until the reviewed tariff-import path of RFC-002 exists. See the same spec, S2.

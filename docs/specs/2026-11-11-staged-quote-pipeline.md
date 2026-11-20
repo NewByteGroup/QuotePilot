@@ -145,7 +145,8 @@ RFC-004) → validate against the extraction contract + sanity bounds → write
 `extracted_payload_json`, `extraction_confidence` → confidence ≥ threshold
 ⇒ enqueue S3a (`PRICING`); below ⇒ `NEEDS_REVIEW` (human queue, fields
 pre-filled — the gate is the triage). Invalid/uncontracted ai-engine output
-⇒ `FAILED` with reason, never persisted.
+retries at most once (table above) then parks `NEEDS_REVIEW` with the reason —
+the invalid payload is never written to `extracted_payload_json`.
 
 - `TARIFF_UPDATE` parks as `NEEDS_REVIEW` (RFC-002: a tariff never enters
   pricing without a reviewed batch) — with Pedro's three requirements,
