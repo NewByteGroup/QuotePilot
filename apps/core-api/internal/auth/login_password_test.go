@@ -141,6 +141,86 @@ func TestLoginPasswordUniform401(t *testing.T) {
 	assert.Empty(t, r.enq.ids)
 }
 
+// TestLoginPasswordFieldShapes pins the presence contract the raw-message
+// binding exists for (Devin Review): the six wire shapes of the `password`
+// member each get exactly one outcome — absent is the magic-link 200, a JSON
+// string is a password attempt ("" just a wrong one), and `null` plus every
+// non-string is a 400, never a link. Each case runs its own rig: six
+// requests to one recipient would outspend the 5-per-window email bucket.
+func TestLoginPasswordFieldShapes(t *testing.T) {
+	seed := func(t *testing.T, r *rig, userID uuid.UUID) {
+		r.q.users["ada@test.dev"] = userID
+		r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+		r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
+		r.q.members["ada@test.dev"] = []platform.Membership{
+			{OrgID: uuid.New(), Name: "Acme Freight", Slug: "acme-freight", Role: platform.RoleOwner},
+		}
+	}
+
+	t.Run("absent requests a magic link", func(t *testing.T) {
+		r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+		seed(t, r, uuid.New())
+		rec := r.postLogin(t, `{"email":"ada@test.dev"}`)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, `{"status":"ok"}`+"\n", rec.Body.String())
+		assert.Len(t, r.q.outboxCreates, 1, "the magic-link staging ran")
+		assert.Empty(t, r.q.authFinds, "the credential lookup did not")
+	})
+
+	t.Run("null is a bad request", func(t *testing.T) {
+		r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+		seed(t, r, uuid.New())
+		rec := r.postLogin(t, `{"email":"ada@test.dev","password":null}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Empty(t, r.q.outboxCreates, "null must not become a magic link")
+		assert.Empty(t, r.q.authFinds, "null is not a password attempt")
+	})
+
+	t.Run("empty string is a password attempt", func(t *testing.T) {
+		r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+		seed(t, r, uuid.New())
+		rec := r.postLogin(t, `{"email":"ada@test.dev","password":""}`)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+		assert.Len(t, r.q.authFinds, 1, "the credential lookup ran")
+		assert.Empty(t, r.q.outboxCreates)
+	})
+
+	t.Run("a correct password answers the session payload", func(t *testing.T) {
+		r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+		userID := uuid.New()
+		seed(t, r, userID)
+		rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var body authapi.SessionResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, userID.String(), body.Profile.ID)
+		assert.Len(t, rec.Result().Cookies(), 2)
+		assert.Empty(t, r.q.outboxCreates)
+	})
+
+	t.Run("a number is a bad request", func(t *testing.T) {
+		r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+		seed(t, r, uuid.New())
+		rec := r.postLogin(t, `{"email":"ada@test.dev","password":123}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Empty(t, r.q.outboxCreates)
+		assert.Empty(t, r.q.authFinds)
+	})
+
+	t.Run("an object is a bad request", func(t *testing.T) {
+		r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+		seed(t, r, uuid.New())
+		rec := r.postLogin(t, `{"email":"ada@test.dev","password":{}}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Empty(t, r.q.outboxCreates)
+		assert.Empty(t, r.q.authFinds)
+	})
+}
+
 // TestLoginPasswordEmptyStringRoutesToPasswordPath pins the presence
 // contract: "password":"" is a password attempt (just a wrong one), not a
 // magic-link request — so it answers 401 and stages no send.

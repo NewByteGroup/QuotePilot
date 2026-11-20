@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -66,7 +67,10 @@ func clientIPFromContext(ctx context.Context) (string, bool) {
 // answer with the same response object so the wire cannot tell them apart.
 // `password` present — even empty — is the password path: verify the
 // argon2id hash and answer exactly like POST /auth/session on success, or
-// the single uniform 401 on any failure.
+// the single uniform 401 on any failure. An explicit JSON `null` or a
+// non-string value is neither path — it is a malformed request and earns a
+// 400, so the generated field stays json.RawMessage to keep null distinct
+// from absent (*string and *json.RawMessage both collapse both to nil).
 //
 // Check order is the same on both paths: the IP bucket is spent before the
 // email is even parsed — spec section 8.1 meters requests and the route
@@ -94,13 +98,33 @@ func (e *Endpoints) PostAuthLogin(
 	if !e.emailLimiter.Allow(email) {
 		return loginRateLimited(), nil
 	}
-	if request.Body.Password != nil {
-		return e.passwordLogin(ctx, email, *request.Body.Password)
+	password, present, valid := decodeLoginPassword(request.Body.Password)
+	if !valid {
+		return loginBadRequest(), nil
+	}
+	if present {
+		return e.passwordLogin(ctx, email, password)
 	}
 	if err := e.deliverMagicLink(ctx, email); err != nil {
 		return nil, err
 	}
 	return loginStatusOK()
+}
+
+// decodeLoginPassword maps the raw `password` member onto the handler's
+// three-way dispatch: an absent member (empty slice) requests a magic link;
+// a JSON string — "" included — is a password attempt; `null` and
+// non-strings are malformed and must reach neither path, or a client that
+// sent a broken credential would get the magic-link 200.
+func decodeLoginPassword(raw json.RawMessage) (password string, present, valid bool) {
+	if len(raw) == 0 {
+		return "", false, true
+	}
+	var pw *string
+	if err := json.Unmarshal(raw, &pw); err != nil || pw == nil {
+		return "", false, false
+	}
+	return *pw, true, true
 }
 
 // parseLoginEmail accepts only a bare RFC 5322 addr-spec — no display name,

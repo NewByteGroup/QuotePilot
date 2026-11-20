@@ -387,7 +387,16 @@ components:
             Present — even as the empty string — selects the password-login
             path (ADR-005 amendment 2026-11-16); absent selects the magic-link
             request. Deliberately no `minLength`: an empty password is just a
-            wrong one and earns the same uniform 401.
+            wrong one and earns the same uniform 401. An explicit JSON `null`
+            or a non-string value is malformed — 400, never a magic link.
+          # x-go-type keeps the generated field as raw JSON so the handler
+          # can tell "absent" apart from `null` — a typed *string collapses
+          # both to nil and would treat an explicit null as a link request
+          # (Devin Review). The pointer form *json.RawMessage collapses the
+          # same way, hence x-go-type-skip-optional-pointer. The wire contract
+          # is unchanged: still a string.
+          x-go-type: json.RawMessage
+          x-go-type-skip-optional-pointer: true
     LoginResponse:
       type: object
       additionalProperties: false

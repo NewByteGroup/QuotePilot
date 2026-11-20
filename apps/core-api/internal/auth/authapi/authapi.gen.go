@@ -128,8 +128,9 @@ type LoginRequest struct {
 	// Password Present — even as the empty string — selects the password-login
 	// path (ADR-005 amendment 2026-11-16); absent selects the magic-link
 	// request. Deliberately no `minLength`: an empty password is just a
-	// wrong one and earns the same uniform 401.
-	Password *string `json:"password,omitempty"`
+	// wrong one and earns the same uniform 401. An explicit JSON `null`
+	// or a non-string value is malformed — 400, never a magic link.
+	Password json.RawMessage `json:"password,omitempty"`
 }
 
 // LoginResponse defines model for LoginResponse.
