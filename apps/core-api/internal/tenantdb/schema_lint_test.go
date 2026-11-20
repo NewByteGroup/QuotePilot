@@ -80,6 +80,10 @@ var tenantFunctions = []string{
 	"app.read_mail_outbox(uuid)",
 	"app.delete_mail_outbox(uuid)",
 	"app.get_user_auth_by_email(text)",
+	"app.create_password_reset_token(uuid, text, timestamptz)",
+	"app.consume_password_reset_token(text)",
+	"app.set_user_password(uuid, text)",
+	"app.revoke_user_sessions(uuid)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;
@@ -285,6 +289,7 @@ func TestSchemaLintGrants(t *testing.T) {
 		"app.rotate_session(text, text, timestamptz)": "TABLE(session_id uuid, user_id uuid, rotated boolean)",
 		"app.get_user_profile(uuid)":                  "TABLE(id uuid, email text, full_name text)",
 		"app.get_user_auth_by_email(text)":            "TABLE(id uuid, password_hash text)",
+		"app.read_mail_outbox(uuid)":                  "TABLE(link_url text, recipient_email text, expires_at timestamp with time zone, purpose text)",
 	} {
 		var result string
 		require.NoError(t, migrator.QueryRow(ctx,
