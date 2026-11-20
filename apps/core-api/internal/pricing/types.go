@@ -74,6 +74,32 @@ const (
 	CategorySurcharge       Category = "SURCHARGE"
 )
 
+// PayloadGroup is the customer-facing payload grouping (RFC-001 §5,
+// pilot meeting 2026-11-16): the quote is grouped and totalled in each
+// original currency under three buckets — international freight, local
+// fees and service taxes. SERVICE_TAXES exists in the vocabulary but
+// stays empty today: service taxes on the agency fee are decided
+// business-wise, but their rates and basis are not in Input — tax
+// lines land in this group only once those are fixed.
+type PayloadGroup string
+
+const (
+	GroupInternationalFreight PayloadGroup = "INTERNATIONAL_FREIGHT"
+	GroupLocalFees            PayloadGroup = "LOCAL_FEES"
+	GroupServiceTaxes         PayloadGroup = "SERVICE_TAXES"
+)
+
+// payloadGroup maps a line category to its customer-facing payload
+// group: INTL_FREIGHT stands alone; every local charge — origin
+// charges, terminal/storage, customs dispatch and carrier surcharges —
+// lands in LOCAL_FEES. No category maps to SERVICE_TAXES yet.
+func payloadGroup(cat Category) PayloadGroup {
+	if cat == CategoryIntlFreight {
+		return GroupInternationalFreight
+	}
+	return GroupLocalFees
+}
+
 // ChargeCategory mirrors app.charge_category on private tariff rows and
 // carrier offer charges: what the money is for, before the engine maps
 // it to a quote line group.
@@ -147,9 +173,12 @@ const (
 	AssumptionPTAXPrevBusinessDay    Assumption = "PTAX_PREV_BUSINESS_DAY_SELL"
 	AssumptionNoInsuranceLine        Assumption = "NO_INSURANCE_LINE"
 	AssumptionAirFactor              Assumption = "AIR_FACTOR_166_67"
-	AssumptionTaxesExcluded          Assumption = "TAXES_EXCLUDED"
-	AssumptionDDPNothingPayable      Assumption = "DDP_NOTHING_PAYABLE"
-	AssumptionOfferStrictCoverage    Assumption = "OFFER_STRICT_COVERAGE"
+	// TAXES_EXCLUDED: taxes are excluded from the price today — the
+	// SERVICE_TAXES payload group exists in the shape but carries no
+	// lines until the ISS/CBS/IOF rates and basis are decided.
+	AssumptionTaxesExcluded       Assumption = "TAXES_EXCLUDED"
+	AssumptionDDPNothingPayable   Assumption = "DDP_NOTHING_PAYABLE"
+	AssumptionOfferStrictCoverage Assumption = "OFFER_STRICT_COVERAGE"
 )
 
 // Line flag vocabulary (spec §9), applied to Line.Flags.
