@@ -236,9 +236,9 @@ func (a *assembly) missingFreight(v offerVerdict, res freightResult) {
 }
 
 // emitPass appends a pass-through line (sell = rounded cost, spec §5);
-// markedUp false keeps SellOriginal at the original amount.
+// the original-currency sell is the same rounded amount.
 func (a *assembly) emitPass(c candLine) {
-	a.lines = append(a.lines, toLine(c, passThroughSell(c), false))
+	a.lines = append(a.lines, toLine(c, passThroughSell(c), passThroughSellOriginal(c)))
 }
 
 func freightMissingParam(m Modal) string {
@@ -286,8 +286,12 @@ func (a *assembly) priceFreightWinners(winners []candLine) {
 			winners[i].flags = append(winners[i].flags, floorFlags...)
 		}
 	}
+	// The original-currency sells allocate their own cents inside each
+	// currency subgroup, so the displayed lines sum exactly like the BRL
+	// sells do (spec §7 invariant in the customer-visible space too).
+	sellsOrig := originalSells(winners, sells)
 	for i, sell := range sells {
-		a.lines = append(a.lines, toLine(winners[i], sell, true))
+		a.lines = append(a.lines, toLine(winners[i], sell, sellsOrig[i]))
 	}
 }
 
@@ -325,7 +329,7 @@ func (a *assembly) priceAlternates(res freightResult) {
 			c.flags = append(c.flags, FlagMinMarkupApplied)
 			c.flags = append(c.flags, floorFlags...)
 		}
-		a.alts = append(a.alts, toLine(c, sell, true))
+		a.alts = append(a.alts, toLine(c, sell, markedUpSellOriginal(c, sell)))
 	}
 }
 
@@ -396,7 +400,7 @@ func (a *assembly) buildGroup(s groupSpec, resolved []TariffCandidate, v offerVe
 		a.emitPass(c)
 	}
 	for _, c := range res.alternates {
-		a.alts = append(a.alts, toLine(c, passThroughSell(c), false))
+		a.alts = append(a.alts, toLine(c, passThroughSell(c), passThroughSellOriginal(c)))
 	}
 }
 

@@ -29,8 +29,9 @@ type Output struct {
 }
 
 // Line is one auditable quote line: its payload group, source pin,
-// original currency amount and sell, the FX rate actually applied,
-// rounded BRL cost and sell, and machine flags (spec §2).
+// original currency amount and sell — both rounded to the currency's
+// minor unit, like the BRL cost and sell — the FX rate actually
+// applied, and machine flags (spec §2).
 type Line struct {
 	Category         Category        `json:"category"`
 	Group            PayloadGroup    `json:"group"`
