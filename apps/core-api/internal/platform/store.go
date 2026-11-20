@@ -136,6 +136,31 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string) (uuid.UUID, b
 	return *id, true, nil
 }
 
+// GetUserAuthByEmail is the password path's credential lookup (ADR-005
+// amendment 2026-11-16): one call returns the user id AND the stored
+// argon2id PHC hash — both pieces the indistinguishable-401 flow needs
+// before its verify. An unknown email is (uuid.Nil, "", false, nil), the
+// same not-found contract FindUserByEmail keeps; a NULL hash comes back as
+// "" with found=true — the handler maps it to the same 401 as a wrong
+// password.
+//
+//	userID, hash, found, err := store.GetUserAuthByEmail(ctx, email)
+func (s *Store) GetUserAuthByEmail(ctx context.Context, email string) (userID uuid.UUID, passwordHash string, found bool, err error) {
+	var hash *string
+	err = s.q.QueryRow(ctx,
+		`SELECT id, password_hash FROM app.get_user_auth_by_email($1)`, email).Scan(&userID, &hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, "", false, nil
+	}
+	if err != nil {
+		return uuid.Nil, "", false, fmt.Errorf("platform: get_user_auth_by_email: %w", err)
+	}
+	if hash == nil {
+		return userID, "", true, nil
+	}
+	return userID, *hash, true, nil
+}
+
 // CreateLoginToken inserts one magic-link token and returns its id; the
 // caller computed the SHA-256 hash and the LoginTTL expiry (spec section 5).
 //
