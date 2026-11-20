@@ -137,7 +137,8 @@ BEGIN
     ('app.create_password_reset_token(uuid, text, timestamptz)'),
     ('app.consume_password_reset_token(text)'),
     ('app.set_user_password(uuid, text)'),
-    ('app.revoke_user_sessions(uuid)')
+    ('app.revoke_user_sessions(uuid)'),
+    ('app.revoke_user_pending_tokens(uuid)')
   ) AS f(fn)
   WHERE to_regprocedure(f.fn) IS NOT NULL
     AND NOT has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
@@ -173,7 +174,8 @@ BEGIN
         ('app.create_password_reset_token(uuid, text, timestamptz)'),
         ('app.consume_password_reset_token(text)'),
         ('app.set_user_password(uuid, text)'),
-        ('app.revoke_user_sessions(uuid)')
+        ('app.revoke_user_sessions(uuid)'),
+        ('app.revoke_user_pending_tokens(uuid)')
       ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_app EXECUTE surface in app must equal the tenant-function allowlist; extra: %', bad;

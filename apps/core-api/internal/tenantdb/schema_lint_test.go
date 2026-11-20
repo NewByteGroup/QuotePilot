@@ -84,6 +84,7 @@ var tenantFunctions = []string{
 	"app.consume_password_reset_token(text)",
 	"app.set_user_password(uuid, text)",
 	"app.revoke_user_sessions(uuid)",
+	"app.revoke_user_pending_tokens(uuid)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;
