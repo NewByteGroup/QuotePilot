@@ -20,11 +20,11 @@ func TestFakeStorageCapturesKeyAndBytes(t *testing.T) {
 	require.NoError(t, store.Put(context.Background(), "tenants/org1/rfqs/rfq1/a.pdf", body))
 	body[0] = 'X' // caller mutation must not reach the stored copy
 
-	got, ok := store.Get("tenants/org1/rfqs/rfq1/a.pdf")
-	require.True(t, ok)
+	got, err := store.Get(context.Background(), "tenants/org1/rfqs/rfq1/a.pdf")
+	require.NoError(t, err)
 	assert.Equal(t, []byte("attachment-bytes"), got)
 	assert.Equal(t, []string{"tenants/org1/rfqs/rfq1/a.pdf"}, store.Keys())
 
-	_, ok = store.Get("tenants/org1/rfqs/rfq1/missing")
-	assert.False(t, ok)
+	_, err = store.Get(context.Background(), "tenants/org1/rfqs/rfq1/missing")
+	assert.ErrorIs(t, err, platform.ErrObjectNotFound)
 }
