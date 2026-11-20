@@ -35,9 +35,9 @@
         "20DV", "40DV", "40HC", "45HC",
         "20RF", "40RF", "20OT", "40OT",
         "20FR", "40FR", "20TK", "40TK",
-        "PALLET", "PIECE", "ULD", "OTHER"
+        "KG", "PALLET", "PIECE", "ULD", "OTHER"
       ],
-      "description": "Equipment for FCL (dry/reefer/open-top/flat-rack/tank in 20/40/45 ft) or a handling unit for AIR and LCL. Business-reviewable list; extend here only, never in generated code."
+      "description": "Equipment for FCL (dry/reefer/open-top/flat-rack/tank in 20/40/45 ft) or a handling unit for AIR and LCL. Air freight tariffs are priced per chargeable kilogram (RFC-001 section 5: Net_Air = max(min_amount, chargeable_kg x net_amount)), so AIR base-freight rows use KG as the unit. Business-reviewable list; extend here only, never in generated code."
     },
     "EvidenceSource": {
       "type": "string",

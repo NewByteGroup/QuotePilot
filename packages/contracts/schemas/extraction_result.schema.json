@@ -60,6 +60,10 @@
         "volume_m3": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString in cubic meters." },
         "cargo_value_amount": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString; declared cargo value, base of the CIF customs value." },
         "cargo_value_currency": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Iso4217Currency." },
+        "declared_freight_amount": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString; freight amount declared in the documents, an input to the import CIF base under the CIF Incoterm family — NOT a charge line (RFC-001 section 4). Optional: absent when the email declares none." },
+        "declared_freight_currency": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Iso4217Currency for declared_freight_amount." },
+        "declared_insurance_amount": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: DecimalString; insurance amount declared in the documents, an input to the import CIF base (declared or zero) — NOT a charge line (RFC-001 section 4). Optional: absent when the email declares none." },
+        "declared_insurance_currency": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: Iso4217Currency for declared_insurance_amount." },
         "ncm": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: 8-digit NCM code (optional field; checked against the NCM reference table)." },
         "ready_date": { "$ref": "./common.schema.json#/$defs/FieldValue", "description": "value: IsoDate; cargo-ready date (optional)." }
       },
