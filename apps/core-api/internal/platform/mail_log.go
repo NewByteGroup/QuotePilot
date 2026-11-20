@@ -34,3 +34,12 @@ func (s *LogMailSender) SendMagicLink(ctx context.Context, to, url string) error
 		"to", to, "url", url)
 	return nil
 }
+
+// SendPasswordReset is the reset link's dev twin — same contract as
+// SendMagicLink: the tokened URL is logged on purpose so a developer can
+// click through the set-password page without a mailbox.
+func (s *LogMailSender) SendPasswordReset(ctx context.Context, to, url string) error {
+	s.logger.WarnContext(ctx, "platform: password reset link (dev sender — no mailbox configured)",
+		"to", to, "url", url)
+	return nil
+}
