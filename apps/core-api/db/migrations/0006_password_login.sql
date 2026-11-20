@@ -26,13 +26,20 @@ COMMENT ON COLUMN app.users.password_hash IS
 -- reads exactly one row before its argon2id verify. lower(btrim()) mirrors
 -- find_user_by_email and the users.email CHECK, which stores lowercase
 -- only; an unknown email is an empty set, indistinguishable from no answer.
+--
+-- This function deliberately pins search_path to pg_catalog, pg_temp — the
+-- ADR-005 section 36 prescription for SECURITY DEFINER functions — instead
+-- of the 0003 auth family's SET search_path = app: it hands back a password
+-- hash, so it takes the stronger anti-hijack posture now. Every reference
+-- is fully schema-qualified (app.users; lower/btrim resolve in pg_catalog).
+-- Aligning the older auth family is a tracked follow-up, not done here.
 -- +goose StatementBegin
 CREATE FUNCTION app.get_user_auth_by_email(p_email text)
     RETURNS TABLE (id uuid, password_hash text)
     LANGUAGE sql
     STABLE
     SECURITY DEFINER
-    SET search_path = app
+    SET search_path = pg_catalog, pg_temp
 AS $fn$
     SELECT u.id, u.password_hash
     FROM app.users AS u
