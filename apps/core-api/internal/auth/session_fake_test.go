@@ -25,11 +25,15 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 )
 
-// tokenRec is one auth_login_tokens row as consume_login_token sees it.
+// tokenRec is one auth_login_tokens row as the consume functions see it
+// (migration 0007): purpose is the credential class the consumes filter
+// on — "login" mints sessions, "password_reset" sets passwords, and the
+// two never exchange.
 type tokenRec struct {
 	userID    uuid.UUID
 	expiresAt time.Time
 	consumed  bool
+	purpose   string
 }
 
 // profileRec is one get_user_profile row; fullName "" stands in for NULL —
@@ -148,8 +152,9 @@ func (q *sessionQuerier) Query(_ context.Context, sql string, args ...any) (pgx.
 
 // consumeRow answers SELECT app.consume_login_token($1) with the function's
 // atomic semantics: a hit marks the token consumed and a second consume —
-// like an expired or unknown hash — scans NULL, the (Nil, false, nil) miss
-// the Store maps.
+// like an expired, wrong-purpose or unknown hash — scans NULL, the
+// (Nil, false, nil) miss the Store maps. The purpose check mirrors the
+// migration-0007 predicate, so a planted reset token misses here.
 func (q *sessionQuerier) consumeRow(args []any) pgx.Row {
 	return stubRow{scan: func(dest ...any) error {
 		if err := q.fail["consume_login_token"]; err != nil {
@@ -159,7 +164,7 @@ func (q *sessionQuerier) consumeRow(args []any) pgx.Row {
 		q.consumes = append(q.consumes, hash)
 		out := dest[0].(**uuid.UUID)
 		tok, ok := q.tokens[hash]
-		if !ok || tok.consumed || !q.now().Before(tok.expiresAt) {
+		if !ok || tok.purpose != platform.MailPurposeLogin || tok.consumed || !q.now().Before(tok.expiresAt) {
 			*out = nil
 			return nil
 		}
@@ -304,9 +309,17 @@ func newSessionRig(t *testing.T, cfg *platform.Config) *sessionRig {
 // the token for the request body.
 func (r *sessionRig) plantToken(t *testing.T, userID uuid.UUID, expiresAt time.Time) string {
 	t.Helper()
+	return r.plantTokenPurpose(t, userID, expiresAt, platform.MailPurposeLogin)
+}
+
+// plantTokenPurpose records a token of an arbitrary credential class — the
+// cross-purpose proofs plant a 'password_reset' row and assert the session
+// consume still misses it.
+func (r *sessionRig) plantTokenPurpose(t *testing.T, userID uuid.UUID, expiresAt time.Time, purpose string) string {
+	t.Helper()
 	token, err := platform.NewOpaqueToken()
 	require.NoError(t, err)
-	r.q.tokens[platform.HashToken(token)] = &tokenRec{userID: userID, expiresAt: expiresAt}
+	r.q.tokens[platform.HashToken(token)] = &tokenRec{userID: userID, expiresAt: expiresAt, purpose: purpose}
 	return token
 }
 
