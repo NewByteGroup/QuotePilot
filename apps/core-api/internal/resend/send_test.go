@@ -132,6 +132,27 @@ func TestSendingClientErrorClassification(t *testing.T) {
 	}
 }
 
+// TestSendingClientIncompleteReceipt: a 2xx body without an id is an
+// incomplete receipt, not a deterministic failure — the error stays
+// untyped (transient) so River retries with the same Idempotency-Key and
+// the provider returns the recorded send. Cancelling here would lose a
+// delivery that already happened.
+func TestSendingClientIncompleteReceipt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := resend.NewSendingClient("k")
+	c.BaseURL = srv.URL
+	_, err := c.Send(context.Background(), sendFixture())
+	require.Error(t, err)
+	assert.False(t, resend.IsPermanent(err), "incomplete 2xx must retry, not cancel")
+	var se *resend.SendError
+	assert.False(t, errors.As(err, &se), "untyped error — not a classified SendError")
+	assert.Contains(t, err.Error(), "no message id")
+}
+
 // TestSendingClientTransient: a transport error is untyped and therefore
 // transient — River retries it.
 func TestSendingClientTransient(t *testing.T) {

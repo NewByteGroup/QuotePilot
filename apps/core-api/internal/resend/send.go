@@ -199,7 +199,12 @@ func (c *SendingClient) Send(ctx context.Context, req SendRequest) (string, erro
 		return "", fmt.Errorf("resend: send_email: decode response: %w", err)
 	}
 	if strings.TrimSpace(out.ID) == "" {
-		return "", &SendError{Op: "send_email", Client: true, Detail: "response carries no message id"}
+		// An incomplete 2xx receipt is NOT deterministic: the provider may
+		// have accepted the send and trimmed the body, so cancelling here
+		// would kill a delivery an idempotent retry recovers — the retry
+		// carries the same Idempotency-Key and the provider returns the
+		// recorded send's id. Untyped error → transient → River retries.
+		return "", fmt.Errorf("resend: send_email: 2xx response carries no message id")
 	}
 	return out.ID, nil
 }
