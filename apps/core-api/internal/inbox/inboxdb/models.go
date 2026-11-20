@@ -593,6 +593,8 @@ type AppAuthLoginToken struct {
 	ExpiresAt  pgtype.Timestamptz
 	ConsumedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+	// Credential class: 'login' tokens consume at POST /auth/session for a session, 'password_reset' tokens consume at POST /auth/password for a credential write. The consumes filter on it so the two classes can never exchange (ADR-005 amendment 2026-11-16).
+	Purpose string
 }
 
 type AppAuthMailOutbox struct {
