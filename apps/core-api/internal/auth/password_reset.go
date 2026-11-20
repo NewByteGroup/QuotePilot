@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -107,9 +108,12 @@ func (e *Endpoints) PostAuthPassword(
 }
 
 // passwordWithinPolicy is the contract's 8..128 bound — enforced here
-// because the binder does not apply minLength/maxLength.
+// because the binder does not apply minLength/maxLength. minLength counts
+// JSON Schema characters (code points), so the check counts runes, not
+// bytes — a multibyte password must not slip under the bound on width.
 func passwordWithinPolicy(password string) bool {
-	return len(password) >= passwordMinLen && len(password) <= passwordMaxLen
+	n := utf8.RuneCountInString(password)
+	return n >= passwordMinLen && n <= passwordMaxLen
 }
 
 // deliverPasswordReset is deliverMagicLink's twin (login.go documents the

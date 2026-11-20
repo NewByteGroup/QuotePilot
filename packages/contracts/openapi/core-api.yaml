@@ -151,8 +151,6 @@ paths:
                 $ref: '#/components/schemas/LoginResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':

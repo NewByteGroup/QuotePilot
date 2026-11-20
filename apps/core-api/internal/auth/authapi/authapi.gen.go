@@ -969,20 +969,6 @@ func (response PostAuthPasswordReset400JSONResponse) VisitPostAuthPasswordResetR
 	return err
 }
 
-type PostAuthPasswordReset401JSONResponse struct{ UnauthorizedJSONResponse }
-
-func (response PostAuthPasswordReset401JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
-
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(response); err != nil {
-		return err
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(401)
-	_, err := buf.WriteTo(w)
-	return err
-}
-
 type PostAuthPasswordReset429JSONResponse struct{ RateLimitedJSONResponse }
 
 func (response PostAuthPasswordReset429JSONResponse) VisitPostAuthPasswordResetResponse(w http.ResponseWriter) error {
