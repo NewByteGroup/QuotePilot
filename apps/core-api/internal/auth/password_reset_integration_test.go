@@ -172,6 +172,75 @@ func TestTokenPurposesDoNotExchangePostgres(t *testing.T) {
 	assert.Nil(t, hash, "a magic link must never set a password")
 }
 
+// TestUserSessionLockSerializesIssuers is the regression pin for the
+// migration-0007 barrier itself (Devin Review): the E2E asserts the
+// serialized OUTCOME, which a lock-free implementation would also produce
+// — only this interleave proves the barrier exists. Two live connections
+// interleave deterministically: the holder of the user-scoped advisory
+// lock must block a second issuer for the SAME user until its commit,
+// while a different user never waits — the hashtextextended key formula
+// platform.LockUserSession and the definer functions share.
+func TestUserSessionLockSerializesIssuers(t *testing.T) {
+	migrator := testenv.MigratorPool(t)
+	ctx := context.Background()
+	userA, userB := uuid.New(), uuid.New()
+
+	// Holder: takes user A's barrier inside an open transaction — the
+	// pg_catalog function needs no grant, so any role proves the mechanics.
+	conn1, err := migrator.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn1.Release()
+	tx1, err := conn1.Begin(ctx)
+	require.NoError(t, err)
+	_, err = tx1.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userA.String())
+	require.NoError(t, err)
+
+	// Waiter: the SAME user's lock on a second transaction must block for
+	// as long as the holder stays uncommitted.
+	conn2, err := migrator.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn2.Release()
+	waiterDone := make(chan error, 1)
+	go func() {
+		tx2, err := conn2.Begin(ctx)
+		if err == nil {
+			_, err = tx2.Exec(ctx,
+				`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userA.String())
+			_ = tx2.Rollback(ctx)
+		}
+		waiterDone <- err
+	}()
+
+	// While the waiter sits on user A's barrier, a DIFFERENT user's lock
+	// must not even notice — the key is per-user, not a global write gate.
+	conn3, err := migrator.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn3.Release()
+	tx3, err := conn3.Begin(ctx)
+	require.NoError(t, err)
+	require.NoError(t, func() error {
+		_, err := tx3.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userB.String())
+		return err
+	}())
+	require.NoError(t, tx3.Rollback(ctx))
+
+	select {
+	case <-waiterDone:
+		t.Fatal("a same-user issuer crossed the barrier while the reset holder was uncommitted")
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	require.NoError(t, tx1.Commit(ctx))
+	select {
+	case err := <-waiterDone:
+		require.NoError(t, err, "the same-user issuer must proceed once the holder commits")
+	case <-time.After(5 * time.Second):
+		t.Fatal("a same-user issuer stayed blocked after the holder committed — the barrier leaked")
+	}
+}
+
 // plantResetToken stores a real purpose='password_reset' token through the
 // app function family (the store's own CreatePasswordResetToken) and
 // returns the raw token plus its at-rest hash — plantLoginToken's twin.
