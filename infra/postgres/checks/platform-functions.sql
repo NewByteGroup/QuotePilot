@@ -132,7 +132,8 @@ BEGIN
     ('app.get_user_profile(uuid)'),
     ('app.create_mail_outbox(uuid, text)'),
     ('app.read_mail_outbox(uuid)'),
-    ('app.delete_mail_outbox(uuid)')
+    ('app.delete_mail_outbox(uuid)'),
+    ('app.get_user_auth_by_email(text)')
   ) AS f(fn)
   WHERE to_regprocedure(f.fn) IS NOT NULL
     AND NOT has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
@@ -163,7 +164,8 @@ BEGIN
         ('app.get_user_profile(uuid)'),
         ('app.create_mail_outbox(uuid, text)'),
         ('app.read_mail_outbox(uuid)'),
-        ('app.delete_mail_outbox(uuid)')
+        ('app.delete_mail_outbox(uuid)'),
+        ('app.get_user_auth_by_email(text)')
       ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_app EXECUTE surface in app must equal the tenant-function allowlist; extra: %', bad;

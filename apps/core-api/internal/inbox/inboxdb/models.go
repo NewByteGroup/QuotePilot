@@ -872,4 +872,6 @@ type AppUser struct {
 	PasswordHashOrMagicSub *string
 	IsPlatformAdmin        bool
 	CreatedAt              pgtype.Timestamptz
+	// Argon2id PHC string for password login (ADR-005 amendment 2026-11-16). NULL means the account has no password set — the password path cannot authenticate it, by design. Written by qp_migrator-side provisioning until the set-password flow lands; qp_app only reads it through app.get_user_auth_by_email.
+	PasswordHash *string
 }

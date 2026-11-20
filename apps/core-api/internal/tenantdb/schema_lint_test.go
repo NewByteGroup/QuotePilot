@@ -79,6 +79,7 @@ var tenantFunctions = []string{
 	"app.create_mail_outbox(uuid, text)",
 	"app.read_mail_outbox(uuid)",
 	"app.delete_mail_outbox(uuid)",
+	"app.get_user_auth_by_email(text)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;
@@ -283,6 +284,7 @@ func TestSchemaLintGrants(t *testing.T) {
 		"app.list_memberships_for_email(text)":        "TABLE(organization_id uuid, name text, slug text, role membership_role)",
 		"app.rotate_session(text, text, timestamptz)": "TABLE(session_id uuid, user_id uuid, rotated boolean)",
 		"app.get_user_profile(uuid)":                  "TABLE(id uuid, email text, full_name text)",
+		"app.get_user_auth_by_email(text)":            "TABLE(id uuid, password_hash text)",
 	} {
 		var result string
 		require.NoError(t, migrator.QueryRow(ctx,
