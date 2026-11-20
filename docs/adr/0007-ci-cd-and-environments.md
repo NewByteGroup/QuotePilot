@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-08
-- **Revised:** 2026-11-09 (topology fixed by product spec v1.2: Railway + Supabase + Cloudflare)
+- **Revised:** 2026-11-09 (topology fixed by product spec v1.2: Railway + Supabase + Cloudflare), 2026-11-20 (Railway dev Postgres provisioned; as-built runbook added)
 - **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
 - **Related:** ADR-001 (two runtimes, contracts-first), ADR-002 (Go stack, `go.mod` is the version record), ADR-003 (roles, pooler, extensions; its section 6 defines the hosted differences this runbook executes — the ADR itself is on hold pending this topology), ADR-004 (River), ADR-008 (what each CI layer proves), RFC-003 (Devin repair loop and its token/scope limits), product spec v1.2 section 4.5 (provider topology)
 
@@ -59,13 +59,13 @@ Verify at provisioning: if Railway's egress actually carries IPv6, the prod path
 
 Two hosted Postgres paths exist under this topology: the **Railway dev Postgres** and the **Supabase `quotepilot-prod`** project. This is the executable form of ADR-003 section 6, written for the Supabase path; where the same statements apply to the Railway dev Postgres it is called out. Run once per hosted database, with passwords from the secret store — never from the repo.
 
-1. **Create the projects.** Supabase `quotepilot-prod`: organization owned by the team account, region `sa-east-1` (São Paulo — verified as Supabase's only South America region), plan **Pro** (~$25/mo — the Free plan pauses after ~7 days of low activity and the demo/pilot project must not pause; Nano compute: 60 direct / 200 shared-pooler connections). Railway: one project holding the dev Postgres service and the `dev` environment's services; record Railway region, plan and connection limits in the config (open items).
+1. **Create the projects.** Supabase `quotepilot-prod`: organization owned by the team account, region `sa-east-1` (São Paulo — verified as Supabase's only South America region), plan **Pro** (~$25/mo — the Free plan pauses after ~7 days of low activity and the demo/pilot project must not pause; Nano compute: 60 direct / 200 shared-pooler connections). Railway: one project holding the dev Postgres service and the `dev` environment's services — created 2026-11-20; region and connection limit recorded in the as-built runbook below, plan sizing still an open item.
 2. **Disable the Data API and `pg_graphql`** in the Supabase project settings (ADR-003 section 2). Not applicable to the Railway Postgres — it exposes no Data API.
-3. **Roles.** `postgres` is not a superuser on Supabase: create `qp_migrator` and `qp_app` (`LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`), then `GRANT qp_migrator TO postgres` with the `SET` option so `postgres` can run `CREATE SCHEMA ... AUTHORIZATION qp_migrator` and `ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator`. Confirm the exact grant syntax at provisioning (Postgres 16 membership options). **On the Railway dev Postgres this membership trick is Supabase-shaped and unverified:** what the Railway-provided `postgres` user may do — real superuser or not — decides whether the grant is needed at all. Record the answer at provisioning (open item).
-4. **Extensions.** Schema `extensions` already exists on Supabase — do not create it. `GRANT USAGE ON SCHEMA extensions TO qp_migrator, qp_app` if `PUBLIC` does not already have it; `CREATE EXTENSION vector` (≥ 0.8) and `pg_trgm` there as `postgres` (ADR-003 section 4). On the Railway dev Postgres, create the `extensions` schema as on local, after verifying its managed Postgres image actually ships `vector` ≥ 0.8 (open item).
-5. **Schemas and privileges.** Create `app` and `river` `AUTHORIZATION qp_migrator`; revoke from `PUBLIC`, `anon`, `authenticated`, `service_role`; default privileges granting `qp_app` DML, sequence `USAGE`, `EXECUTE` on `river` functions only; global `REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`; pin `search_path = app, extensions` on both roles. The statements mirror `infra/postgres/init/01-roles-and-schemas.sh`. **Supabase-hosted differences:** revoke `TEMPORARY` only — do not revoke `CONNECT` (Supabase-managed roles need it); no stand-in roles (`anon`, `authenticated`, `service_role` exist for real); no `extensions` schema creation. **Railway dev:** the Supabase-managed roles do not exist, so the stand-in model applies as on local — gated on the step-3 question of what the provided user may grant.
-6. **Storage.** Cloudflare R2 buckets `quotepilot-dev` and `quotepilot-prod`, private; S3-compatible access keys into the GitHub environments (ADR-003 section 5). R2 account and key provisioning is an open item.
-7. **Verify.** Run `infra/postgres/checks/roles.sql` against `quotepilot-prod` with the exception list below, then the Supabase security and performance advisors — RLS or exposure findings are failing checks (ADR-003 section 2). Run `roles.sql` against the Railway dev Postgres too; its exception list is written once Railway's managed-role reality is known (open item).
+3. **Roles.** `postgres` is not a superuser on Supabase: create `qp_migrator` and `qp_app` (`LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`), then `GRANT qp_migrator TO postgres` with the `SET` option so `postgres` can run `CREATE SCHEMA ... AUTHORIZATION qp_migrator` and `ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator`. Confirm the exact grant syntax at provisioning (Postgres 16 membership options). **On the Railway dev Postgres the grant is not needed:** its `postgres` is a real superuser — verified 2026-11-20 (as-built runbook below).
+4. **Extensions.** Schema `extensions` already exists on Supabase — do not create it. `GRANT USAGE ON SCHEMA extensions TO qp_migrator, qp_app` if `PUBLIC` does not already have it; `CREATE EXTENSION vector` (≥ 0.8) and `pg_trgm` there as `postgres` (ADR-003 section 4). On the Railway dev Postgres, create the `extensions` schema as on local — done 2026-11-20 on the pinned `pgvector/pgvector:0.8.2-pg16` image (as-built runbook below).
+5. **Schemas and privileges.** Create `app` and `river` `AUTHORIZATION qp_migrator`; revoke from `PUBLIC`, `anon`, `authenticated`, `service_role`; default privileges granting `qp_app` DML, sequence `USAGE`, `EXECUTE` on `river` functions only; global `REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`; pin `search_path = app, extensions` on both roles. The statements mirror `infra/postgres/init/01-roles-and-schemas.sh`. **Supabase-hosted differences:** revoke `TEMPORARY` only — do not revoke `CONNECT` (Supabase-managed roles need it); no stand-in roles (`anon`, `authenticated`, `service_role` exist for real); no `extensions` schema creation. **Railway dev:** the Supabase-managed roles do not exist; the stand-ins were created there too, so the init ran verbatim — verified 2026-11-20 (as-built runbook below).
+6. **Storage.** Cloudflare R2 buckets `quotepilot-dev` and `quotepilot-prod`, private — they exist (as-built runbook below); S3-compatible access keys into the GitHub environments (ADR-003 section 5). R2 account ownership and key provisioning remain open items.
+7. **Verify.** Run `infra/postgres/checks/roles.sql` against `quotepilot-prod` with the exception list below, then the Supabase security and performance advisors — RLS or exposure findings are failing checks (ADR-003 section 2). Run `roles.sql` against the Railway dev Postgres too — done 2026-11-20, verbatim, with zero exceptions (as-built runbook below).
 
 **`roles.sql` hosted exception list** (for `quotepilot-prod`; tracked here per ADR-003 section 2):
 
@@ -75,7 +75,7 @@ Two hosted Postgres paths exist under this topology: the **Railway dev Postgres*
 | `[X]` (grantee allow-list) | Supabase-managed roles present on hosted (`supabase_admin`, `pgbouncer`, etc.) | They exist on every hosted project; the allow-list gains a named hosted section, enumerated at provisioning |
 | `[G]` (CONNECT granted, TEMPORARY revoked for our roles) | none — must still pass | Acceptance item 8 of ADR-003. If `TEMPORARY` cannot be revoked from `PUBLIC` on hosted (revoking it may affect Supabase-managed roles; unverified), [G] and that acceptance item are revisited together in this ADR |
 
-8. **Pool sizing.** `pgxpool` max for `core-api` plus workers stays below each database's connection limit — for Supabase, minus its reserved connections (ADR-003 section 3). Record the numbers next to each DSN in the environment config; re-check when a plan changes.
+8. **Pool sizing.** `pgxpool` max for `core-api` plus workers stays below each database's connection limit — for Supabase, minus its reserved connections (ADR-003 section 3). Record the numbers next to each DSN in the environment config; re-check when a plan changes. Dev: `max_connections=100` (as-built runbook below).
 
 ### 6. Deploy job shape (once accepted)
 
@@ -106,22 +106,44 @@ Product spec v1.2 fixes the topology, so these are documented fallbacks, not can
 
 - **Railway has no São Paulo region** — the closest is `us-east4` (Virginia). Railway services → Supabase `sa-east-1` therefore pay roughly **120–150 ms of RTT per query round trip**, and one pipeline stage can need several. Spec v1.2 accepted this cost; mitigation is pool sizing plus keeping per-request round trips few. **If latency proves a problem in the pilot, Fly.io `gru` (~$12/mo, same region as the database) is the documented alternative** (Alternatives, item 1).
 - The session-mode pooler now sits in the prod data path because Railway egress IPv6 is unverified — a variable the direct connection avoids. The provisioning check in section 4 decides which path prod actually runs.
-- Railway's managed Postgres role and extension surface is unverified; the runbook may grow a second exception list (open items).
+- The Railway dev Postgres's public TCP proxy carries plaintext Postgres wire protocol — the image configures no TLS (as-built runbook below); mitigation is an open item.
 - R2 and Pages add a second cloud vendor's provisioning and key-rotation surface.
 - The `roles.sql` exception list can drift from hosted reality. Mitigation: every exception is named and justified in the table; re-run the check after any provider-side change.
 
 ## Open items
 
-- **Railway details:** region (closest to the data is `us-east4`; confirm at provisioning), plan sizing for two services plus the dev Postgres, and which team account owns the workspace/project. `RAILWAY_TOKEN` scoping (project vs team/workspace token) is decided when it is minted.
+- **Railway details:** region confirmed `sfo` at provisioning (2026-11-20) — farther from `sa-east-1` than the `us-east4` assumption above, so the latency risk in Consequences applies even more strongly. Still open: plan sizing for two services plus the dev Postgres, and which team account owns the workspace/project. `RAILWAY_TOKEN` scoping (project vs team/workspace token) is decided when it is minted.
 - **Cloudflare Pages wiring for `apps/web`:** a `cloudflare-workers-and-pages` check already fires on this repo (the Cloudflare GitHub App is installed); build root `apps/web`, the build command, and the preview (`develop`) vs production (`main`) branch mapping still need confirming.
-- **R2 provisioning:** Cloudflare account, and S3 API access keys for `quotepilot-dev` / `quotepilot-prod` (least-privilege per bucket where supported) into the GitHub environments.
-- **RLS runbook on the Railway dev Postgres:** what the Railway-provided `postgres` user may grant (superuser or not — the `postgres`-membership trick in step 3 is Supabase-shaped), whether its managed Postgres image ships `pgvector` ≥ 0.8, and the resulting `roles.sql` exception list.
+- **R2 provisioning:** buckets exist on Marcelo's Cloudflare account (as-built runbook below). Still open: which account should own R2 (Pedro's account has R2 disabled; ADR-003 section 7 bus factor), and S3 API access keys for `quotepilot-dev` / `quotepilot-prod` (least-privilege per bucket where supported) into the GitHub environments.
+- **RLS runbook on the Railway dev Postgres — answered 2026-11-20:** `postgres` is a real superuser, the pinned image ships `vector` 0.8.2, and `roles.sql` passed verbatim with no exception list (as-built runbook below). New item it raised: the public TCP proxy is plaintext — decide before the demo whether to disable it or configure TLS on the Postgres service.
 - **Monitoring/alerting:** proposed default — a hosted free tier (Better Stack: 10 monitors, 3-minute checks, one status page, Slack/email alerts) watching both environments' health endpoints. Hosted over self-hosted Uptime Kuma on purpose, so alerts still fire when the host itself is dead.
 - Web hosting is no longer an open decision — product spec v1.2 fixes Cloudflare Pages. What remains is the wiring item above and the registrable-domain question it raises for CSRF (ADR-005 section 4).
 
+## Railway dev Postgres provisioning runbook (as-built 2026-11-20)
+
+The section-5 runbook executed against the Railway dev Postgres, recorded as built. The headline: **the local init SQL and `roles.sql` ran verbatim on hosted — no Railway exception list exists.** Where hosted reality differed from the plan, the delta is named.
+
+**Provisioned objects.** Railway project `quotepilot` (id `e9d28a91-e1f9-481c-864d-38d5990697a1`), environment `dev` (id `3a1011a5-222c-40f2-934f-5a585957ef03`), region `sfo`. Service `pgvector` from the `pgvector-postgresql` template, image pinned to `pgvector/pgvector:0.8.2-pg16` — the same pin as `docker-compose.yml`, so dev, CI and local run identical binaries (ADR-003 section 6). **Gotcha:** the template defaults to Postgres 18; the pin was swapped in after first boot, but pg18 had already initialized PGDATA on the volume and the volume had to be recreated. Pin the image **before** first boot, or plan to delete the volume.
+
+**Bootstrap role.** Railway's `postgres` is a real superuser — unlike hosted Supabase (ADR-003 section 6) — so `CREATE SCHEMA ... AUTHORIZATION qp_migrator` and `ALTER DEFAULT PRIVILEGES FOR ROLE qp_migrator` ran directly; the GRANT-membership trick in step 3 is Supabase-only. And no other platform roles exist, so `REVOKE TEMPORARY, CONNECT ON DATABASE quotepilot FROM PUBLIC` applied exactly as local: Supabase keeps `CONNECT` because its managed roles need it; Railway has nothing that does.
+
+**Stand-ins kept, checks verbatim.** `anon`, `authenticated` and `service_role` `NOLOGIN` stand-ins were created on Railway too, so `infra/postgres/checks/roles.sql` ran unchanged and every assertion passed. This is the Railway check path ADR-003 section 2 told this ADR to define: **run the local init SQL verbatim, then run `roles.sql` verbatim.** The `[B3]`/`[X]` exception list above is Supabase-only.
+
+**Extensions.** `vector` 0.8.2 and `pg_trgm` 1.6 in schema `extensions`, created by the bootstrap superuser; verified with `SELECT extversion FROM pg_extension`. Satisfies verification item 2 for the dev database.
+
+**Migrations.** `MIGRATOR_DSN=postgres://qp_migrator:...@.../quotepilot go run ./cmd/migrate` applied goose v1–v5 and River successfully over the TCP proxy.
+
+**Connectivity — and a finding.** External `psql` reaches the database through the Railway TCP proxy `tramway.proxy.rlwy.net:31619` with `sslmode=disable`: the `pgvector` image configures no TLS, so the public proxy path carries plaintext Postgres wire protocol. Services therefore use the private-network endpoint `pgvector.railway.internal:5432` (the stored DSNs below do); external access should go through `railway connect` / a CLI tunnel instead of the public proxy. **Open item, not decided:** disable the TCP proxy or configure TLS before the demo.
+
+**Variables on the `pgvector` service (`dev`).** Template `POSTGRES_*`; `QP_MIGRATOR_PASSWORD`, `QP_APP_PASSWORD`, `QP_ADMIN_PASSWORD` (generated, 48-hex); and the derived private-network DSNs `MIGRATOR_DSN`, `POSTGRES_DSN`, `QP_ADMIN_DSN` pointing at `pgvector.railway.internal:5432`. Values live only in Railway — never in git (section 3).
+
+**R2.** Buckets `quotepilot-dev` and `quotepilot-prod` already exist on Marcelo's Cloudflare account (`8b184a8e…`), created 2026-11-08, location `ENAM`, private with no public domain. Pedro's account has R2 disabled, so the team-account decision (ADR-003 section 7, bus factor) is still open. The presigned GET/PUT round-trip (ADR-003 section 5) is pending R2 S3 credentials.
+
+**Limits.** The image's initdb defaults give `max_connections=100` (service log) — the ceiling ADR-003 section 3 pool sizing stays under for dev.
+
 ## Verification at provisioning (acceptance for this ADR)
 
-1. `roles.sql` passes on `quotepilot-prod` with only the named exceptions; the Railway dev Postgres run is recorded with its own exception list once known.
+1. `roles.sql` passes on `quotepilot-prod` with only the named exceptions; the Railway dev Postgres run already passed verbatim, with no exception list (2026-11-20).
 2. `SELECT extversion FROM pg_extension WHERE extname='vector'` returns ≥ 0.8 on both hosted databases.
 3. Data API and `pg_graphql` disabled on Supabase; advisors report no RLS or exposure findings on `app`.
 4. From a Railway service: `psql` reaches `quotepilot-prod` over the session-mode pooler; `pgx` prepared statements and River `LISTEN/NOTIFY` work end to end; the IPv6-egress check runs and its result (direct connection usable or not) is recorded.
