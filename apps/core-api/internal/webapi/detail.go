@@ -22,11 +22,12 @@ import (
 )
 
 // detailRow is the rfq_requests slice the audit page reads — the
-// inboxRow's fields plus the email body and sender the list never needs.
+// inboxRow's fields plus the email bodies and sender the list never needs.
 type detailRow struct {
 	inboxRow
 	customerEmail string
 	rawText       *string
+	rawHTML       *string
 }
 
 // quoteRow is the latest version's audit slice: the margin triplet the
@@ -127,12 +128,12 @@ func loadDetailRfq(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (detailRow, 
 	err := tx.QueryRow(ctx, `
 		SELECT id, rfq_number, coalesce(customer_name, customer_email), subject,
 		       status::text, received_at, extracted_payload_json, extraction_confidence,
-		       customer_email, raw_text_body
+		       customer_email, raw_text_body, raw_html_body
 		FROM app.rfq_requests
 		WHERE id = $1 AND kind = 'RFQ' AND status <> 'IGNORED'`, rfqID).
 		Scan(&r.id, &r.rfqNumber, &r.customerName, &r.subject,
 			&r.status, &r.receivedAt, &r.extraction, &r.confidence,
-			&r.customerEmail, &r.rawText)
+			&r.customerEmail, &r.rawText, &r.rawHTML)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return detailRow{}, false, nil
 	}
@@ -198,9 +199,23 @@ func emailFor(ctx context.Context, tx pgx.Tx, rfq detailRow) (authapi.QuoteEmail
 		From:        openapi_types.Email(rfq.customerEmail),
 		To:          openapi_types.Email(org.InboundEmailAlias),
 		ReceivedAt:  rfq.receivedAt,
-		Paragraphs:  paragraphs(rfq.rawText, bodySpans(fields)),
+		Paragraphs:  paragraphs(emailBody(rfq), bodySpans(fields)),
 		Attachments: atts,
 	}, nil
+}
+
+// emailBody picks the body the audit renders: the plain-text part when
+// the sender supplied one, else the HTML part reduced by htmlToText —
+// mail that arrives HTML-only must not render as an empty paragraph list.
+func emailBody(rfq detailRow) *string {
+	if rfq.rawText != nil && *rfq.rawText != "" {
+		return rfq.rawText
+	}
+	if rfq.rawHTML == nil {
+		return nil
+	}
+	text := htmlToText(*rfq.rawHTML)
+	return &text
 }
 
 // emailAttachments lists the RFQ's stored attachments — metadata only;
@@ -301,12 +316,20 @@ var priceSectionTitles = map[pricing.PayloadGroup]string{
 	pricing.GroupServiceTaxes:         "Serviços e impostos",
 }
 
-// priceSections emits one section per (group, currency) total in engine
-// order, items from the group's own lines: the description labels, the
-// charge code details, and each line's original-currency sell.
+// priceSections emits one section per distinct payload group in engine
+// order: out.Groups is a per-(group, currency) total, so a group priced
+// in several currencies appears once and its lines sit in the same
+// section — each PriceItem.Amount carries its own Currency. The
+// description labels, the charge code details, and each line's
+// original-currency sell are the items.
 func priceSections(out pricing.Output) []authapi.PriceSection {
 	sections := make([]authapi.PriceSection, 0, len(out.Groups))
+	seen := make(map[pricing.PayloadGroup]bool, len(out.Groups))
 	for _, g := range out.Groups {
+		if seen[g.Group] {
+			continue
+		}
+		seen[g.Group] = true
 		title, ok := priceSectionTitles[g.Group]
 		if !ok {
 			title = humanizeField(strings.ToLower(string(g.Group)))
@@ -347,21 +370,21 @@ func priceItems(lines []pricing.Line, group pricing.PayloadGroup) []authapi.Pric
 // appliedFx renders the first applied rate — deduped and sorted by the
 // engine, so index 0 is the canonical display. The label is source +
 // currency (v1 keeps the raw source keys; the mock's "dólar armador" is
-// display polish a later pass owns). The reference rate backs the spread
-// out of the applied rate — best-effort per spec, PTAX labelled.
+// display polish a later pass owns). Rate is the rate the engine actually
+// applied — base × (1 + spread), the spread being fractional — while
+// ReferenceRate is the pinned base itself, labelled by its real source:
+// Source is the controlled CARRIER/PTAX/CUSTOMS enum (a PTAX row
+// literally is the PTAX reference; a CARRIER row is the carrier's base).
 func appliedFx(out pricing.Output) *authapi.AppliedFxRate {
 	if len(out.FXApplied) == 0 {
 		return nil
 	}
 	f := out.FXApplied[0]
-	reference := f.Rate
-	if !f.Spread.IsZero() {
-		reference = f.Rate.Sub(f.Spread)
-	}
+	applied := f.Rate.Mul(decimal.NewFromInt(1).Add(f.Spread))
 	return &authapi.AppliedFxRate{
 		Label:          f.Source + " " + f.Currency,
-		Rate:           f.Rate.String(),
-		ReferenceLabel: "PTAX",
-		ReferenceRate:  reference.String(),
+		Rate:           applied.String(),
+		ReferenceLabel: f.Source,
+		ReferenceRate:  f.Rate.String(),
 	}
 }

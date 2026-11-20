@@ -7,8 +7,8 @@ package webapi
 import (
 	"fmt"
 	"sort"
-	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
@@ -207,8 +207,8 @@ type spanMatch struct {
 func highlightParagraph(para string, spans []evidenceSpan) []authapi.EmailSegment {
 	matches := make([]spanMatch, 0, len(spans))
 	for _, s := range spans {
-		if i := foldIndex(para, s.quote); i >= 0 {
-			matches = append(matches, spanMatch{start: i, end: i + len(s.quote), inferred: s.inferred})
+		if start, end, ok := foldSpan(para, s.quote); ok {
+			matches = append(matches, spanMatch{start: start, end: end, inferred: s.inferred})
 		}
 	}
 	sort.Slice(matches, func(i, j int) bool {
@@ -220,10 +220,44 @@ func highlightParagraph(para string, spans []evidenceSpan) []authapi.EmailSegmen
 	return emitSegments(para, nonOverlapping(matches))
 }
 
-// foldIndex locates needle case-insensitively; ToLower preserves byte
-// offsets for the Latin text these emails carry.
-func foldIndex(haystack, needle string) int {
-	return strings.Index(strings.ToLower(haystack), strings.ToLower(needle))
+// foldSpan locates needle case-insensitively and returns the match's
+// byte span in the ORIGINAL haystack. It compares rune-by-rune under
+// unicode.ToLower rather than strings.ToLower on the whole string:
+// whole-string folding changes byte length (evidence "İzmir" lowercases
+// to 5-byte "izmir"), so a byte-index match can end past the paragraph's
+// end — per-rune folding keeps rune count stable, and rune indexes map
+// back to exact byte boundaries through the offset table. An unmatched
+// quote is ok=false, never a fabricated span.
+func foldSpan(haystack, needle string) (start, end int, ok bool) {
+	hrunes := []rune(haystack)
+	nrunes := []rune(needle)
+	if len(nrunes) == 0 || len(nrunes) > len(hrunes) {
+		return 0, 0, false
+	}
+	// Byte offset of every rune start — range yields exactly that — plus
+	// the terminator so the end index translates without special-casing.
+	offs := make([]int, 0, len(hrunes)+1)
+	for i := range haystack {
+		offs = append(offs, i)
+	}
+	offs = append(offs, len(haystack))
+	for i := 0; i+len(nrunes) <= len(hrunes); i++ {
+		if foldRunes(hrunes[i:i+len(nrunes)], nrunes) {
+			return offs[i], offs[i+len(nrunes)], true
+		}
+	}
+	return 0, 0, false
+}
+
+// foldRunes reports whether window matches needle rune-for-rune under
+// per-rune case folding.
+func foldRunes(window, needle []rune) bool {
+	for j := range needle {
+		if unicode.ToLower(window[j]) != unicode.ToLower(needle[j]) {
+			return false
+		}
+	}
+	return true
 }
 
 // nonOverlapping greedily keeps sorted matches that do not overlap — the

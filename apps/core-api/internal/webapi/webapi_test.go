@@ -71,8 +71,8 @@ func newRig(t *testing.T, now time.Time) *rig {
 	mux := http.NewServeMux()
 	mux.Handle("GET /v1/session", platform.Authenticate(cfg)(webapi.OrgHints(srv)))
 	mux.Handle("POST /v1/session/organization", platform.Authenticate(cfg)(srv))
-	mux.Handle("GET /v1/inbox/quotes", platform.Authenticate(cfg)(platform.ResolveTenant(store)(srv)))
-	mux.Handle("GET /v1/quotes/{quoteId}", platform.Authenticate(cfg)(platform.ResolveTenant(store)(srv)))
+	mux.Handle("GET /v1/inbox/quotes", platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(srv)))
+	mux.Handle("GET /v1/quotes/{quoteId}", platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(srv)))
 	return &rig{mux: mux, db: db, store: store, cfg: cfg, now: now}
 }
 

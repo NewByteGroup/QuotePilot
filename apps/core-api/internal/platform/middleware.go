@@ -195,6 +195,23 @@ func verifyAccessCookie(cfg *Config, r *http.Request) (uuid.UUID, uuid.UUID, boo
 	return userID, sessionID, true
 }
 
+// resolveTenantHandler is the shared ResolveTenant body; allowDefault
+// selects whether a hintless safe-method request may fall back to the
+// caller's first membership.
+func resolveTenantHandler(store *Store, allowDefault bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			orgID, role, ok := resolveTenant(store, w, r, allowDefault)
+			if !ok {
+				return
+			}
+			ctx := context.WithValue(r.Context(), orgCtxKey, orgID)
+			ctx = context.WithValue(ctx, roleCtxKey, role)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // ResolveTenant resolves the tenant to a membership the authenticated
 // user holds right now — the check runs on every request and is never
 // cached (ADR-005 section 5), so removing a member takes effect on their
@@ -208,17 +225,23 @@ func verifyAccessCookie(cfg *Config, r *http.Request) (uuid.UUID, uuid.UUID, boo
 //	mux.Handle("GET /me/organization",
 //		platform.Authenticate(cfg)(platform.ResolveTenant(store)(orgHandler)))
 func ResolveTenant(store *Store) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			orgID, role, ok := resolveTenant(store, w, r)
-			if !ok {
-				return
-			}
-			ctx := context.WithValue(r.Context(), orgCtxKey, orgID)
-			ctx = context.WithValue(ctx, roleCtxKey, role)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
+	return resolveTenantHandler(store, false)
+}
+
+// ResolveTenantDefault is ResolveTenant plus one fallback: a safe-method
+// request (GET/HEAD/OPTIONS) carrying no org hint at all resolves the
+// caller's first membership — the same deterministic pick GET /v1/session
+// makes — instead of answering missing_organization. The web inbox boots
+// this way: a fresh session has a valid qp_access but no qp_org yet, and
+// a 400 would dead-end the first load. The fallback only fires when no
+// hint exists; a present-but-malformed header stays a hard 400 (an
+// explicit transport must not paper over client bugs), and membership is
+// re-checked exactly as before.
+//
+//	mux.Handle("GET /v1/inbox/quotes",
+//		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv)))
+func ResolveTenantDefault(store *Store) func(http.Handler) http.Handler {
+	return resolveTenantHandler(store, true)
 }
 
 // resolveTenant runs the transport and identity checks in order: the org
@@ -226,8 +249,19 @@ func ResolveTenant(store *Store) func(http.Handler) http.Handler {
 // the chain was mis-mounted without Authenticate — answered as
 // unauthenticated, never passed through. false means the response is
 // already written.
-func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.UUID, string, bool) {
+func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request, allowDefault bool) (uuid.UUID, string, bool) {
 	orgID, ok := orgHint(r)
+	if !ok && allowDefault {
+		var err error
+		if orgID, ok, err = defaultOrgHint(store, r); err != nil {
+			// A profile/membership read failure is a server fault, not a
+			// missing hint — a 500 must not masquerade as the client 400.
+			slog.Default().WarnContext(r.Context(), "platform: default org lookup failed",
+				"correlation_id", CorrelationID(r.Context()), "error", err)
+			writeError(r.Context(), w, http.StatusInternalServerError, errInternal)
+			return uuid.Nil, "", false
+		}
+	}
 	if !ok {
 		writeError(r.Context(), w, http.StatusBadRequest, errMissingOrg)
 		return uuid.Nil, "", false
@@ -238,6 +272,44 @@ func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.U
 		return uuid.Nil, "", false
 	}
 	return checkMembership(store, w, r, userID, orgID)
+}
+
+// defaultOrgHint is ResolveTenantDefault's last resort: the first
+// membership of the authenticated caller. It returns ok=false — never an
+// error — when the request is not a safe method, an OrgHeader is present
+// (a malformed explicit hint stays a hard 400), the caller identity is
+// absent, the profile row is missing, or the membership list is empty;
+// only a store failure is an error. The pick is ms[0]:
+// list_memberships_for_email is created_at-ordered, the same org GET
+// /v1/session reports as active.
+func defaultOrgHint(store *Store, r *http.Request) (uuid.UUID, bool, error) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		return uuid.Nil, false, nil
+	}
+	if r.Header.Get(OrgHeader) != "" {
+		return uuid.Nil, false, nil
+	}
+	userID, ok := UserID(r.Context())
+	if !ok {
+		return uuid.Nil, false, nil
+	}
+	_, email, _, found, err := store.GetUserProfile(r.Context(), userID)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: default org: profile %s: %w", userID, err)
+	}
+	if !found {
+		return uuid.Nil, false, nil
+	}
+	ms, err := store.ListMembershipsForEmail(r.Context(), email)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: default org: memberships %q: %w", email, err)
+	}
+	if len(ms) == 0 {
+		return uuid.Nil, false, nil
+	}
+	return ms[0].OrgID, true, nil
 }
 
 // orgHint resolves the tenant-id transport: the explicit

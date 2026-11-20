@@ -97,7 +97,26 @@ func (e *Endpoints) GetSession(ctx context.Context, _ authapi.GetSessionRequestO
 	if resp := sessionFailResponse(fail); resp != nil {
 		return resp, nil
 	}
-	return authapi.GetSession200JSONResponse(s), nil
+	return getOK{cfg: e.cfg, org: uuid.UUID(s.Organization.ID), body: s}, nil
+}
+
+// getOK is the 200 that also writes qp_org for the resolved active org:
+// a fresh session has no cookie yet, and ResolveTenantDefault's
+// first-membership fallback must converge to the same org the client
+// keeps — stamping it here makes the bootstrap self-healing instead of
+// leaving the fallback to pick on every read.
+type getOK struct {
+	cfg  *platform.Config
+	org  uuid.UUID
+	body authapi.Session
+}
+
+// VisitGetSessionResponse sets qp_org then delegates to the generated
+// 200 writer — the cookie lands before WriteHeader, exactly like the
+// switch response below.
+func (r getOK) VisitGetSessionResponse(w http.ResponseWriter) error {
+	platform.SetOrgCookie(r.cfg, w, r.org)
+	return authapi.GetSession200JSONResponse(r.body).VisitGetSessionResponse(w)
 }
 
 // sessionFailResponse maps the builder's failure class onto GetSession's

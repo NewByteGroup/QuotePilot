@@ -577,9 +577,9 @@ func TestQuoteDetail(t *testing.T) {
 	assert.Equal(t, "5.0", p.RecalcFxThresholdPercent)
 	require.NotNil(t, p.Fx)
 	assert.Equal(t, "CARRIER USD", p.Fx.Label)
-	assert.Equal(t, "5.32", p.Fx.Rate)
-	assert.Equal(t, "PTAX", p.Fx.ReferenceLabel)
-	assert.Equal(t, "5.27", p.Fx.ReferenceRate, "applied − spread")
+	assert.Equal(t, "5.586", p.Fx.Rate, "applied = base 5.32 × (1 + spread 0.05)")
+	assert.Equal(t, "CARRIER", p.Fx.ReferenceLabel, "the reference is labelled by its real source")
+	assert.Equal(t, "5.32", p.Fx.ReferenceRate, "the pinned base rate")
 }
 
 // TestQuoteDetailNoPricing: a pre-pricing RFQ (no quote row) answers
@@ -653,3 +653,96 @@ func TestInboxEmptyOrg(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// TestFreshSessionLoadsInboxAndDetail is the review's repro end to end:
+// a fresh login — qp_access only, no qp_org anywhere — must serve the
+// session bootstrap AND the two org-scoped reads. The session answer
+// stamps qp_org for the resolved org; the reads also answer hintless via
+// ResolveTenantDefault's first-membership fallback.
+func TestFreshSessionLoadsInboxAndDetail(t *testing.T) {
+	r := newRig(t, now)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "fresh-a")
+	uid, _ := seedWebUser(t, "fresh", "Fresh User")
+	seedWebMembership(t, org, uid, platform.RoleAdmin, now.Add(-24*time.Hour))
+	rfq := seedRfq(t, r.db, org, rfqSeed{
+		number: 31, customerEmail: "fresh@cust.dev", subject: "Fresh freight",
+		status: "READY", receivedAt: now.Add(-time.Hour), extraction: extractionFixture,
+	})
+
+	// The bootstrap sets qp_org for the active org.
+	rec := r.get(t, uid, "/v1/session", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var s authapi.Session
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&s))
+	assert.Equal(t, uuid.UUID(s.Organization.ID), org)
+	var orgCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "qp_org" {
+			orgCookie = c
+		}
+	}
+	require.NotNil(t, orgCookie, "GET /v1/session must stamp qp_org for the resolved org")
+	assert.Equal(t, org.String(), orgCookie.Value)
+
+	// The cookie now resolves both org-scoped reads outright.
+	rec = r.get(t, uid, "/v1/inbox/quotes", "", orgCookie)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page authapi.InboxQuotePage
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page))
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, 31, page.Items[0].RfqNumber)
+
+	rec = r.get(t, uid, "/v1/quotes/"+rfq.String(), "", orgCookie)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// And without the cookie at all the default fallback still serves
+	// them — the repro's exact no-hint case.
+	rec = r.get(t, uid, "/v1/inbox/quotes", "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page))
+	require.Len(t, page.Items, 1)
+
+	rec = r.get(t, uid, "/v1/quotes/"+rfq.String(), "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestQuoteDetailHTMLOnlyEmail: an inbound mail that carried only an HTML
+// part renders real paragraphs — reduced to text by htmlToText — instead
+// of the empty list a rawText-only read produced.
+func TestQuoteDetailHTMLOnlyEmail(t *testing.T) {
+	r := newRig(t, now)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "html-a")
+	uid, _ := seedWebUser(t, "html", "HTML User")
+	seedWebMembership(t, org, uid, platform.RoleAdmin, now.Add(-72*time.Hour))
+
+	rfq := seedRfq(t, r.db, org, rfqSeed{
+		number: 33, customerEmail: "html@cust.dev", subject: "HTML freight",
+		status: "READY", receivedAt: now.Add(-time.Hour),
+	})
+	require.NoError(t, r.db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE app.rfq_requests SET raw_html_body = $1 WHERE id = $2`,
+			`<div>Please quote <b>FCL</b> from Santos.</div><div>We need 2x40HC &amp; docs.</div><style>p{display:none}</style>`,
+			rfq)
+		return err
+	}))
+
+	rec := r.get(t, uid, "/v1/quotes/"+rfq.String(), org.String())
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var d authapi.QuoteDetail
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&d))
+
+	require.Len(t, d.Email.Paragraphs, 2, "the HTML body must render as paragraphs, not an empty page")
+	var flat string
+	for _, para := range d.Email.Paragraphs {
+		for _, seg := range para {
+			flat += seg.Text
+		}
+	}
+	assert.Contains(t, flat, "Please quote FCL from Santos.")
+	assert.Contains(t, flat, "We need 2x40HC & docs.")
+	assert.NotContains(t, flat, "display:none", "style contents must never reach the wire")
+	assert.NotContains(t, flat, "<div", "raw markup must never reach the wire")
+}

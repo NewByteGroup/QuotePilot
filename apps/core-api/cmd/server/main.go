@@ -264,28 +264,33 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	// POST /quotes/{id}/approve — spec section 4 "Approval": the analyst's
 	// central act. RequireRole narrows membership to the approval set; the
 	// strict surface inside authSrv routes the path to the QuoteApprover
-	// delegate. No CheckOrigin: ResolveTenant already demands the custom
-	// X-Organization-Id header a cross-site browser form cannot set.
+	// delegate. CheckOrigin guards the qp_org cookie transport: the
+	// fallback ended "the custom header is the CSRF defense" — a same-site
+	// sibling origin posts cookies freely and a browser POST always
+	// carries Origin or Sec-Fetch-Site for CrossOriginProtection to judge.
 	mux.Handle("POST /quotes/{id}/approve", platform.Correlation(
-		platform.Authenticate(cfg)(
-			platform.ResolveTenant(store)(
-				platform.RequireRole(
-					platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
-					authSrv)))))
+		platform.CheckOrigin(cfg)(
+			platform.Authenticate(cfg)(
+				platform.ResolveTenant(store)(
+					platform.RequireRole(
+						platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+						authSrv))))))
 	// The web v1 read surface (core-api.yaml's web tag). The session pair
 	// mounts Authenticate only — GET /v1/session resolves its own org hint
-	// (OrgHints plants header + qp_org for the handler's fallback chain);
-	// the org switch is state-changing so CheckOrigin guards it. The two
-	// org-scoped reads run the full ResolveTenant chain — header first,
-	// qp_org cookie as fallback.
+	// (OrgHints plants header + qp_org for the handler's fallback chain)
+	// and stamps the resolved org onto qp_org itself; the org switch is
+	// state-changing so CheckOrigin guards it. The two org-scoped reads
+	// run ResolveTenantDefault — header, qp_org cookie, then the
+	// first-membership default for safe methods — so a fresh session
+	// (qp_access only, no qp_org yet) loads the inbox instead of 400ing.
 	mux.Handle("GET /v1/session", platform.Correlation(
 		platform.Authenticate(cfg)(webapi.OrgHints(authSrv))))
 	mux.Handle("POST /v1/session/organization", platform.Correlation(
 		platform.CheckOrigin(cfg)(platform.Authenticate(cfg)(authSrv))))
 	mux.Handle("GET /v1/inbox/quotes", platform.Correlation(
-		platform.Authenticate(cfg)(platform.ResolveTenant(store)(authSrv))))
+		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
 	mux.Handle("GET /v1/quotes/{quoteId}", platform.Correlation(
-		platform.Authenticate(cfg)(platform.ResolveTenant(store)(authSrv))))
+		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}

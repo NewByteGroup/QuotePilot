@@ -239,6 +239,45 @@ func TestTruncateRunes(t *testing.T) {
 	assert.Equal(t, "", truncateRunes("", 5))
 }
 
+// TestFoldSpan pins the rune-space contract: byte spans land on the
+// ORIGINAL text, and the fold that changed byte length mid-match — the
+// review's "İzmir" panic — now matches with a correct span instead of
+// slicing past the paragraph end.
+func TestFoldSpan(t *testing.T) {
+	// Devin's repro: haystack "izmir" (5 bytes) vs needle "İzmir" (6
+	// bytes — İ = U+0130 folds to 'i' per-rune, so the match IS found;
+	// the old byte-folded index produced end = 6 > len(para) and panicked
+	// in emitSegments. The rune-space span lands exactly on the original.
+	start, end, ok := foldSpan("izmir", "İzmir")
+	require.True(t, ok)
+	assert.Equal(t, 0, start)
+	assert.Equal(t, 5, end, "the span ends at the haystack's real boundary, not the needle's byte length")
+	para := "izmir"
+	segs := paragraphs(&para, []evidenceSpan{{quote: "İzmir"}})
+	require.Len(t, segs, 1)
+	require.Len(t, segs[0], 1)
+	assert.Equal(t, authapi.Extracted, segs[0][0].Highlight)
+	assert.Equal(t, para, segs[0][0].Text, "the segment carries the original bytes — no panic, no overrun")
+
+	// A normal ASCII match returns the exact original-substring span.
+	start, end, ok = foldSpan("Please quote FCL from Santos", "from santos")
+	require.True(t, ok)
+	assert.Equal(t, "from Santos", "Please quote FCL from Santos"[start:end],
+		"the span covers the ORIGINAL bytes, not the needle's")
+
+	// Multi-byte text: the span still lands on the original bytes.
+	para2 := "Envio de São Paulo para Hamburgo"
+	start, end, ok = foldSpan(para2, "SÃO PAULO")
+	require.True(t, ok)
+	assert.Equal(t, "São Paulo", para2[start:end])
+
+	// Edge cases: empty needle, needle longer than haystack.
+	_, _, ok = foldSpan("abc", "")
+	assert.False(t, ok)
+	_, _, ok = foldSpan("ab", "abcd")
+	assert.False(t, ok)
+}
+
 // TestLikeEscaper maps each LIKE metacharacter under the ESCAPE '\'
 // the SQL declares.
 func TestLikeEscaper(t *testing.T) {
