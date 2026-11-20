@@ -30,38 +30,42 @@ CREATE POLICY tenant_isolation_policy ON app.org_rfq_counters
     WITH CHECK (organization_id = NULLIF(current_setting('app.current_organization_id', true), '')::uuid);
 -- +goose StatementEnd
 
--- The backfill reads every tenant's rows and writes every tenant's
--- counters, so FORCE must come off both tables for the window: under it
--- even qp_migrator (the owner) sees only the current_organization_id rows
--- — the UPDATE would silently backfill nothing before SET NOT NULL fails,
--- and the counter INSERT would hit the table's own WITH CHECK. RLS stays
--- ENABLED the whole time — other roles keep filtering; only the owner's
--- FORCE is lifted.
+-- The backfill runs THROUGH the tenant policy, never around it: under
+-- FORCE RLS qp_migrator sees only the rows app.current_organization_id
+-- names, so the loop points the GUC at each org in turn — the UPDATE and
+-- the counter INSERT (whose WITH CHECK demands the same GUC) then behave
+-- exactly as the app's own tenant transaction would. NO FORCE is
+-- deliberately absent: CI forbids it, and the GUC window cannot outlive
+-- this transaction (set_config is_local).
 -- +goose StatementBegin
-ALTER TABLE app.rfq_requests NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE app.org_rfq_counters NO FORCE ROW LEVEL SECURITY;
-
 ALTER TABLE app.rfq_requests ADD COLUMN rfq_number integer;
 
-UPDATE app.rfq_requests AS r
-SET rfq_number = s.n
-FROM (
-    SELECT id, row_number() OVER (PARTITION BY organization_id ORDER BY received_at, id) AS n
-    FROM app.rfq_requests
-) AS s
-WHERE r.id = s.id;
-
-INSERT INTO app.org_rfq_counters (organization_id, next_seq)
-SELECT organization_id, max(rfq_number) + 1
-FROM app.rfq_requests
-GROUP BY organization_id;
+DO $backfill$
+DECLARE
+    o record;
+BEGIN
+    FOR o IN SELECT id FROM app.organizations LOOP
+        PERFORM set_config('app.current_organization_id', o.id::text, true);
+        UPDATE app.rfq_requests AS r
+        SET rfq_number = s.n
+        FROM (
+            SELECT id, row_number() OVER (ORDER BY received_at, id) AS n
+            FROM app.rfq_requests
+            WHERE organization_id = o.id
+        ) AS s
+        WHERE r.id = s.id;
+        INSERT INTO app.org_rfq_counters (organization_id, next_seq)
+        SELECT o.id, max(r.rfq_number) + 1
+        FROM app.rfq_requests AS r
+        WHERE r.organization_id = o.id
+        HAVING max(r.rfq_number) IS NOT NULL;
+    END LOOP;
+END
+$backfill$;
 
 ALTER TABLE app.rfq_requests ALTER COLUMN rfq_number SET NOT NULL;
 ALTER TABLE app.rfq_requests
     ADD CONSTRAINT rfq_requests_organization_id_rfq_number_key UNIQUE (organization_id, rfq_number);
-
-ALTER TABLE app.rfq_requests FORCE ROW LEVEL SECURITY;
-ALTER TABLE app.org_rfq_counters FORCE ROW LEVEL SECURITY;
 -- +goose StatementEnd
 
 -- p_email, not email: in a LANGUAGE sql function a column name wins over a

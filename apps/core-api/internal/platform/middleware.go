@@ -264,6 +264,9 @@ func orgHint(r *http.Request) (uuid.UUID, bool) {
 // family. Callers only ever pass a membership-proven org UUID, never raw
 // user input; ResolveTenant re-checks membership on every read.
 func SetOrgCookie(cfg *Config, w http.ResponseWriter, orgID uuid.UUID) {
+	// #nosec G124 -- HttpOnly and SameSite are literal; Secure is
+	// intentionally config-driven (CookieSecure=false only for local http),
+	// and middleware_orgcookie_test.go pins the exact flag set.
 	http.SetCookie(w, &http.Cookie{
 		Name:     OrgCookie,
 		Value:    orgID.String(),
