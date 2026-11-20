@@ -167,11 +167,24 @@ func (e *Endpoints) stagePasswordReset(
 }
 
 // applyPasswordReset is the set-password transaction body: consume the
-// reset hash (the purpose filter keeps magic-link tokens out), write the
-// argon2id PHC, then revoke the user's live sessions — the OWASP leg that
-// keeps a session minted on a stolen password from outliving the
-// credential. All three writes commit together or roll back together;
+// reset hash (the purpose filter keeps magic-link tokens out), then under
+// the per-user advisory lock write the argon2id PHC, revoke the user's
+// live sessions and consume every outstanding login/reset token — the
+// OWASP leg that keeps a session or a pre-reset link from outliving the
+// credential. All writes commit together or roll back together;
 // (false, nil) is the dead-token shape the caller maps to the uniform 401.
+//
+// The user lock MUST be held before the revokes and through commit —
+// xact scope covers the whole critical section, not one statement:
+// session issuers (issueSession here in Go, rotate_session in SQL) hold
+// the same key before writing, so a racing issue either already committed
+// — hence inside the revoke's candidate set — or blocks on the lock until
+// this commit lands and then re-validates against the new credential.
+// Lock order everywhere is user → family → row; this path takes only the
+// user lock, so it never queues behind a family or row lock for the
+// advisory — the one residual interleave (an exchange's consumed-token
+// row lock racing the pending-token sweep below) is the narrow,
+// self-healing same-user deadlock the detector resolves.
 func (e *Endpoints) applyPasswordReset(
 	ctx context.Context,
 	tokenHash, passwordHash string,
@@ -185,11 +198,17 @@ func (e *Endpoints) applyPasswordReset(
 		if !ok {
 			return nil
 		}
+		if err := tx.LockUserSession(ctx, userID); err != nil {
+			return fmt.Errorf("auth: lock user session: %w", err)
+		}
 		if err := tx.SetUserPassword(ctx, userID, passwordHash); err != nil {
 			return fmt.Errorf("auth: set user password: %w", err)
 		}
 		if err := tx.RevokeUserSessions(ctx, userID); err != nil {
 			return fmt.Errorf("auth: revoke user sessions: %w", err)
+		}
+		if err := tx.RevokeUserPendingTokens(ctx, userID); err != nil {
+			return fmt.Errorf("auth: revoke pending tokens: %w", err)
 		}
 		applied = true
 		return nil

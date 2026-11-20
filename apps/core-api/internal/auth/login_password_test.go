@@ -77,13 +77,24 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 	assert.Equal(t, "Acme Freight", body.Memberships[0].Name)
 	assert.Equal(t, authapi.OWNER, body.Memberships[0].Role)
 
-	// The credential lookup saw the normalized email; the magic-link
-	// staging never ran — the password path writes a session, not a token.
-	require.Equal(t, []string{"ada@test.dev"}, r.q.authFinds)
+	// The credential lookup saw the normalized email TWICE — the outside
+	// read that fed the verify and the in-tx re-check under the user lock
+	// (the stale-credential guard); the magic-link staging never ran — the
+	// password path writes a session, not a token.
+	require.Equal(t, []string{"ada@test.dev", "ada@test.dev"}, r.q.authFinds,
+		"outside lookup plus the in-tx stale-credential re-read")
 	assert.Empty(t, r.q.finds, "the password path must not run find_user_by_email")
 	assert.Empty(t, r.q.creates)
 	assert.Empty(t, r.q.outboxCreates)
 	assert.Empty(t, r.enq.ids, "password login stages no mail send")
+
+	// The issue-vs-revoke barrier (migration 0007): the user advisory lock
+	// is taken before the session row exists — once by passwordLogin ahead
+	// of the recheck and again, idempotently, by issueSession ahead of the
+	// mint; both land before create_session in the order log.
+	require.Equal(t, []uuid.UUID{userID, userID}, r.q.userLocks)
+	require.Equal(t, []string{"lock", "lock", "create_session"}, r.q.order,
+		"the user lock must be held before the session write")
 
 	cookies := rec.Result().Cookies()
 	require.Len(t, cookies, 2, "exactly the spec section 4 pair is written")
@@ -109,6 +120,33 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 	assert.Equal(t, r.q.sessions[0].sessionID, gotSession)
 	assert.Equal(t, platform.HashToken(refresh.Value), r.q.sessions[0].hash,
 		"create_session stored the cookie value's hash, not the value")
+}
+
+// TestLoginPasswordStaleCredentialAborts is the Devin finding's login
+// side: a reset committing between the outside credential read and the
+// in-tx issue must not let this login mint a session on the dead
+// password. The fake's credsShift seam replays exactly that — first
+// lookup serves the old PHC (the verify passes), the in-tx re-read under
+// the user lock serves the reset's new one — and the mismatch answers
+// the uniform 401 with no session and no cookie.
+func TestLoginPasswordStaleCredentialAborts(t *testing.T) {
+	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
+	userID := uuid.New()
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
+	r.q.credsShift["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "n3w-pilot-pass")}
+
+	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(),
+		"a mid-flight credential change is indistinguishable from a wrong password")
+	assert.Empty(t, rec.Header().Values("Set-Cookie"))
+	assert.Empty(t, r.q.sessions, "the dead credential mints nothing")
+	require.Equal(t, []uuid.UUID{userID}, r.q.userLocks,
+		"the lock was taken — the abort happened inside the critical section")
+	assert.Equal(t, []string{"lock"}, r.q.order, "nothing runs after the stale abort")
+	assert.Len(t, r.q.authFinds, 2, "the outside read and the in-tx recheck")
 }
 
 // TestLoginPasswordUniform401 is the anti-enumeration proof for the

@@ -19,7 +19,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/stretchr/testify/require"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
@@ -97,8 +96,12 @@ type loginQuerier struct {
 	resetConsumes  []string
 	passwordSets   []passwordSet
 	sessionRevokes []uuid.UUID
+	pendingRevokes []uuid.UUID
+	userLocks      []uuid.UUID
 	sessions       []sessionCreate
 	outboxCreates  []outboxCall
+	credsShift     map[string]credRec
+	order          []string
 }
 
 var _ platform.Querier = (*loginQuerier)(nil)
@@ -119,10 +122,14 @@ func (q *loginQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.
 		return q.resetConsumeRow(args)
 	case strings.Contains(sql, "consume_login_token"):
 		return q.loginConsumeRow(args)
+	case strings.Contains(sql, "pg_advisory_xact_lock"):
+		return q.userLockRow(args)
 	case strings.Contains(sql, "set_user_password"):
 		return q.passwordSetRow(args)
 	case strings.Contains(sql, "revoke_user_sessions"):
 		return q.sessionRevokeRow(args)
+	case strings.Contains(sql, "revoke_user_pending_tokens"):
+		return q.pendingRevokeRow(args)
 	case strings.Contains(sql, "create_session"):
 		return q.sessionRow(args)
 	case strings.Contains(sql, "create_mail_outbox"):
@@ -180,7 +187,15 @@ func (q *loginQuerier) authRow(args []any) pgx.Row {
 		}
 		email := args[0].(string)
 		q.authFinds = append(q.authFinds, email)
-		cred, ok := q.creds[strings.ToLower(strings.TrimSpace(email))]
+		norm := strings.ToLower(strings.TrimSpace(email))
+		cred, ok := q.creds[norm]
+		// credsShift is the stale-credential seam: once set for an email,
+		// every lookup AFTER the first returns the shifted row — the way a
+		// reset committing between the outside read and the in-tx re-read
+		// presents to passwordLogin's recheck.
+		if shifted, has := q.credsShift[norm]; has && countOf(q.authFinds, email) > 1 {
+			cred, ok = shifted, true
+		}
 		if !ok {
 			return pgx.ErrNoRows
 		}
@@ -233,55 +248,8 @@ func (q *loginQuerier) sessionRow(args []any) pgx.Row {
 			sessionID: uuid.New(),
 		}
 		q.sessions = append(q.sessions, call)
+		q.order = append(q.order, "create_session")
 		*(dest[0].(*uuid.UUID)) = call.sessionID
-		return nil
-	}}
-}
-
-// resetCreateRow answers SELECT app.create_password_reset_token($1,$2,$3):
-// createRow's reset twin — it lands a purpose='password_reset' row in the
-// shared token table, exactly what migration 0007's function inserts.
-func (q *loginQuerier) resetCreateRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["create_password_reset_token"]; err != nil {
-			return err
-		}
-		call := createCall{
-			userID:    args[0].(uuid.UUID),
-			hash:      args[1].(string),
-			expiresAt: args[2].(time.Time),
-			id:        uuid.New(),
-		}
-		q.resetCreates = append(q.resetCreates, call)
-		q.tokens[call.hash] = &tokenRec{
-			userID:    call.userID,
-			expiresAt: call.expiresAt,
-			purpose:   platform.MailPurposePasswordReset,
-		}
-		*(dest[0].(*uuid.UUID)) = call.id
-		return nil
-	}}
-}
-
-// resetConsumeRow answers SELECT app.consume_password_reset_token($1) with
-// the function's atomic semantics: the purpose filter means a login token
-// scans NULL alongside the consumed/expired/unknown cases — the
-// (Nil, false, nil) miss the Store maps.
-func (q *loginQuerier) resetConsumeRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["consume_password_reset_token"]; err != nil {
-			return err
-		}
-		hash := args[0].(string)
-		q.resetConsumes = append(q.resetConsumes, hash)
-		out := dest[0].(**uuid.UUID)
-		tok, ok := q.tokens[hash]
-		if !ok || tok.purpose != platform.MailPurposePasswordReset || tok.consumed || !q.now().Before(tok.expiresAt) {
-			*out = nil
-			return nil
-		}
-		tok.consumed = true
-		*out = &tok.userID
 		return nil
 	}}
 }
@@ -304,38 +272,6 @@ func (q *loginQuerier) loginConsumeRow(args []any) pgx.Row {
 		}
 		tok.consumed = true
 		*out = &tok.userID
-		return nil
-	}}
-}
-
-// passwordSetRow answers SELECT 1 FROM app.set_user_password($1, $2): like
-// the plpgsql function it refuses a blank hash — committing an empty
-// credential would lock the account — and records the (user, PHC) write.
-func (q *loginQuerier) passwordSetRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["set_user_password"]; err != nil {
-			return err
-		}
-		hash := args[1].(string)
-		if strings.TrimSpace(hash) == "" {
-			return errors.New("set_user_password: password_hash must be a non-empty string")
-		}
-		q.passwordSets = append(q.passwordSets, passwordSet{userID: args[0].(uuid.UUID), hash: hash})
-		*(dest[0].(*int)) = 1
-		return nil
-	}}
-}
-
-// sessionRevokeRow answers SELECT 1 FROM app.revoke_user_sessions($1):
-// records the user whose live sessions the reset killed — the OWASP leg of
-// the set-password transaction.
-func (q *loginQuerier) sessionRevokeRow(args []any) pgx.Row {
-	return stubRow{scan: func(dest ...any) error {
-		if err := q.fail["revoke_user_sessions"]; err != nil {
-			return err
-		}
-		q.sessionRevokes = append(q.sessionRevokes, args[0].(uuid.UUID))
-		*(dest[0].(*int)) = 1
 		return nil
 	}}
 }
@@ -402,13 +338,14 @@ func newRig(t *testing.T, ipCap, emailCap int) *rig {
 	clock := &fakeClock{now: time.Now()}
 	cfg := sessionConfig()
 	q := &loginQuerier{
-		now:      clock.Now,
-		users:    map[string]uuid.UUID{},
-		creds:    map[string]credRec{},
-		profiles: map[uuid.UUID]profileRec{},
-		members:  map[string][]platform.Membership{},
-		tokens:   map[string]*tokenRec{},
-		fail:     map[string]error{},
+		now:        clock.Now,
+		users:      map[string]uuid.UUID{},
+		creds:      map[string]credRec{},
+		profiles:   map[uuid.UUID]profileRec{},
+		members:    map[string][]platform.Membership{},
+		tokens:     map[string]*tokenRec{},
+		fail:       map[string]error{},
+		credsShift: map[string]credRec{},
 	}
 	enq := &fakeEnqueue{}
 	store := platform.NewStore(q)
@@ -427,30 +364,14 @@ func (r *rig) postLogin(t *testing.T, body string) *httptest.ResponseRecorder {
 	return r.postPath(t, "/auth/login", body)
 }
 
-// postPath is postLogin generalized to the whole mounted surface — the
-// reset pair and the cross-purpose proofs aim at different routes.
-func (r *rig) postPath(t *testing.T, path, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	r.handler.ServeHTTP(rec, req)
-	return rec
-}
-
-// plantTokenPurpose records a token of any credential class in the rig's
-// token table — session_fake_test's twin on the login rig — and returns the
-// raw value the request body carries. plantResetToken is the common case.
-func (r *rig) plantTokenPurpose(t *testing.T, userID uuid.UUID, expiresAt time.Time, purpose string) string {
-	t.Helper()
-	token, err := platform.NewOpaqueToken()
-	require.NoError(t, err)
-	r.q.tokens[platform.HashToken(token)] = &tokenRec{userID: userID, expiresAt: expiresAt, purpose: purpose}
-	return token
-}
-
-// plantResetToken records a purpose='password_reset' token — the shape
-// create_password_reset_token leaves at rest.
-func (r *rig) plantResetToken(t *testing.T, userID uuid.UUID, expiresAt time.Time) string {
-	t.Helper()
-	return r.plantTokenPurpose(t, userID, expiresAt, platform.MailPurposePasswordReset)
+// countOf reports how many times needle appears in hay — the credsShift
+// seam counts prior get_user_auth_by_email calls for the same email.
+func countOf(hay []string, needle string) int {
+	n := 0
+	for _, v := range hay {
+		if v == needle {
+			n++
+		}
+	}
+	return n
 }

@@ -83,14 +83,19 @@ func TestPasswordResetSpendsBothBuckets(t *testing.T) {
 }
 
 // TestPasswordSetSuccess is the amendment's end state: a live reset token
-// sets the argon2id hash and kills the user's sessions in one commit —
-// then the 200 carries no session, no cookie, nothing to authenticate
-// with. The user logs in through the password path next.
+// sets the argon2id hash, kills the user's sessions AND consumes every
+// outstanding login/reset token in one commit — then the 200 carries no
+// session, no cookie, nothing to authenticate with. The user logs in
+// through the password path next.
 func TestPasswordSetSuccess(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
 	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: ""} // no password set yet
 	token := r.plantResetToken(t, userID, r.clock.Now().Add(15*time.Minute))
+	// Outstanding credentials of the user die with the reset: a live magic
+	// link and a second reset link, both still pending when it lands.
+	pendingLink := r.plantTokenPurpose(t, userID, r.clock.Now().Add(15*time.Minute), platform.MailPurposeLogin)
+	secondReset := r.plantResetToken(t, userID, r.clock.Now().Add(15*time.Minute))
 
 	rec := r.postPath(t, "/auth/password",
 		`{"token":"`+token+`","password":"s3cret-pilot"}`)
@@ -108,8 +113,23 @@ func TestPasswordSetSuccess(t *testing.T) {
 		"the raw password never reaches the store")
 	assert.Equal(t, []uuid.UUID{userID}, r.q.sessionRevokes,
 		"the reset revokes every live session of the user")
+	assert.Equal(t, []uuid.UUID{userID}, r.q.pendingRevokes,
+		"and consumes every outstanding token — same credential class")
 	assert.True(t, r.q.tokens[platform.HashToken(token)].consumed,
 		"the token was spent inside the same commit")
+	assert.True(t, r.q.tokens[platform.HashToken(pendingLink)].consumed,
+		"a pending magic link dies with the credential reset")
+	assert.True(t, r.q.tokens[platform.HashToken(secondReset)].consumed,
+		"and so does a second outstanding reset link")
+
+	// The issue-vs-revoke barrier (migration 0007): the user advisory lock
+	// lands between the consume and every write and stays held through
+	// commit — the whole write set is one critical section issuers lock
+	// out of.
+	require.Equal(t, []uuid.UUID{userID}, r.q.userLocks)
+	assert.Equal(t,
+		[]string{"consume_reset", "lock", "set_pw", "revoke_sessions", "revoke_tokens"},
+		r.q.order, "lock before writes, writes before the token kill")
 }
 
 // TestPasswordSetUniform401 is the dead-token proof: unknown, already

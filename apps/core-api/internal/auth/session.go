@@ -96,6 +96,13 @@ func (e *Endpoints) runExchange(
 // caller wraps in the cookie-carrying 200 after commit. A signing failure is
 // an error like any other on the path — the consume rolls back with it, so
 // no inert session row is orphaned and the link survives for a retry.
+//
+// The per-user advisory lock comes FIRST: it is migration 0007's barrier
+// against a session outliving a concurrent credential reset — every issuer
+// (this path, the password path and, in SQL, rotate_session) holds it before
+// writing, so a reset's revoke either already ran (this issue then lands on
+// the post-reset credential state) or waits for our commit and kills the
+// session it produces.
 func (e *Endpoints) issueSession(
 	ctx context.Context,
 	tx *platform.Store,
@@ -103,6 +110,9 @@ func (e *Endpoints) issueSession(
 	profile authapi.UserProfile,
 	memberships []authapi.Membership,
 ) (*sessionGrant, error) {
+	if err := tx.LockUserSession(ctx, userID); err != nil {
+		return nil, fmt.Errorf("auth: lock user session: %w", err)
+	}
 	refresh, sessionID, err := e.mintSession(ctx, tx, userID)
 	if err != nil {
 		return nil, err

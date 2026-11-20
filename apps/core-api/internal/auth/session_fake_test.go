@@ -113,6 +113,8 @@ type sessionQuerier struct {
 	fail         map[string]error
 	consumes     []string
 	creates      []sessionCreate
+	userLocks    []uuid.UUID
+	order        []string
 	listed       []string
 	profileCalls []uuid.UUID
 }
@@ -121,6 +123,8 @@ var _ platform.Querier = (*sessionQuerier)(nil)
 
 func (q *sessionQuerier) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
 	switch {
+	case strings.Contains(sql, "pg_advisory_xact_lock"):
+		return q.userLockRow(args)
 	case strings.Contains(sql, "consume_login_token"):
 		return q.consumeRow(args)
 	case strings.Contains(sql, "get_user_profile"):
@@ -214,7 +218,25 @@ func (q *sessionQuerier) createRow(args []any) pgx.Row {
 			sessionID: uuid.New(),
 		}
 		q.creates = append(q.creates, call)
+		q.order = append(q.order, "create_session")
 		*(dest[0].(*uuid.UUID)) = call.sessionID
+		return nil
+	}}
+}
+
+// userLockRow answers SELECT 1 FROM pg_catalog.pg_advisory_xact_lock(...) —
+// migration 0007's issue-vs-revoke barrier that issueSession now takes
+// before minting. The fake cannot serialize, so it records the acquisition
+// (user id plus its position in the order log): the tests assert the lock
+// preceded create_session on the exchange path.
+func (q *sessionQuerier) userLockRow(args []any) pgx.Row {
+	return stubRow{scan: func(dest ...any) error {
+		if err := q.fail["pg_advisory_xact_lock"]; err != nil {
+			return err
+		}
+		q.userLocks = append(q.userLocks, args[0].(uuid.UUID))
+		q.order = append(q.order, "lock")
+		*(dest[0].(*int)) = 1
 		return nil
 	}}
 }

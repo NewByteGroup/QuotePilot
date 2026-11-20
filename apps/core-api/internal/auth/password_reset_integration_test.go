@@ -42,10 +42,13 @@ func TestPasswordResetEndToEnd(t *testing.T) {
 	cfg := sessionConfig()
 	store := platform.NewStore(db.Pool())
 
-	// A live session exists BEFORE the reset — the OWASP leg must kill it.
+	// A live session exists BEFORE the reset — the OWASP leg must kill it —
+	// and a pending magic link rides alongside: the pending-token sweep is
+	// the same credential-class kill.
 	sessionID, err := store.CreateSession(
 		ctx, userID, platform.HashToken("stale-refresh"), time.Now().Add(24*time.Hour))
 	require.NoError(t, err)
+	_, pendingHash := plantLoginToken(t, store, userID)
 
 	handler := loginHandler(t, cfg, store, noopEnqueue)
 	rec := postAuthTo(t, handler, "/auth/password-reset", `{"email":"`+email+`"}`)
@@ -89,6 +92,26 @@ func TestPasswordResetEndToEnd(t *testing.T) {
 	require.NoError(t, migrator.QueryRow(ctx,
 		`SELECT revoked_at FROM app.auth_sessions WHERE id = $1`, sessionID).Scan(&revokedAt))
 	assert.NotNil(t, revokedAt, "the reset revokes sessions minted on the old credential")
+
+	// The pending-token sweep killed the outstanding magic link — same
+	// credential class as the password — so its consume now misses too.
+	var consumedAt *time.Time
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT consumed_at FROM app.auth_login_tokens WHERE token_hash = $1`, pendingHash).
+		Scan(&consumedAt))
+	assert.NotNil(t, consumedAt, "a pending magic link dies with the credential reset")
+
+	// Refresh on the revoked family answers the dead-token shape: the new
+	// rotate_session's FOR UPDATE read sees revoked_at and returns empty.
+	// The real user-advisory barrier inside the function ran for this call
+	// — a concurrent interleave is not forceable in a deterministic test,
+	// so what this pins is the serialized outcome the lock guarantees.
+	_, _, rotated, found, err := store.RotateSession(
+		ctx, platform.HashToken("stale-refresh"), platform.HashToken("next-refresh"),
+		time.Now().Add(24*time.Hour))
+	require.NoError(t, err)
+	assert.False(t, found, "a revoked generation cannot rotate — refresh answers 401")
+	assert.False(t, rotated)
 
 	// The new password authenticates through the login password path —
 	// the functional verify of the stored PHC.

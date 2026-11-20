@@ -465,7 +465,10 @@ func (s *Store) SetUserPassword(ctx context.Context, userID uuid.UUID, passwordH
 
 // RevokeUserSessions kills every live session of the user — the OWASP leg
 // of the credential reset: a session minted on a stolen password must not
-// outlive the password change (migration 0007).
+// outlive the password change (migration 0007). The function takes the
+// per-user advisory lock itself; callers inside a wider critical section
+// take LockUserSession first — same key, same barrier, idempotent within
+// one transaction.
 //
 //	err := store.RevokeUserSessions(ctx, userID)
 func (s *Store) RevokeUserSessions(ctx context.Context, userID uuid.UUID) error {
@@ -474,6 +477,47 @@ func (s *Store) RevokeUserSessions(ctx context.Context, userID uuid.UUID) error 
 		`SELECT 1 FROM app.revoke_user_sessions($1)`, userID).Scan(&one)
 	if err != nil {
 		return fmt.Errorf("platform: revoke_user_sessions: %w", err)
+	}
+	return nil
+}
+
+// RevokeUserPendingTokens consumes every live auth_login_tokens row of the
+// user — the reset transaction's token kill (migration 0007): outstanding
+// magic links and reset links are the same credential class as the
+// password, so none of them may outlive the reset.
+//
+//	err := store.RevokeUserPendingTokens(ctx, userID)
+func (s *Store) RevokeUserPendingTokens(ctx context.Context, userID uuid.UUID) error {
+	var one int
+	err := s.q.QueryRow(ctx,
+		`SELECT 1 FROM app.revoke_user_pending_tokens($1)`, userID).Scan(&one)
+	if err != nil {
+		return fmt.Errorf("platform: revoke_user_pending_tokens: %w", err)
+	}
+	return nil
+}
+
+// LockUserSession takes the per-user advisory transaction lock
+// (hashtextextended on the user id — migration 0007's issue-vs-revoke
+// barrier). Session issuers hold it before writing: mintSession's callers
+// and, in SQL, rotate_session; revoke_user_sessions holds it on the reset
+// side, so "issue a session" and "revoke all of them" are mutually
+// exclusive per user. A pg_catalog function needs no grant and no app
+// wrapper — the barrier is lock-order discipline, not privilege: every
+// path must take it before any family or row lock. The lock is
+// transaction-scoped (pg_advisory_xact_lock) — it releases at commit or
+// rollback, and re-acquiring the same key inside one transaction is a
+// no-op, so callers wider than one statement and the SQL functions may
+// both take it.
+//
+//	err := tx.LockUserSession(ctx, userID)
+func (s *Store) LockUserSession(ctx context.Context, userID uuid.UUID) error {
+	var one int
+	err := s.q.QueryRow(ctx,
+		`SELECT 1 FROM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 0))`,
+		userID).Scan(&one)
+	if err != nil {
+		return fmt.Errorf("platform: lock user session: %w", err)
 	}
 	return nil
 }

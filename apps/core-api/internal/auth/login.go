@@ -215,6 +215,15 @@ func magicLinkURL(webURL, token string) string {
 // commit inside ONE transaction through e.inTx, so a signing or insert
 // failure leaves nothing half-created behind — only the response/cookie
 // assembly stays outside it.
+//
+// The ~50ms argon2id verify stays outside (it must not hold the lock), so
+// the transaction opens with the per-user advisory lock and then RE-READS
+// the credential: a reset landing between the outside lookup and the lock
+// would otherwise let this login mint a session on the just-killed
+// password (Devin Review). Under the lock the stored hash must equal the
+// one verified — a mid-flight credential change (reset committed while we
+// waited, user gone, hash nulled) is the same uniform 401 as a wrong
+// password. One cheap SELECT inside tx pays for the airtightness.
 func (e *Endpoints) passwordLogin(
 	ctx context.Context,
 	email, password string,
@@ -232,7 +241,19 @@ func (e *Endpoints) passwordLogin(
 		return loginUnauthenticated(), nil
 	}
 	var grant *sessionGrant
+	var stale bool
 	err = e.inTx(ctx, func(tx *platform.Store, _ pgx.Tx) error {
+		if err := tx.LockUserSession(ctx, userID); err != nil {
+			return fmt.Errorf("auth: lock user session: %w", err)
+		}
+		_, rechecked, ok, err := tx.GetUserAuthByEmail(ctx, email)
+		if err != nil {
+			return fmt.Errorf("auth: password login re-check: %w", err)
+		}
+		if !ok || rechecked != stored {
+			stale = true
+			return nil
+		}
 		profile, memberships, err := e.loadProfile(ctx, tx, userID)
 		if err != nil {
 			return err
@@ -242,6 +263,9 @@ func (e *Endpoints) passwordLogin(
 	})
 	if err != nil {
 		return nil, err
+	}
+	if stale {
+		return loginUnauthenticated(), nil
 	}
 	return e.passwordGrantResponse(grant)
 }
