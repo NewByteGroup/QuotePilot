@@ -28,6 +28,7 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
 )
@@ -73,6 +74,10 @@ func run(ctx context.Context) error {
 		return err
 	}
 	endpoints := buildEndpoints(&cfg, db, store, enqueueAuthMail(riverClient))
+	// The strict surface's approve delegate needs the built River client
+	// for the in-transaction quote_send enqueue (post-build assignment,
+	// like ingest.Inserter above).
+	endpoints.Approver = quotes.NewEndpoints(db, riverClient)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -217,6 +222,17 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	mux.Handle("GET /me", platform.Correlation(platform.Authenticate(cfg)(authSrv)))
 	mux.Handle("GET /me/organization", platform.Correlation(
 		platform.Authenticate(cfg)(platform.ResolveTenant(store)(authSrv))))
+	// POST /quotes/{id}/approve — spec section 4 "Approval": the analyst's
+	// central act. RequireRole narrows membership to the approval set; the
+	// strict surface inside authSrv routes the path to the QuoteApprover
+	// delegate. No CheckOrigin: ResolveTenant already demands the custom
+	// X-Organization-Id header a cross-site browser form cannot set.
+	mux.Handle("POST /quotes/{id}/approve", platform.Correlation(
+		platform.Authenticate(cfg)(
+			platform.ResolveTenant(store)(
+				platform.RequireRole(
+					platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+					authSrv)))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}
