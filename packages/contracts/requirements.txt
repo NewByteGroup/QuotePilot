@@ -1,0 +1,5 @@
+# Schema behavior suite (tests/test_contract_schemas.py) — installed by the
+# contracts-drift CI step only when the suite exists. Pinned: supply-chain
+# rule in AGENTS.md, versions settled months before this pin.
+jsonschema==4.26.0
+referencing==0.37.0

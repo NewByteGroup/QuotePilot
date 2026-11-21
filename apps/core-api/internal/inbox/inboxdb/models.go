@@ -593,6 +593,8 @@ type AppAuthLoginToken struct {
 	ExpiresAt  pgtype.Timestamptz
 	ConsumedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+	// Credential class: 'login' tokens consume at POST /auth/session for a session, 'password_reset' tokens consume at POST /auth/password for a credential write. The consumes filter on it so the two classes can never exchange (ADR-005 amendment 2026-11-16).
+	Purpose string
 }
 
 type AppAuthMailOutbox struct {
@@ -842,6 +844,8 @@ type AppRfqRequest struct {
 	FailureReason        *string
 	CreatedAt            pgtype.Timestamptz
 	UpdatedAt            pgtype.Timestamptz
+	// Why a human must look at this NEEDS_REVIEW RFQ (spec 2026-11-11 S3b). Controlled vocabulary: internal/jobs ReviewReason — never failure_reason, which is reserved for technical failures after retries.
+	ReviewReason *string
 }
 
 type AppSuppressionList struct {
@@ -870,4 +874,6 @@ type AppUser struct {
 	PasswordHashOrMagicSub *string
 	IsPlatformAdmin        bool
 	CreatedAt              pgtype.Timestamptz
+	// Argon2id PHC string for password login (ADR-005 amendment 2026-11-16). NULL means the account has no password set — the password path cannot authenticate it, by design. Written by qp_migrator-side provisioning until the set-password flow lands; qp_app only reads it through app.get_user_auth_by_email.
+	PasswordHash *string
 }

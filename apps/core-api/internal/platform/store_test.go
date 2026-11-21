@@ -392,6 +392,8 @@ func TestStoreMailOutboxLifecycle(t *testing.T) {
 	assert.Equal(t, link, pending.Link)
 	assert.Equal(t, email, pending.Email, "the recipient joins through the login token")
 	assert.WithinDuration(t, expires, pending.ExpiresAt, time.Second)
+	assert.Equal(t, platform.MailPurposeLogin, pending.Purpose,
+		"the token's purpose rides the row so the worker picks the template")
 
 	_, ok = readOutbox(t, store, outboxID)
 	assert.True(t, ok, "read is idempotent — a retried worker sees the same row")

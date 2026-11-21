@@ -87,15 +87,16 @@ func (q *outboxQuerier) createRow(args []any) pgx.Row {
 		}
 		call := outboxCreate{tokenID: args[0].(uuid.UUID), link: link, outboxID: uuid.New()}
 		q.creates = append(q.creates, call)
-		q.rows[call.outboxID] = platform.MailOutbox{Link: link}
+		q.rows[call.outboxID] = platform.MailOutbox{Link: link, Purpose: platform.MailPurposeLogin}
 		*(dest[0].(*uuid.UUID)) = call.outboxID
 		return nil
 	}}
 }
 
 // readRow answers SELECT * FROM app.read_mail_outbox($1): a known id scans
-// the row, an unknown one the pgx.ErrNoRows the Store maps to found=false —
-// the job is done.
+// the four-column row — link, recipient, expiry and the purpose the worker
+// switches its template on — an unknown one the pgx.ErrNoRows the Store
+// maps to found=false — the job is done.
 func (q *outboxQuerier) readRow(args []any) pgx.Row {
 	return stubRow{scan: func(dest ...any) error {
 		if err := q.fail["read_mail_outbox"]; err != nil {
@@ -110,6 +111,7 @@ func (q *outboxQuerier) readRow(args []any) pgx.Row {
 		*(dest[0].(*string)) = row.Link
 		*(dest[1].(*string)) = row.Email
 		*(dest[2].(*time.Time)) = row.ExpiresAt
+		*(dest[3].(*string)) = row.Purpose
 		return nil
 	}}
 }
@@ -151,6 +153,7 @@ func TestAuthMailSendsThenDeletes(t *testing.T) {
 	q.rows[id] = platform.MailOutbox{
 		Link:      "https://web.test/auth/exchange?token=abc",
 		Email:     "ada@test.dev",
+		Purpose:   platform.MailPurposeLogin,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
 
@@ -190,6 +193,7 @@ func TestAuthMailExpiredRowDropsUnsent(t *testing.T) {
 	q.rows[id] = platform.MailOutbox{
 		Link:      "https://web.test/auth/exchange?token=abc",
 		Email:     "ada@test.dev",
+		Purpose:   platform.MailPurposeLogin,
 		ExpiresAt: now.Add(-time.Minute),
 	}
 
@@ -209,6 +213,7 @@ func TestAuthMailSendErrorKeepsRow(t *testing.T) {
 	q.rows[id] = platform.MailOutbox{
 		Link:      "https://web.test/auth/exchange?token=abc",
 		Email:     "ada@test.dev",
+		Purpose:   platform.MailPurposeLogin,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
 
@@ -229,6 +234,7 @@ func TestAuthMailDeleteErrorPropagates(t *testing.T) {
 	q.rows[id] = platform.MailOutbox{
 		Link:      "https://web.test/auth/exchange?token=abc",
 		Email:     "ada@test.dev",
+		Purpose:   platform.MailPurposeLogin,
 		ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
 	q.fail["delete_mail_outbox"] = errBoom
@@ -253,6 +259,79 @@ func TestAuthMailReadErrorPropagates(t *testing.T) {
 	assert.Empty(t, q.deletes)
 }
 
+// TestAuthMailResetPurposePicksResetTemplate is the migration-0007
+// switch: a password_reset outbox row mails the set-password template —
+// SendPasswordReset on the fake, recorded under the reset kind — never a
+// sign-in link. Everything else about the drain is identical.
+func TestAuthMailResetPurposePicksResetTemplate(t *testing.T) {
+	q := newOutboxQuerier()
+	mailer := &platform.FakeMailSender{}
+	worker := jobs.NewAuthMailWorker(platform.NewStore(q), mailer, time.Now)
+	id := uuid.New()
+	q.rows[id] = platform.MailOutbox{
+		Link:      "https://web.test/auth/set-password?token=abc",
+		Email:     "ada@test.dev",
+		Purpose:   platform.MailPurposePasswordReset,
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+
+	require.NoError(t, worker.Work(context.Background(), outboxJob(id)))
+
+	sent := mailer.Sent()
+	require.Len(t, sent, 1)
+	assert.Equal(t, platform.MailPurposePasswordReset, sent[0].Kind,
+		"the reset row must mail the set-password template")
+	assert.Equal(t, "ada@test.dev", sent[0].To)
+	assert.Equal(t, "https://web.test/auth/set-password?token=abc", sent[0].URL)
+	assert.Equal(t, []uuid.UUID{id}, q.deletes)
+}
+
+// TestAuthMailLoginPurposeSendsMagicLink pins the switch's other arm —
+// an explicit 'login' row still mails the sign-in template under the
+// login kind.
+func TestAuthMailLoginPurposeSendsMagicLink(t *testing.T) {
+	q := newOutboxQuerier()
+	mailer := &platform.FakeMailSender{}
+	worker := jobs.NewAuthMailWorker(platform.NewStore(q), mailer, time.Now)
+	id := uuid.New()
+	q.rows[id] = platform.MailOutbox{
+		Link:      "https://web.test/auth/exchange?token=abc",
+		Email:     "ada@test.dev",
+		Purpose:   platform.MailPurposeLogin,
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+
+	require.NoError(t, worker.Work(context.Background(), outboxJob(id)))
+	sent := mailer.Sent()
+	require.Len(t, sent, 1)
+	assert.Equal(t, platform.MailPurposeLogin, sent[0].Kind)
+}
+
+// TestAuthMailUnknownPurposeFailsLoud pins the fail-loud rule: a purpose
+// outside the two CHECKed values errors the job — River will retry, a
+// migration that adds a purpose must teach the switch — rather than
+// silently mailing the wrong credential mail to a real inbox. The row
+// stays pending and nothing is sent.
+func TestAuthMailUnknownPurposeFailsLoud(t *testing.T) {
+	q := newOutboxQuerier()
+	mailer := &platform.FakeMailSender{}
+	worker := jobs.NewAuthMailWorker(platform.NewStore(q), mailer, time.Now)
+	id := uuid.New()
+	q.rows[id] = platform.MailOutbox{
+		Link:      "https://web.test/auth/exchange?token=abc",
+		Email:     "ada@test.dev",
+		Purpose:   "account_invite", // a purpose this migration does not know
+		ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+
+	err := worker.Work(context.Background(), outboxJob(id))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown outbox purpose")
+	assert.Empty(t, mailer.Sent(), "the wrong template must never go out")
+	assert.Empty(t, q.deletes, "a loud failure is not the delete receipt")
+	assert.Contains(t, q.rows, id, "the row stays pending for the retry")
+}
+
 // errBoom is the shared driver/provider failure the tests inject.
 var errBoom = errors.New("boom")
 
@@ -260,4 +339,5 @@ var errBoom = errors.New("boom")
 // fails, so the send-error branch needs its own double.
 type failMailer struct{ err error }
 
-func (f *failMailer) SendMagicLink(context.Context, string, string) error { return f.err }
+func (f *failMailer) SendMagicLink(context.Context, string, string) error     { return f.err }
+func (f *failMailer) SendPasswordReset(context.Context, string, string) error { return f.err }

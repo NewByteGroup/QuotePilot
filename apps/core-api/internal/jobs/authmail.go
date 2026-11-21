@@ -23,11 +23,13 @@ type AuthMailArgs struct {
 // Kind returns the River job kind.
 func (AuthMailArgs) Kind() string { return "auth_mail_send" }
 
-// AuthMailWorker drains the magic-link outbox — the read→send→delete
+// AuthMailWorker drains the auth-mail outbox — the read→send→delete
 // delivery of migration 0004, replacing /auth/login's old detached
-// goroutine. The Store is the plain pool Querier, never InTenantTx:
-// auth_mail_outbox is Layer A like the rest of the auth family, written
-// before any tenant context exists.
+// goroutine, extended by migration 0007 to pick the mail template from
+// the token's purpose (login link vs. set-password link). The Store is
+// the plain pool Querier, never InTenantTx: auth_mail_outbox is Layer A
+// like the rest of the auth family, written before any tenant context
+// exists.
 //
 // Delivery is at-least-once by design: the row only disappears after the
 // mail provider accepts, so a send failure leaves it for River's retry and
@@ -67,10 +69,27 @@ func (w *AuthMailWorker) Work(ctx context.Context, job *river.Job[AuthMailArgs])
 	if w.Now().After(ob.ExpiresAt) {
 		return w.deleteOutbox(ctx, id)
 	}
-	if err := w.Mailer.SendMagicLink(ctx, ob.Email, ob.Link); err != nil {
+	if err := w.sendForPurpose(ctx, ob); err != nil {
 		return fmt.Errorf("jobs: auth_mail_send: send outbox %s: %w", id, err)
 	}
 	return w.deleteOutbox(ctx, id)
+}
+
+// sendForPurpose picks the template the token's purpose asks for — a
+// password_reset row mails the set-password link, never a sign-in link.
+// Anything outside the two CHECKed values is a loud error, not a
+// defaulted template: a migration that adds a purpose must teach this
+// switch, and silently mailing a magic link for an unknown class would
+// send the wrong credential mail to a real inbox.
+func (w *AuthMailWorker) sendForPurpose(ctx context.Context, ob platform.MailOutbox) error {
+	switch ob.Purpose {
+	case platform.MailPurposeLogin:
+		return w.Mailer.SendMagicLink(ctx, ob.Email, ob.Link)
+	case platform.MailPurposePasswordReset:
+		return w.Mailer.SendPasswordReset(ctx, ob.Email, ob.Link)
+	default:
+		return fmt.Errorf("jobs: auth_mail_send: unknown outbox purpose %q", ob.Purpose)
+	}
 }
 
 // deleteOutbox is the terminal step both finishing branches share — the

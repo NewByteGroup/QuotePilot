@@ -14,21 +14,28 @@ import (
 // tests can point the sender at httptest.
 const resendDefaultBaseURL = "https://api.resend.com"
 
-// magicLinkSubject is fixed: the link is platform mail, not a tenant brand
-// (spec section 8).
-const magicLinkSubject = "Your QuotePilot sign-in link"
+// The platform mail subjects are fixed: the link is platform mail, not a
+// tenant brand (spec section 8). The reset variant is the amendment's
+// second template — read_mail_outbox's purpose picks between them.
+const (
+	magicLinkSubject     = "Your QuotePilot sign-in link"
+	passwordResetSubject = "Set your QuotePilot password"
+)
 
 // resendTimeout bounds the mail call so a hung provider cannot stall the
 // auth_mail_send worker past River's job budget.
 const resendTimeout = 10 * time.Second
 
-// MailSender delivers the magic-link email. Production uses
-// ResendMailSender; tests use FakeMailSender (mail_fake.go). The login
-// token travels inside the url argument — implementations must not log it,
-// except LogMailSender (mail_log.go): the dev-only sender whose entire
-// purpose is surfacing the link where no mailbox exists.
+// MailSender delivers the auth emails: the magic link and, since the
+// amendment's forgot-password path (migration 0007), the password-reset
+// link. Production uses ResendMailSender; tests use FakeMailSender
+// (mail_fake.go). The token travels inside the url argument —
+// implementations must not log it, except LogMailSender (mail_log.go):
+// the dev-only sender whose entire purpose is surfacing the link where
+// no mailbox exists.
 type MailSender interface {
 	SendMagicLink(ctx context.Context, to, url string) error
+	SendPasswordReset(ctx context.Context, to, url string) error
 }
 
 // resendRequest is the JSON shape POSTed to /emails.
@@ -61,18 +68,33 @@ func NewResendMailSender(apiKey, from string) *ResendMailSender {
 	}
 }
 
-// SendMagicLink posts one sign-in email. A non-2xx answer is an error
-// carrying the status — never the API key or the tokened URL.
+// SendMagicLink posts one sign-in email.
 //
 //	err := sender.SendMagicLink(ctx, user.Email, loginURL)
 func (s *ResendMailSender) SendMagicLink(ctx context.Context, to, url string) error {
-	req, err := s.newRequest(ctx, to, url)
+	return s.send(ctx, to, magicLinkSubject, magicLinkHTML(url))
+}
+
+// SendPasswordReset posts one set-password email — the amendment's second
+// template. Its own subject and copy exist so the two mails are
+// unmistakable in an inbox: a reset link points at the set-password page
+// and never signs anyone in directly.
+//
+//	err := sender.SendPasswordReset(ctx, user.Email, resetURL)
+func (s *ResendMailSender) SendPasswordReset(ctx context.Context, to, url string) error {
+	return s.send(ctx, to, passwordResetSubject, passwordResetHTML(url))
+}
+
+// send is the one POST both templates share. A non-2xx answer is an error
+// carrying the status — never the API key or the tokened URL.
+func (s *ResendMailSender) send(ctx context.Context, to, subject, html string) error {
+	req, err := s.newRequest(ctx, to, subject, html)
 	if err != nil {
 		return err
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("platform: send magic link: %w", err)
+		return fmt.Errorf("platform: send auth mail: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
@@ -84,12 +106,12 @@ func (s *ResendMailSender) SendMagicLink(ctx context.Context, to, url string) er
 }
 
 // newRequest builds the POST /emails call with its bearer header.
-func (s *ResendMailSender) newRequest(ctx context.Context, to, url string) (*http.Request, error) {
+func (s *ResendMailSender) newRequest(ctx context.Context, to, subject, html string) (*http.Request, error) {
 	payload := resendRequest{
 		From:    s.from,
 		To:      to,
-		Subject: magicLinkSubject,
-		HTML:    magicLinkHTML(url),
+		Subject: subject,
+		HTML:    html,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -108,5 +130,12 @@ func (s *ResendMailSender) newRequest(ctx context.Context, to, url string) (*htt
 // (WebURL + a base64url token), so it is HTML-safe without escaping.
 func magicLinkHTML(url string) string {
 	return `<p>Sign in to QuotePilot: <a href="` + url + `">` + url + `</a></p>` +
+		`<p>The link works once and expires shortly.</p>`
+}
+
+// passwordResetHTML renders the reset body — same minimal shape, its own
+// copy: the page this link opens sets a password, it does not sign in.
+func passwordResetHTML(url string) string {
+	return `<p>Set your QuotePilot password: <a href="` + url + `">` + url + `</a></p>` +
 		`<p>The link works once and expires shortly.</p>`
 }

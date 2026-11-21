@@ -154,7 +154,8 @@ jobs:
           fi
           # @redocly/cli 2.76.0 — pinned. ADR-002 fixes OpenAPI 3.0.3; only the
           # specs under packages/contracts/openapi are linted (other files in
-          # packages/contracts, e.g. package.json, are not OpenAPI documents).
+          # packages/contracts — package.json, the schemas/*.schema.json JSON
+          # Schemas — are not OpenAPI documents).
           find packages/contracts/openapi -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 \
             | xargs -0 -n1 npx --yes @redocly/cli@2.76.0 lint
 
@@ -446,6 +447,19 @@ jobs:
             echo "$untracked"
             exit 1
           fi
+
+      # Behavior suite for the hand-written JSON Schemas (KG air tariffs,
+      # declared freight/insurance inputs). Self-gating on the suite's
+      # presence so it is quiet until packages/contracts/tests lands —
+      # then it runs the Makefile `test` target on every contract change.
+      - name: Contract schema behavior tests
+        run: |
+          if [ ! -f packages/contracts/tests/test_contract_schemas.py ] || ! grep -q '^test:' packages/contracts/Makefile; then
+            echo "stub: no schema behavior suite yet — check activates when packages/contracts/tests + Makefile test land"
+            exit 0
+          fi
+          pip install --requirement packages/contracts/requirements.txt
+          make -C packages/contracts test
 
       - name: Regenerate sqlc and check for drift
         run: |

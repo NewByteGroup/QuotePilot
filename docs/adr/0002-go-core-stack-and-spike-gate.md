@@ -28,6 +28,7 @@ Constraints: three people, online phase ends 30/11, final 12/12. The core is a s
 | Migrations | `goose`, plain SQL, sequential integer versions | Run by a separate `cmd/migrate` binary with the `qp_migrator` DSN. The server never runs migrations at boot and never holds the migrator credential. |
 | Job queue | River with `riverpgxv5`, schema `river` | River's own migrations run from `cmd/migrate` with the schema set explicitly (ADR-003 section 1). |
 | JWT | `golang-jwt/jwt` v5 | Details in ADR-005. |
+| Password hashing | `golang.org/x/crypto` (`argon2` only) | Argon2id hashing for password login, added by the ADR-005 amendment of 2026-11-16; `golang.org/x` is maintained by the Go team. |
 | Webhook signatures | Svix's Go library for verification only | Resend signs webhooks with Svix headers. Wrapped behind a small interface. |
 | Resend client | `resend-go` v3 behind an interface owned by this project | Same rule as every third party in `AGENTS.md`. Fake implementation for tests. |
 | Logging | `log/slog` with the JSON handler | `correlation_id` on every line. Bodies, rates and margins are never logged. |

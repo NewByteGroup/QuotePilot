@@ -52,6 +52,11 @@ type Endpoints struct {
 	ipLimiter    *platform.Limiter
 	emailLimiter *platform.Limiter
 	now          func() time.Time
+	// Approver serves approveQuote on this same strict surface; assigned
+	// post-build in cmd/server (it needs the River client for the
+	// in-transaction send enqueue — the same post-build assignment as
+	// jobs.RfqIngestWorker.Inserter). Nil fails the call loudly.
+	Approver QuoteApprover
 }
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)

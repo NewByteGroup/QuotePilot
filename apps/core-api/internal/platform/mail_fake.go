@@ -5,10 +5,12 @@ import (
 	"sync"
 )
 
-// MagicSend is one recorded fake send: recipient plus the full magic URL.
+// MagicSend is one recorded fake send: which template went out (the
+// outbox row's purpose drove it), the recipient and the full tokened URL.
 type MagicSend struct {
-	To  string
-	URL string
+	Kind string
+	To   string
+	URL  string
 }
 
 // FakeMailSender is the test double for MailSender: it records every call
@@ -29,15 +31,26 @@ type FakeMailSender struct {
 
 var _ MailSender = (*FakeMailSender)(nil)
 
-// SendMagicLink records the pair; it never fails.
+// SendMagicLink records the pair under the login kind; it never fails.
 //
 //	fake := &platform.FakeMailSender{}
 //	_ = fake.SendMagicLink(ctx, to, url)
 //	assert.Len(t, fake.Sent(), 1)
 func (f *FakeMailSender) SendMagicLink(_ context.Context, to, url string) error {
+	return f.record(MailPurposeLogin, to, url)
+}
+
+// SendPasswordReset records the pair under the reset kind — the template
+// assertions the worker tests make read Sent()[i].Kind.
+func (f *FakeMailSender) SendPasswordReset(_ context.Context, to, url string) error {
+	return f.record(MailPurposePasswordReset, to, url)
+}
+
+// record is the one append both sends share.
+func (f *FakeMailSender) record(kind, to, url string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sends = append(f.sends, MagicSend{To: to, URL: url})
+	f.sends = append(f.sends, MagicSend{Kind: kind, To: to, URL: url})
 	return nil
 }
 

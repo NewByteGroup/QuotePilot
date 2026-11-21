@@ -3,7 +3,7 @@
 // River workers that own staged jobs (ADR-004). It holds only the qp_app
 // DSN — schema changes go through cmd/migrate as qp_migrator, never here.
 //
-//	PORT=8080 POSTGRES_DSN=postgres://qp_app:... WEB_URL=https://app.example \
+//	APP_ENV=local PORT=8080 POSTGRES_DSN=postgres://qp_app:... WEB_URL=https://app.example \
 //	  AUTH_JWT_KEYS=k1=<32+ chars> RESEND_API_KEY=... AUTH_MAGIC_FROM=... \
 //	  RESEND_WEBHOOK_SECRET=whsec_... go run ./cmd/server
 package main
@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
 )
@@ -64,7 +66,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newStorage())
+	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg))
 	if err != nil {
 		return err
 	}
@@ -73,6 +75,10 @@ func run(ctx context.Context) error {
 		return err
 	}
 	endpoints := buildEndpoints(&cfg, db, store, enqueueAuthMail(riverClient))
+	// The strict surface's approve delegate needs the built River client
+	// for the in-transaction quote_send enqueue (post-build assignment,
+	// like ingest.Inserter above).
+	endpoints.Approver = quotes.NewEndpoints(db, riverClient)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -171,6 +177,41 @@ func newReceiver(cfg *platform.Config) resend.Receiver {
 	return resend.UnconfiguredReceiver{}
 }
 
+// newSender picks the Resend Sending client for the quote_send worker —
+// the same fail-soft contract as the receiver: without RESEND_API_KEY the
+// unconfigured stub binds and sends fail loudly as permanent errors, so a
+// staged send cancels instead of retrying a credential that cannot appear.
+func newSender(cfg *platform.Config) resend.Sender {
+	if cfg.ResendAPIKey != "" {
+		return resend.NewSendingClient(cfg.ResendAPIKey)
+	}
+	slog.Warn("server: RESEND_API_KEY unset — quote_send binds the unconfigured sender (sends fail loudly)")
+	return resend.UnconfiguredSender{}
+}
+
+// devDefaultOutboundFrom is the boot fallback when RESEND_API_KEY is set
+// but QP_OUTBOUND_FROM is not: Resend's own always-verified sender, so dev
+// keeps delivering without a verified domain. Production must set
+// QP_OUTBOUND_FROM — the warn below is the alarm; sending From an
+// unverified domain is a permanent 4xx that would cancel every send.
+const devDefaultOutboundFrom = "onboarding@resend.dev"
+
+// newOutboundFrom resolves the verified From: mailbox for quote_send. The
+// fail-soft rule matches the receiver/sender stubs: warn loudly, never
+// refuse boot — a missing QP_OUTBOUND_FROM degrades to the dev-safe
+// default rather than killing the server, because refusing boot would make
+// a missing cosmetic var a stricter gate than the API key itself (and a
+// wrong-domain From already fails loudly as an audited permanent error).
+func newOutboundFrom(cfg *platform.Config) string {
+	if from := strings.TrimSpace(cfg.OutboundFrom); from != "" {
+		return from
+	}
+	if cfg.ResendAPIKey != "" {
+		slog.Warn("server: QP_OUTBOUND_FROM unset — quote_send From falls back to " + devDefaultOutboundFrom + " (dev-safe only; set a verified domain)")
+	}
+	return devDefaultOutboundFrom
+}
+
 // newStorage binds the object-storage seam. R2 credentials are a pending
 // spec open item, so every environment gets the directory-backed dev store
 // for now — bytes land under QP_STORAGE_DIR (default .dev-storage) and
@@ -217,6 +258,17 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	mux.Handle("GET /me", platform.Correlation(platform.Authenticate(cfg)(authSrv)))
 	mux.Handle("GET /me/organization", platform.Correlation(
 		platform.Authenticate(cfg)(platform.ResolveTenant(store)(authSrv))))
+	// POST /quotes/{id}/approve — spec section 4 "Approval": the analyst's
+	// central act. RequireRole narrows membership to the approval set; the
+	// strict surface inside authSrv routes the path to the QuoteApprover
+	// delegate. No CheckOrigin: ResolveTenant already demands the custom
+	// X-Organization-Id header a cross-site browser form cannot set.
+	mux.Handle("POST /quotes/{id}/approve", platform.Correlation(
+		platform.Authenticate(cfg)(
+			platform.ResolveTenant(store)(
+				platform.RequireRole(
+					platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+					authSrv)))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}
@@ -230,12 +282,13 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 // rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
 // is disabled (its fast schedule was a spike affordance; production never
 // owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, storage platform.ObjectStorage) (*river.Client[pgx.Tx], error) {
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
+	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		// Only queues with registered workers are declared: rfq_ingest
 		// chains rfq_extract into the `extract` queue, whose worker lands in
@@ -244,6 +297,7 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
+			jobs.QueueSend:     {MaxWorkers: 4},
 		},
 		Workers:           workers,
 		Schema:            "river",

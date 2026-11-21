@@ -22,9 +22,9 @@ The equation in spec section 4.4 is a good outline, but the engine cannot be wri
 ## 2. Scope and assumptions
 
 - **MVP covers imports into and exports from Brazil in FCL Hapag and AIR.** Quote only charges payable by the requesting customer (importer or exporter) under the Incoterm. The destination-terminal, CIF-band storage, THC and customs-dispatch examples below describe an import proposal; export charge allocation remains open for validation.
-- Import taxes and duties (II, IPI, ICMS, PIS/COFINS) are proposed outside the quote. **[business] confirm that exclusion; export-specific customs and tax treatment remains open in question 16.**
+- Import taxes and duties (II, IPI, ICMS, PIS/COFINS) are proposed outside the quote. Decided in the 2026-11-16 pilot meeting: taxes shown are **only those on the agency service** (ISS/CBS/IOF), presented as their own payload group; freight is a cost pass-through (repasse) and is never taxed — the invoice never levies on freight value.
 - FCL Hapag and air are in the MVP. LCL, Inland, Door-to-Door and AFRMM are outside the MVP, even if an enum or historical tariff still names them.
-- BRL output remains the current proposal. Confirm the export quote currency and FX treatment under open question 16. Foreign-currency amounts are converted line by line and every applied rate is recorded.
+- **Decided (pilot meeting, 2026-11-16): quote lines are always presented in the original currency** (USD/EUR as the carrier charges) — no conversion to BRL, no PTAX rate shown to the customer. Consequence: the quote's totals are per-currency groups (freight / local fees / service taxes) rather than one BRL total, and the carrier's own PTAX spread (up to ~10%) is input data on its charges, not a rate we compute. Supersedes the earlier "BRL output" proposal; see open question 16.
 
 ## 3. Inputs and outputs
 
@@ -62,24 +62,31 @@ Notes:
 
 ## 5. Calculation order
 
+**Currency (decided 2026-11-16).** The customer-facing quote is grouped and
+totaled in each original currency — international freight, local fees and
+service taxes as separate groups; no BRL grand total and no PTAX is shown.
+BRL conversion below is therefore internal-only: it feeds the import CIF fee
+bands (BRL public tables), the negative-margin check and the audit view.
+`pricing.Output` exposes per-currency group totals, not a single BRL figure.
+
 1. **Validate and resolve.** Reject negative or invalid markup percentages. Resolve `route_target_margin` before the spec's `default_markup_rate`, and modal before `ALL`. Both rates mean markup on freight cost for the MVP. The proposed field rename is documented in the spec only; schema and contract changes require separate review. The data model enforces one rule per scope with `UNIQUE NULLS NOT DISTINCT` (comment 10).
 2. **Chargeable quantity.**
    - FCL: number of equipment units.
    - LCL: W/M calculation is deferred beyond the MVP.
    - Air: `chargeable_kg = max(gross_kg, volume_m3 × 166.67)`. This factor is fixed for the MVP; any carrier-specific exception requires a later decision.
 3. **Select tariffs.** Filter by direction, route, modal and equipment for charges payable by the requesting customer. Before this pure package runs, Stage 4A (accepted in ADR-004 on 2026-11-16: its own job and checkpoint, separate from pricing; the offer wire contract and the `carrier_offers` migration still need Pedro's approval) obtains a Hapag FCL offer through the `ai-engine` connector only when the customer owes ocean freight under the Incoterm; the worker passes that offer as pricing input. The package selects an AIR freight tariff only when the customer owes air freight. If freight is not payable by the customer, do not create a sell line for it. Direction and export tariff coverage still need validation. For each tariff natural key (carrier, route, modal, equipment, charge_category, charge_code), consider the rows whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing time (`activated_at <= priced_at`); take the row from the batch with the latest `activated_at`. If that row is a tombstone (`is_removed`), that natural key is dropped from the candidates (for example one carrier's rate); whether the result is then `INCOMPLETE` follows the offer rule in open question 12. See RFC-002 step 3 (tariff versioning). Filtering is deterministic on codes; embeddings only help rank service descriptions among already-valid rows (spec section 5.4 warning applies). If several carriers qualify, the default is: price the lowest net cost, list the others as alternatives in the audit view. **[business] one price or several options?** Missing tariff for a required group makes the result `INCOMPLETE`; the engine never invents a number.
-4. **Freight and pass-through lines.** When the customer owes FCL Hapag ocean freight, apply cost-based markup only to `OCEAN_FREIGHT`, with floor `min_markup_usd × container_count`. When the customer owes air freight, calculate base net freight as `max(min_amount, chargeable_kg × net_amount)` and apply cost-based markup only to that base. Local charges, air FSC/SSC and fixed fees are separate pass-through lines sold at cost only when payable by the requesting customer under the Incoterm. Convert each line to BRL using the pinned FX rate (section 7).
+4. **Freight and pass-through lines.** When the customer owes FCL Hapag ocean freight, apply cost-based markup only to `OCEAN_FREIGHT`, with floor `min_markup_usd × container_count`. When the customer owes air freight, calculate base net freight as `max(min_amount, chargeable_kg × net_amount)` and apply cost-based markup only to that base. Local charges, air FSC/SSC and fixed fees are separate pass-through lines sold at cost only when payable by the requesting customer under the Incoterm. Lines keep their original currency in the output; BRL conversion applies only where step 5 or the internal audit requires it (section 7).
 5. **Import CIF base in BRL, when applicable.** For import fee bands only, use `(goods value + freight + insurance)`, with freight from the tariff when payable by the customer or declared in the documents when paid by the other party. Convert at the still-open customs rate (section 7). Do not assume this CIF-based fee basis applies to exports.
 6. **Terminal lines by direction.** For the import proposal, look up the destination public fee band for the CIF base, weight and volume; first-period storage remains a business assumption. Which export origin/destination terminal charges are payable by the requesting customer, and their calculation basis and source, remain open **[business]**.
 7. **Organization fixed fees.** Include fees from `fixed_fees_json` only when payable by the requesting customer under the Incoterm; convert if not in BRL. The export allocation is open in question 13.
-8. **Cost total** is the sum of the rounded line costs (section 6), so what the analyst audits adds up.
+8. **Cost total** is the sum of the rounded line costs per currency group (section 6) — plus a BRL-normalized internal total for the margin check — so what the analyst audits adds up.
 9. **Markup and price** (sections 6 and 8): add the markup to the eligible FCL ocean or base air freight only, then add all other lines at cost.
 
 ## 6. Rounding and cent allocation
 
-- Money is `decimal`. BRL amounts have two decimal places; FX rates have six (`NUMERIC(10,6)`).
-- Each cost line is rounded **half up** to the cent when it is converted to BRL. Banker's rounding is rejected because it surprises people who check by hand. **[business] confirm.**
-- Price is the sum of rounded sell lines. For FCL, the eligible ocean freight sell amount is `Net_Ocean + max(Net_Ocean × M_route, min_markup_usd × container_count)`; for air, it is `Net_Air × (1 + M_route)`. All other lines sell at their rounded cost. Convert foreign-currency amounts to BRL with pinned FX rates before the final sum.
+- Money is `decimal`. Amounts are rounded to the currency's minor unit (two decimal places for the currencies in scope); FX rates have six (`NUMERIC(10,6)`).
+- Each cost line is rounded **half up** to the cent in its own currency. Banker's rounding is rejected because it surprises people who check by hand. **[business] confirm.**
+- Price is the sum of rounded sell lines per currency group — there is no single cross-currency total in the customer-facing output. For FCL, the eligible ocean freight sell amount is `Net_Ocean + max(Net_Ocean × M_route, min_markup_usd × container_count)`; for air, it is `Net_Air × (1 + M_route)`. All other lines sell at their rounded cost. A BRL-normalized internal total (pinned FX) exists for the margin check and audit only — it is never shown to the customer.
 - Allocate any rounding cent deterministically among eligible freight lines so that **the sum of line sell amounts equals the quote price**; pass-through lines remain equal to their rounded cost. Tie order and half-up behavior remain part of the golden-quote validation (ADR-008).
 - `M_route` is markup **on freight cost**, not margin on the final selling price. The product spec names the route field `route_target_margin` and the default field `default_markup_rate`; the default-field rename is not yet a schema or contract change. Label the UI as markup.
 
@@ -117,7 +124,17 @@ The earlier alternatives of margin on the whole price or separate pass-through m
 | 13 | Export Incoterm matrix: which freight, origin/export customs, terminal, destination and fixed charges are payable by the requesting exporter or importer for each supported Incoterm? | To confirm with pilot companies | Open; current section 4 matrix applies to imports only |
 | 14 | Export terminal and handling charges: which source, location and calculation basis apply instead of import CIF-band destination storage? | To confirm with pilot companies | Open; do not reuse import CIF formula automatically |
 | 15 | Export tariff coverage and direction routing: can Hapag return FCL export offers for the pilot routes, and which AIR export tariffs are available; how are ambiguous or reverse routes handled? | To confirm with pilot companies | Open; no unverified reverse-route rate |
-| 16 | Export quote currency, FX source/timing and any export-specific customs or tax treatment? | To confirm with pilot companies | Open; keep current BRL output only as an explicit proposal |
+| 16 | Export quote currency, FX source/timing and any export-specific customs or tax treatment? | Pilot meeting | Resolved 2026-11-16: all lines in original currency, no conversion, no PTAX shown; service-only taxes as a separate group |
+
+**Business rules decided in the 2026-11-16 pilot meeting** (recorded here; the pipeline spec carries the pipeline-side consequences):
+
+- **Negative margin is a hard block** — a proposal priced below cost is never sent; the block fires at approval/send (systemic, not a warning).
+- **Quote validity**: the carrier sets the expiry (weeks, days, or a specific vessel for spot rates). A quote with under ~30 minutes left is not viable; ~5 business days is the preferred window.
+- **`free_time`** (container free time) is part of the commercial proposal payload.
+- **Payload grouping**: international freight, local fees and service taxes are separate groups in the quote payload; the front-end adapts to the payload shape.
+- **Import tariff sourcing**: for imports the Brazilian forwarder negotiates with the **overseas correspondent** (the selling agent), not directly with the carrier — the contract with the correspondent is what enables bookings.
+- **Carrier connectors**: CMA CGM API is approved and is the first connector; Hapag-Lloyd's API was not granted (internal security restrictions — a retry via the Centauro/NewByte registration is possible); a **Playwright fallback** validates the MVP while a custom-quota offer from the paid aggregator (Essential Pack, 10k calls) is negotiated down to ~100–500 calls.
+- **Confidence >95%** (confirmed 2026-11-16): the whole pipeline processes automatically — extract, fetch offers, price — without pausing for review. It does **not** authorize auto-send: a human approves every quote before it leaves, regardless of confidence.
 
 ## 10. Impact
 

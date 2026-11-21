@@ -20,11 +20,36 @@ func TestFakeStorageCapturesKeyAndBytes(t *testing.T) {
 	require.NoError(t, store.Put(context.Background(), "tenants/org1/rfqs/rfq1/a.pdf", body))
 	body[0] = 'X' // caller mutation must not reach the stored copy
 
-	got, ok := store.Get("tenants/org1/rfqs/rfq1/a.pdf")
-	require.True(t, ok)
+	got, err := store.Get(context.Background(), "tenants/org1/rfqs/rfq1/a.pdf")
+	require.NoError(t, err)
 	assert.Equal(t, []byte("attachment-bytes"), got)
 	assert.Equal(t, []string{"tenants/org1/rfqs/rfq1/a.pdf"}, store.Keys())
 
-	_, ok = store.Get("tenants/org1/rfqs/rfq1/missing")
-	assert.False(t, ok)
+	_, err = store.Get(context.Background(), "tenants/org1/rfqs/rfq1/missing")
+	assert.ErrorIs(t, err, platform.ErrObjectNotFound)
+}
+
+// TestDirStorageGet exercises the dev binding against a real temp dir:
+// bytes round-trip through the filesystem, a missing key is
+// ErrObjectNotFound (not a wrapped fs error), and a ".." key is refused by
+// the same guard Put applies — Get must not climb out of the root either.
+func TestDirStorageGet(t *testing.T) {
+	root := t.TempDir()
+	store := platform.NewDirStorage(root)
+	ctx := context.Background()
+
+	require.NoError(t, store.Put(ctx, "tenants/org1/quotes/q.pdf", []byte("%PDF-1")))
+	got, err := store.Get(ctx, "tenants/org1/quotes/q.pdf")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("%PDF-1"), got)
+
+	_, err = store.Get(ctx, "tenants/org1/quotes/none.pdf")
+	assert.ErrorIs(t, err, platform.ErrObjectNotFound)
+
+	_, err = store.Get(ctx, "../outside.txt")
+	assert.Error(t, err)
+	assert.NotErrorIs(t, err, platform.ErrObjectNotFound, "traversal is a guard refusal, not a miss")
+
+	assert.Error(t, store.Put(ctx, "tenants/../escape", []byte("x")),
+		"Put applies the same '..' guard")
 }
