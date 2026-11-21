@@ -1,0 +1,161 @@
+openapi: 3.0.3
+info:
+  title: QuotePilot ai-engine API (provisional)
+  version: "0.1.0"
+  description: |
+    PROVISIONAL transport contract between core-api and ai-engine for the
+    S2 rfq_extract stage (spec 2026-11-11-staged-quote-pipeline). Pending
+    Marcelo's implementation — core-api isolates it behind
+    internal/aiengine.Client so only the adapter changes if shapes move.
+
+    Security rules (AGENTS.md): ai-engine never receives organization_id —
+    requests carry correlation_id + tenant content only, and every response
+    is untrusted (core-api validates before persisting).
+
+    Error semantics core-api relies on:
+    - transient (retry): 408, 425, 429, 5xx, transport errors
+    - contract violation (never persisted, one retry max): other 4xx,
+      schema-invalid bodies
+servers:
+  - url: http://localhost:8000
+paths:
+  /v1/classify:
+    post:
+      summary: Stage 2 routing — RFQ / TARIFF_UPDATE / OTHER (Jev, ADR-006)
+      operationId: classify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, subject, sender, body_text, body_html, attachment_metas]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                subject: { type: string }
+                sender: { type: string, description: "Customer From: address" }
+                body_text:
+                  type: string
+                  description: "First 16 KB of the text body (ADR-006 classify input bound — core-api truncates rune-safe before sending)"
+                body_html:
+                  type: string
+                  description: "Full HTML body — HTML-only emails still classify on their content"
+                attachment_metas:
+                  type: array
+                  items:
+                    type: object
+                    required: [filename, content_type]
+                    additionalProperties: false
+                    properties:
+                      filename: { type: string }
+                      content_type: { type: string }
+      responses:
+        "200":
+          description: Routing decision with calibrated probabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [label, probabilities]
+                additionalProperties: false
+                properties:
+                  label: { type: string, enum: [RFQ, TARIFF_UPDATE, OTHER] }
+                  probabilities:
+                    type: object
+                    required: [RFQ, TARIFF_UPDATE, OTHER]
+                    additionalProperties: false
+                    properties:
+                      RFQ: { type: number, minimum: 0, maximum: 1 }
+                      TARIFF_UPDATE: { type: number, minimum: 0, maximum: 1 }
+                      OTHER: { type: number, minimum: 0, maximum: 1 }
+                  model: { type: string, description: "Pinned classifier model id" }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/extract:
+    post:
+      summary: Stage 3 structured extraction (RFC-004)
+      description: Returns an ExtractionResult — see
+        ../schemas/extraction_result.schema.json (the authoritative shape;
+        core-api validates it and the sanity bounds before persisting).
+      operationId: extract
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, subject, sender, body_text, body_html, parsed_markdown]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                subject: { type: string }
+                sender: { type: string }
+                body_text: { type: string }
+                body_html: { type: string }
+                parsed_markdown:
+                  type: array
+                  items: { type: string }
+                  description: parsed_markdown of every attachment that yielded one
+      responses:
+        "200":
+          description: |
+            ExtractionResult. The authoritative shape is the JSON Schema
+            (draft 2020-12) at ../schemas/extraction_result.schema.json —
+            it is NOT inlined here because 2020-12 features are not
+            expressible in OpenAPI 3.0.3 schemas (ADR-002 pins 3.0.3).
+            core-api re-validates every response against it before
+            persisting.
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/attachments/parse:
+    post:
+      summary: Attachment → markdown conversion for extraction input
+      operationId: parseAttachment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, filename, content_type, bytes_b64]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                filename: { type: string }
+                content_type: { type: string }
+                bytes_b64: { type: string, format: byte, description: "base64-encoded attachment bytes" }
+      responses:
+        "200":
+          description: Parsed markdown text
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [parsed_markdown]
+                additionalProperties: false
+                properties:
+                  parsed_markdown: { type: string }
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: AI_ENGINE_SERVICE_TOKEN
+  responses:
+    Error:
+      description: Failure — core-api classifies by status code
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+security:
+  - bearerAuth: []
