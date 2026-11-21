@@ -162,8 +162,8 @@ func TestSchemaEnforcementAppendOnly(t *testing.T) {
 			org.String())
 		rfq := seedRFQ(t, ctx, tx, org)
 		require.NoError(t, tx.QueryRow(ctx, `
-			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, offer_payload_json, fetched_at)
-			VALUES ($1, $2, 'HAPAG', '{}'::jsonb, now()) RETURNING id`,
+			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, outcome, request_hash, offer_payload_json, fetched_at)
+			VALUES ($1, $2, 'HAPAG', 'OFFER_FOUND', 'test-hash-001', '{}'::jsonb, now()) RETURNING id`,
 			org.String(), rfq.String()).Scan(&offer))
 		return nil
 	}))

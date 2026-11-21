@@ -619,12 +619,15 @@ type AppCarrierOffer struct {
 	ID               pgtype.UUID
 	OrganizationID   pgtype.UUID
 	RfqID            pgtype.UUID
-	Carrier          string
+	Carrier          *string
 	OfferReference   *string
 	OfferPayloadJson []byte
 	FetchedAt        pgtype.Timestamptz
 	ExpiresAt        pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
+	Outcome          string
+	RequestHash      string
+	Source           string
 }
 
 type AppConnector struct {

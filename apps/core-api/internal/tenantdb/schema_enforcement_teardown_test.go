@@ -56,8 +56,8 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		seedBatchTariff(t, ctx, tx, org)
 		rfq := seedRFQ(t, ctx, tx, org)
 		mustExec(t, ctx, tx, `
-			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, offer_payload_json, fetched_at)
-			VALUES ($1, $2, 'HAPAG', '{}'::jsonb, now())`,
+			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, outcome, request_hash, offer_payload_json, fetched_at)
+			VALUES ($1, $2, 'HAPAG', 'OFFER_FOUND', 'test-hash-002', '{}'::jsonb, now())`,
 			org.String(), rfq.String())
 		mustExec(t, ctx, tx, `
 			INSERT INTO app.rfq_attachments (organization_id, rfq_id, storage_key, filename)

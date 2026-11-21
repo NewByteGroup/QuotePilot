@@ -310,15 +310,20 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
+	price := jobs.NewRfqPriceWorker(db, time.Now)
+	river.AddWorker(workers, price)
 	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		// Only queues with registered workers are declared: rfq_ingest
 		// chains rfq_extract into the `extract` queue, whose worker lands in
 		// a later slice — an undeclared queue simply waits unworked instead
-		// of the job failing with UnknownJobKindError.
+		// of the job failing with UnknownJobKindError. The `price` queue
+		// hosts both S3a (rfq_fetch_rates, lands with the S3a worker) and
+		// S3b (rfq_price, registered below) per spec §3's stage table.
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
+			jobs.QueuePrice:    {MaxWorkers: 4},
 			jobs.QueueSend:     {MaxWorkers: 4},
 		},
 		Workers:           workers,
@@ -336,9 +341,12 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	if err != nil {
 		return nil, fmt.Errorf("server: river client: %w", err)
 	}
-	// The worker needs the client for InsertTx; the client needs the worker
-	// registry at construction — so the seam is assigned post-build, pre-Start.
+	// The workers need the client for InsertTx; the client needs the worker
+	// registry at construction — so the seam is assigned post-build,
+	// pre-Start. rfq_price's enqueue is rfq_render, still unregistered:
+	// SkipUnknownJobCheck (above) stays on until S4 lands.
 	ingest.Inserter = client
+	price.Inserter = client
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("server: start river: %w", err)
 	}
