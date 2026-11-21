@@ -75,12 +75,6 @@ func (v shipmentVerdict) missing(field string) shipmentVerdict {
 	return v
 }
 
-func (v shipmentVerdict) incomplete(field string) shipmentVerdict {
-	v.park = ReviewReasonPricingIncomplete
-	v.field = field
-	return v
-}
-
 // buildShipment turns the extraction's FieldValue map into the shipment
 // half of pricing.Input. FieldValue.Value is a string per contract; a
 // required key absent or unparsable parks REQUIRED_FIELD_MISSING, a
