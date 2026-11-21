@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +24,13 @@ const extractJobTimeout = 120 * time.Second
 // fixes the classify input at the first 16 KB of body — enough signal for
 // routing, bounded enough to keep the call cheap and predictable).
 const classifyBodyLimit = 16 * 1024
+
+// extractBodyLimit bounds the body_text sent to the extractor. The engine
+// owner asked extraction to see the fuller body than the 16 KB routing
+// cap — 64 KiB keeps the paid call bounded while surviving long thread
+// tails (engine-side limits are finalized on the engine; see
+// packages/contracts/openapi/ai-engine.yaml).
+const extractBodyLimit = 64 * 1024
 
 // contractMaxAttempts bounds contract-violating output to the spec's "at
 // most one retry": attempt 1 errors for the retry, attempt 2 parks
@@ -72,8 +77,9 @@ func (w *RfqExtractWorker) Timeout(*river.Job[ExtractArgs]) time.Duration {
 }
 
 // Work runs the S2 pipeline for one RFQ inside its tenant transaction.
-// Transient errors propagate for River's retry; a contract violation
-// retries at most once before parking NEEDS_REVIEW (spec section 3).
+// Transient errors propagate for River's retry — exhausted attempts end
+// FAILED (ADR-004); a contract violation retries at most once before
+// parking NEEDS_REVIEW (spec section 3).
 func (w *RfqExtractWorker) Work(ctx context.Context, job *river.Job[ExtractArgs]) error {
 	args := job.Args
 	return w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
@@ -91,7 +97,7 @@ func jobAttempt(job *river.Job[ExtractArgs]) int {
 }
 
 // jobMaxAttempts reads the attempt budget; 0 (nil JobRow) means "unknown",
-// which disables the final-attempt transient park.
+// which disables the final-attempt transient FAILED write.
 func jobMaxAttempts(job *river.Job[ExtractArgs]) int {
 	if job.JobRow == nil {
 		return 0
@@ -117,10 +123,14 @@ func (w *RfqExtractWorker) extract(ctx context.Context, tx pgx.Tx, args ExtractA
 	if err != nil {
 		return err
 	}
-	if !hasUsableText(rfq, markdowns) {
+	// The body resolves once: the text part, or the HTML part reduced to
+	// text — the guard below must judge what the engine will actually see,
+	// not whether a markup-only column was non-empty.
+	body := requestBody(rfq)
+	if !hasUsableText(body, markdowns) {
 		return w.park(ctx, tx, args, rfq, ReviewReasonNoUsableText, nil)
 	}
-	res, err := w.AIEngine.Classify(ctx, classifyReq(args, rfq, atts))
+	res, err := w.AIEngine.Classify(ctx, classifyReq(args, rfq, atts, body))
 	if err != nil {
 		return w.engineError(ctx, tx, args, rfq, attempt, maxAttempts, err)
 	}
@@ -134,7 +144,7 @@ func (w *RfqExtractWorker) extract(ctx context.Context, tx pgx.Tx, args ExtractA
 		return w.park(ctx, tx, args, rfq, ReviewReasonTariffUpdate,
 			map[string]any{"probabilities": res.Probabilities, "model": res.Model})
 	case "RFQ":
-		return w.extractFields(ctx, tx, args, rfq, markdowns, attempt, maxAttempts)
+		return w.extractFields(ctx, tx, args, rfq, body, markdowns, res, attempt, maxAttempts)
 	default:
 		// An unrecognized label is untrusted output, not a routing
 		// decision — the contract-violation budget applies, and it must
@@ -144,9 +154,10 @@ func (w *RfqExtractWorker) extract(ctx context.Context, tx pgx.Tx, args ExtractA
 	}
 }
 
-// extractFields is the RFQ half: extract → validate → gate → chain/park.
-func (w *RfqExtractWorker) extractFields(ctx context.Context, tx pgx.Tx, args ExtractArgs, rfq extractRfq, markdowns []string, attempt, maxAttempts int) error {
-	raw, err := w.AIEngine.Extract(ctx, extractReq(args, rfq, markdowns))
+// extractFields is the RFQ half: extract → validate → echo check → gate →
+// chain/park.
+func (w *RfqExtractWorker) extractFields(ctx context.Context, tx pgx.Tx, args ExtractArgs, rfq extractRfq, body string, markdowns []aiengine.ParsedMarkdown, res *aiengine.ClassifyResult, attempt, maxAttempts int) error {
+	raw, err := w.AIEngine.Extract(ctx, extractReq(args, rfq, body, markdowns, res))
 	if err != nil {
 		return w.engineError(ctx, tx, args, rfq, attempt, maxAttempts, err)
 	}
@@ -154,22 +165,33 @@ func (w *RfqExtractWorker) extractFields(ctx context.Context, tx pgx.Tx, args Ex
 	if err != nil {
 		return w.contractViolation(ctx, tx, args, rfq, attempt, err)
 	}
+	// The engine echoes the request's classification — only the label is
+	// equality-checked: it is the routing-relevant fact, while
+	// probabilities/model may legitimately re-serialize (rounding,
+	// normalization) and a spurious diff would park a valid RFQ.
+	if report.ClassificationLabel != res.Label {
+		return w.contractViolation(ctx, tx, args, rfq, attempt,
+			fmt.Errorf("extraction classification.label %q does not echo the sent label %q",
+				report.ClassificationLabel, res.Label))
+	}
 	if report.MinConfidence >= extractionConfidenceGate {
 		return w.releaseToPricing(ctx, tx, args, rfq, raw, report)
 	}
 	return w.parkLowConfidence(ctx, tx, args, rfq, raw, report)
 }
 
-// parseAttachments produces parsed_markdown for every row that lacks it.
-// Per-attachment failures are audited and degrade (column stays NULL) —
-// they never abort the pipeline; a body-less RFQ that yields nothing parks
-// NO_USABLE_TEXT afterwards.
-func (w *RfqExtractWorker) parseAttachments(ctx context.Context, tx pgx.Tx, args ExtractArgs, rfq extractRfq, atts []extractAttachment) ([]string, error) {
-	markdowns := []string{}
+// parseAttachments produces {filename, markdown} pairs for every row that
+// yields one — the real filename rides to extract so evidence can cite
+// ATTACHMENT:<filename>. Per-attachment failures are audited and degrade
+// (column stays NULL, nothing is sent for the file) — they never abort
+// the pipeline; a body-less RFQ that yields nothing parks NO_USABLE_TEXT
+// afterwards.
+func (w *RfqExtractWorker) parseAttachments(ctx context.Context, tx pgx.Tx, args ExtractArgs, rfq extractRfq, atts []extractAttachment) ([]aiengine.ParsedMarkdown, error) {
+	markdowns := []aiengine.ParsedMarkdown{}
 	for i := range atts {
 		a := &atts[i]
 		if a.ParsedMarkdown != nil {
-			markdowns = append(markdowns, *a.ParsedMarkdown)
+			markdowns = append(markdowns, aiengine.ParsedMarkdown{Filename: a.Filename, Markdown: *a.ParsedMarkdown})
 			continue
 		}
 		md, err := w.parseAttachment(ctx, tx, args, rfq, a)
@@ -177,7 +199,7 @@ func (w *RfqExtractWorker) parseAttachments(ctx context.Context, tx pgx.Tx, args
 			return nil, err
 		}
 		if md != nil {
-			markdowns = append(markdowns, *md)
+			markdowns = append(markdowns, aiengine.ParsedMarkdown{Filename: a.Filename, Markdown: *md})
 		}
 	}
 	return markdowns, nil
@@ -212,15 +234,19 @@ func (w *RfqExtractWorker) parseAttachment(ctx context.Context, tx pgx.Tx, args 
 // engineError classifies an ai-engine failure: transient propagates for
 // River retry — except on the job's final attempt, where returning the
 // error would discard the job and leave the RFQ stuck invisible in
-// PARSING, so it parks ENGINE_UNAVAILABLE and commits instead. Everything
+// PARSING, so it writes FAILED + failure_reason and commits instead
+// (ADR-004: exhausted retries are a technical failure, not a business
+// park — failure_reason is the column reserved for them). Everything
 // else follows the contract-violation budget.
 func (w *RfqExtractWorker) engineError(ctx context.Context, tx pgx.Tx, args ExtractArgs, rfq extractRfq, attempt, maxAttempts int, err error) error {
 	if !aiengine.IsTransient(err) {
 		return w.contractViolation(ctx, tx, args, rfq, attempt, err)
 	}
 	if maxAttempts > 0 && attempt >= maxAttempts {
-		return w.park(ctx, tx, args, rfq, ReviewReasonEngineUnavailable,
-			map[string]any{"engine_error": err.Error()})
+		reason := truncate(fmt.Sprintf(
+			"rfq_extract: ai-engine unavailable after %d attempts, last error: %s",
+			maxAttempts, err), maxFailureReason)
+		return w.fail(ctx, tx, args, rfq, reason)
 	}
 	return fmt.Errorf("jobs: rfq_extract: engine call on %s: %w", rfq.ID, err)
 }
@@ -244,6 +270,21 @@ func (w *RfqExtractWorker) ignore(ctx context.Context, tx pgx.Tx, args ExtractAr
 		return fmt.Errorf("jobs: rfq_extract: ignore rfq %s: %w", rfq.ID, err)
 	}
 	return w.audit(ctx, tx, args, rfq.ID, "rfq.ignored", nil)
+}
+
+// fail is the dead-letter write of S2 (ADR-004: after the final attempt
+// the job is dead-lettered and the RFQ moves to FAILED with a reason):
+// failure_reason — never review_reason, which is for business gaps — plus
+// the audit row that keeps the failure visible in the inbox.
+func (w *RfqExtractWorker) fail(ctx context.Context, tx pgx.Tx, args ExtractArgs, rfq extractRfq, reason string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE app.rfq_requests
+		SET status = 'FAILED', failure_reason = $2, updated_at = now()
+		WHERE id = $1`, rfq.ID, reason); err != nil {
+		return fmt.Errorf("jobs: rfq_extract: fail rfq %s: %w", rfq.ID, err)
+	}
+	return w.audit(ctx, tx, args, rfq.ID, "rfq.failed",
+		map[string]any{"failure_reason": reason})
 }
 
 // park writes NEEDS_REVIEW + review_reason + the audit row — the triage
@@ -409,65 +450,6 @@ func loadExtractAttachments(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) ([]
 	return pgx.CollectRows(rows, pgx.RowToStructByName[extractAttachment])
 }
 
-// hasUsableText is the no-LLM-call guard: any non-empty body or parsed
-// markdown counts; everything empty parks NO_USABLE_TEXT (spec S2).
-func hasUsableText(rfq extractRfq, markdowns []string) bool {
-	if strNonEmpty(rfq.RawText) || strNonEmpty(rfq.RawHTML) {
-		return true
-	}
-	for _, md := range markdowns {
-		if strings.TrimSpace(md) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// classifyReq builds the classify call — correlation id plus tenant
-// content, never organization_id (rule 2). body_text is bounded at the
-// ADR-006 16 KiB classify input; body_html passes through so HTML-only
-// emails still classify on their content.
-func classifyReq(args ExtractArgs, rfq extractRfq, atts []extractAttachment) aiengine.ClassifyRequest {
-	metas := make([]aiengine.AttachmentMeta, 0, len(atts))
-	for _, a := range atts {
-		metas = append(metas, aiengine.AttachmentMeta{Filename: a.Filename, ContentType: a.MimeType})
-	}
-	return aiengine.ClassifyRequest{
-		CorrelationID:   args.CorrelationID,
-		Subject:         rfq.Subject,
-		Sender:          rfq.CustomerEmail,
-		BodyText:        truncateClassifyBody(strVal(rfq.RawText)),
-		BodyHTML:        strVal(rfq.RawHTML),
-		AttachmentMetas: metas,
-	}
-}
-
-// truncateClassifyBody cuts s at classifyBodyLimit bytes without splitting
-// a multi-byte rune — it backs off to the last rune boundary at or under
-// the limit (utf8.RuneStart is false for continuation bytes).
-func truncateClassifyBody(s string) string {
-	if len(s) <= classifyBodyLimit {
-		return s
-	}
-	i := classifyBodyLimit
-	for i > 0 && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return s[:i]
-}
-
-// extractReq builds the extraction call with bodies + parsed markdowns.
-func extractReq(args ExtractArgs, rfq extractRfq, markdowns []string) aiengine.ExtractRequest {
-	return aiengine.ExtractRequest{
-		CorrelationID:   args.CorrelationID,
-		Subject:         rfq.Subject,
-		Sender:          rfq.CustomerEmail,
-		BodyText:        strVal(rfq.RawText),
-		BodyHTML:        strVal(rfq.RawHTML),
-		ParsedMarkdowns: markdowns,
-	}
-}
-
 // attachmentFailureCode maps a parse failure to a short audit reason.
 func attachmentFailureCode(err error) string {
 	var ee *aiengine.EngineError
@@ -478,17 +460,4 @@ func attachmentFailureCode(err error) string {
 		return "engine_error"
 	}
 	return "engine_error"
-}
-
-// strVal dereferences an optional body column.
-func strVal(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
-// strNonEmpty reports whether an optional column carries visible text.
-func strNonEmpty(s *string) bool {
-	return s != nil && strings.TrimSpace(*s) != ""
 }

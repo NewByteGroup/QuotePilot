@@ -52,6 +52,10 @@ var knownFields = map[string]bool{
 // recorded for audit plus the gate input.
 type ExtractionReport struct {
 	ContractVersion string
+	// ClassificationLabel is the label the engine echoed from the
+	// extract request — the worker compares it against the classify
+	// result it sent (a mismatch is a contract violation).
+	ClassificationLabel string
 	// MinConfidence is the minimum auditor confidence across all field
 	// envelopes — what the column documents (RFC-004 section 5). Zero
 	// fields means zero confidence.
@@ -107,7 +111,12 @@ func ValidateExtraction(raw json.RawMessage) (*ExtractionReport, error) {
 	if err := checkClassification(doc.Classification); err != nil {
 		return nil, err
 	}
-	return checkFields(*doc.Fields)
+	report, err := checkFields(*doc.Fields)
+	if err != nil {
+		return nil, err
+	}
+	report.ClassificationLabel = doc.Classification.Label
+	return report, nil
 }
 
 // checkRequired verifies identity keys: version pins and model info.

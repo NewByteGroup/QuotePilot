@@ -133,11 +133,12 @@ func seedAttachment(t *testing.T, db *tenantdb.DB, org, rfqID uuid.UUID, filenam
 
 // extractRfqRow mirrors the columns S2 touches.
 type extractRfqRow struct {
-	Status       string
-	Kind         string
-	ReviewReason *string
-	Payload      []byte
-	Confidence   *float64
+	Status        string
+	Kind          string
+	ReviewReason  *string
+	FailureReason *string
+	Payload       []byte
+	Confidence    *float64
 }
 
 func loadExtractRfq(t *testing.T, db *tenantdb.DB, org, rfqID uuid.UUID) extractRfqRow {
@@ -145,9 +146,9 @@ func loadExtractRfq(t *testing.T, db *tenantdb.DB, org, rfqID uuid.UUID) extract
 	var r extractRfqRow
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT status::text, kind::text, review_reason, extracted_payload_json, extraction_confidence::float8
+			SELECT status::text, kind::text, review_reason, failure_reason, extracted_payload_json, extraction_confidence::float8
 			FROM app.rfq_requests WHERE id = $1`, rfqID).
-			Scan(&r.Status, &r.Kind, &r.ReviewReason, &r.Payload, &r.Confidence)
+			Scan(&r.Status, &r.Kind, &r.ReviewReason, &r.FailureReason, &r.Payload, &r.Confidence)
 	}))
 	return r
 }
@@ -366,6 +367,11 @@ func TestRfqExtractAttachmentParseDegrades(t *testing.T) {
 	require.NotNil(t, okMd)
 	assert.Equal(t, "# parsed table", *okMd)
 	assert.Nil(t, badMd, "failed parse leaves the column NULL")
+
+	// The extract call carries the successful parse only, under its name.
+	require.Len(t, engine.lastExtract.ParsedMarkdowns, 1)
+	assert.Equal(t, "ok.pdf", engine.lastExtract.ParsedMarkdowns[0].Filename)
+	assert.Equal(t, "# parsed table", engine.lastExtract.ParsedMarkdowns[0].Markdown)
 }
 
 // TestRfqExtractAttachmentOnlyRfq: an attachment-only RFQ uses the parsed
@@ -386,7 +392,51 @@ func TestRfqExtractAttachmentOnlyRfq(t *testing.T) {
 	assert.Equal(t, "PRICING", r.Status)
 	assert.Equal(t, 0, engine.parseCalls, "already-parsed rows are not re-parsed")
 	require.Len(t, engine.lastExtract.ParsedMarkdowns, 1)
-	assert.Equal(t, md, engine.lastExtract.ParsedMarkdowns[0])
+	assert.Equal(t, "booking.pdf", engine.lastExtract.ParsedMarkdowns[0].Filename,
+		"the real filename rides so evidence can cite ATTACHMENT:<filename>")
+	assert.Equal(t, md, engine.lastExtract.ParsedMarkdowns[0].Markdown)
+	assert.Equal(t, "RFQ", engine.lastExtract.Classification.Label,
+		"the classify result is sent for the engine to echo")
+}
+
+// TestRfqExtractHTMLOnlyBodyConverted: with no usable text part, both
+// classify and extract receive the HTML reduced to text — raw markup
+// never crosses the wire (the contract carries no body_html), and table
+// cells stay separate tokens for extraction.
+func TestRfqExtractHTMLOnlyBodyConverted(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "extract-html")
+	rfqID := seedRfq(t, db, org, "ext-html", "PARSING", "",
+		`<div>Please quote</div><table><tr><td>Santos</td><td>Hamburg</td></tr></table>`)
+
+	engine := &fakeAIEngine{classify: classifyResult("RFQ"), extract: validExtraction(t, 0.9)}
+	worker := newExtractRig(t, db, engine, platform.NewFakeStorage())
+	require.NoError(t, worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 0)))
+
+	r := loadExtractRfq(t, db, org, rfqID)
+	assert.Equal(t, "PRICING", r.Status)
+	assert.Contains(t, engine.lastClassify.BodyText, "Please quote")
+	assert.Contains(t, engine.lastClassify.BodyText, "Santos Hamburg",
+		"table cells stay separate tokens")
+	assert.NotContains(t, engine.lastClassify.BodyText, "<", "raw markup never reaches the engine")
+	assert.Equal(t, engine.lastClassify.BodyText, engine.lastExtract.BodyText,
+		"extract gets the same converted body (wider cap does not matter here)")
+}
+
+// TestRfqExtractWhitespaceTextFallsBackToHTML: a whitespace-only text part
+// counts as "no text" — the HTML part supplies the body.
+func TestRfqExtractWhitespaceTextFallsBackToHTML(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "extract-ws")
+	rfqID := seedRfq(t, db, org, "ext-ws", "PARSING", "   ", "<p>real html body</p>")
+
+	engine := &fakeAIEngine{classify: classifyResult("OTHER")}
+	worker := newExtractRig(t, db, engine, platform.NewFakeStorage())
+	require.NoError(t, worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 0)))
+
+	assert.Contains(t, engine.lastClassify.BodyText, "real html body")
 }
 
 // TestRfqExtractInvalidPayloadRetriesOnce: a contract-violating extraction

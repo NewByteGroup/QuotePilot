@@ -708,7 +708,7 @@ func TestFreshSessionLoadsInboxAndDetail(t *testing.T) {
 }
 
 // TestQuoteDetailHTMLOnlyEmail: an inbound mail that carried only an HTML
-// part renders real paragraphs — reduced to text by htmlToText — instead
+// part renders real paragraphs — reduced to text by platform.HTMLToText — instead
 // of the empty list a rawText-only read produced.
 func TestQuoteDetailHTMLOnlyEmail(t *testing.T) {
 	r := newRig(t, now)

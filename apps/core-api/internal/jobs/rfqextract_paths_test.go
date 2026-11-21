@@ -134,9 +134,11 @@ func TestRfqExtractUnknownLabelIsViolation(t *testing.T) {
 }
 
 // TestRfqExtractEngineUnavailableFinalAttempt: a transient engine error on
-// the job's FINAL attempt parks ENGINE_UNAVAILABLE and commits — returning
-// the error would roll back the status write and leave the RFQ stuck
-// invisible in PARSING.
+// the job's FINAL attempt writes FAILED + failure_reason and commits —
+// ADR-004 reserves failure_reason for technical failures after retries
+// (review_reason is for business gaps). Returning the error instead would
+// roll back the status write and leave the RFQ stuck invisible in
+// PARSING.
 func TestRfqExtractEngineUnavailableFinalAttempt(t *testing.T) {
 	db := testenv.Open(t)
 	org := uuid.New()
@@ -154,17 +156,19 @@ func TestRfqExtractEngineUnavailableFinalAttempt(t *testing.T) {
 	r := loadExtractRfq(t, db, org, rfqID)
 	assert.Equal(t, "PARSING", r.Status)
 
-	// Final attempt (3 == MaxAttempts): parks and commits.
+	// Final attempt (3 == MaxAttempts): FAILED + failure_reason, committed.
 	require.NoError(t, worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 3)))
 	r = loadExtractRfq(t, db, org, rfqID)
-	assert.Equal(t, "NEEDS_REVIEW", r.Status)
-	require.NotNil(t, r.ReviewReason)
-	assert.Equal(t, string(jobs.ReviewReasonEngineUnavailable), *r.ReviewReason)
-	assert.Equal(t, 1, countAudit(t, db, org, "rfq.parked"))
+	assert.Equal(t, "FAILED", r.Status)
+	assert.Nil(t, r.ReviewReason, "a technical failure never parks NEEDS_REVIEW")
+	require.NotNil(t, r.FailureReason)
+	assert.Contains(t, *r.FailureReason, "unavailable")
+	assert.Contains(t, *r.FailureReason, "upstream", "the engine error is preserved")
+	assert.Equal(t, 1, countAudit(t, db, org, "rfq.failed"))
 }
 
-// TestRfqExtractClassifyRequestShape: the classify call carries body_html
-// for HTML-only emails and bounds body_text at the ADR-006 16 KiB limit.
+// TestRfqExtractClassifyRequestShape: the classify call bounds body_text
+// at the ADR-006 16 KiB limit, rune-safe.
 func TestRfqExtractClassifyRequestShape(t *testing.T) {
 	db := testenv.Open(t)
 	org := uuid.New()
@@ -176,12 +180,63 @@ func TestRfqExtractClassifyRequestShape(t *testing.T) {
 	worker := newExtractRig(t, db, engine, platform.NewFakeStorage())
 	require.NoError(t, worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 0)))
 
-	assert.Equal(t, "<p>html only</p>", engine.lastClassify.BodyHTML,
-		"classify must see the HTML body too")
 	assert.LessOrEqual(t, len(engine.lastClassify.BodyText), 16*1024,
 		"body_text is bounded at the ADR-006 limit")
 	assert.True(t, utf8.ValidString(engine.lastClassify.BodyText),
 		"truncation must not split a multi-byte rune")
+}
+
+// TestRfqExtractExtractBodyLimit: extract sees the fuller body Marcelo
+// asked for — its own 64 KiB rune-safe cap, NOT the 16 KiB classify cap.
+func TestRfqExtractExtractBodyLimit(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "extract-bodycap")
+	bigBody := strings.Repeat("é", 40000) // ~80 KB of 2-byte runes
+	rfqID := seedRfq(t, db, org, "ext-bodycap", "PARSING", bigBody, "")
+
+	engine := &fakeAIEngine{classify: classifyResult("RFQ"), extract: validExtraction(t, 0.9)}
+	worker := newExtractRig(t, db, engine, platform.NewFakeStorage())
+	require.NoError(t, worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 0)))
+
+	assert.Greater(t, len(engine.lastExtract.BodyText), 16*1024,
+		"extract is not bound by the 16 KiB classify cap")
+	assert.LessOrEqual(t, len(engine.lastExtract.BodyText), 64*1024,
+		"extract has its own 64 KiB cap")
+	assert.True(t, utf8.ValidString(engine.lastExtract.BodyText))
+	assert.Less(t, len(engine.lastClassify.BodyText), len(engine.lastExtract.BodyText))
+}
+
+// TestRfqExtractClassificationEchoMismatch: the ExtractionResult must echo
+// the label core sent — a different label means the engine answered a
+// different routing question, so it is a contract violation, never a
+// silent persist.
+func TestRfqExtractClassificationEchoMismatch(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "extract-echo")
+	rfqID := seedRfq(t, db, org, "ext-echo", "PARSING", "please quote", "")
+
+	raw := validExtraction(t, 0.9)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(raw, &doc))
+	doc["classification"].(map[string]any)["label"] = "OTHER" // sent label was RFQ
+	raw, _ = json.Marshal(doc)
+
+	engine := &fakeAIEngine{classify: classifyResult("RFQ"), extract: raw}
+	worker := newExtractRig(t, db, engine, platform.NewFakeStorage())
+
+	// Attempt 1: the mismatch propagates for the single retry.
+	err := worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 1))
+	require.Error(t, err, "an echo mismatch is a contract violation")
+
+	// Attempt 2: parks INVALID_EXTRACTION, payload never written.
+	require.NoError(t, worker.Work(context.Background(), extractJob(org, uuid.New(), rfqID, 2)))
+	r := loadExtractRfq(t, db, org, rfqID)
+	assert.Equal(t, "NEEDS_REVIEW", r.Status)
+	require.NotNil(t, r.ReviewReason)
+	assert.Equal(t, string(jobs.ReviewReasonInvalidExtraction), *r.ReviewReason)
+	assert.Nil(t, r.Payload)
 }
 
 // TestExtractReenqueueAfterCompletion is the reclassify invariant: a

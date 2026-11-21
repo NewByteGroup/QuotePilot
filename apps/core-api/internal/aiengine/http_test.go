@@ -21,16 +21,17 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/aiengine"
 )
 
-// fakeEngineServer records the request (method, path, auth, decoded body)
-// and replies with a canned status + JSON body.
+// fakeEngineServer records the request (method, path, auth headers,
+// decoded body) and replies with a canned status + JSON body.
 type fakeEngineServer struct {
 	*httptest.Server
-	lastPath string
-	lastAuth string
-	lastBody map[string]any
-	status   int
-	resp     any
-	rawResp  string
+	lastPath       string
+	lastServiceKey string
+	lastAuthz      string
+	lastBody       map[string]any
+	status         int
+	resp           any
+	rawResp        string
 }
 
 func newFakeEngine(t *testing.T, status int, resp any) *fakeEngineServer {
@@ -38,7 +39,8 @@ func newFakeEngine(t *testing.T, status int, resp any) *fakeEngineServer {
 	f := &fakeEngineServer{status: status, resp: resp}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.lastPath = r.URL.Path
-		f.lastAuth = r.Header.Get("Authorization")
+		f.lastServiceKey = r.Header.Get("X-Internal-Service-Key")
+		f.lastAuthz = r.Header.Get("Authorization")
 		f.lastBody = map[string]any{}
 		_ = json.NewDecoder(r.Body).Decode(&f.lastBody)
 		w.Header().Set("Content-Type", "application/json")
@@ -66,15 +68,18 @@ func TestHTTPClassify(t *testing.T) {
 	c := newClient(srv)
 	res, err := c.Classify(context.Background(), aiengine.ClassifyRequest{
 		CorrelationID: uuid.New(), Subject: "RFQ 2x40HQ", Sender: "a@b.c",
-		BodyText: "please quote", BodyHTML: "<p>please quote</p>",
+		BodyText:        "please quote",
 		AttachmentMetas: []aiengine.AttachmentMeta{{Filename: "a.pdf", ContentType: "application/pdf"}},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "RFQ", res.Label)
 	assert.Equal(t, "/v1/classify", srv.lastPath)
-	assert.Equal(t, "Bearer test-token", srv.lastAuth)
+	assert.Equal(t, "test-token", srv.lastServiceKey,
+		"auth travels as X-Internal-Service-Key (ADR-005 §10)")
+	assert.Empty(t, srv.lastAuthz, "no Authorization header is sent")
 	assert.Equal(t, "a@b.c", srv.lastBody["sender"])
-	assert.Equal(t, "<p>please quote</p>", srv.lastBody["body_html"])
+	_, hasHTML := srv.lastBody["body_html"]
+	assert.False(t, hasHTML, "the contract carries no body_html — core converts before sending")
 	metas, _ := srv.lastBody["attachment_metas"].([]any)
 	require.Len(t, metas, 1)
 	assert.Equal(t, "a.pdf", metas[0].(map[string]any)["filename"])
@@ -99,20 +104,35 @@ func TestHTTPClassifyProbabilitiesValidated(t *testing.T) {
 	}
 }
 
+// TestHTTPExtract: the wire shape carries {filename, markdown} objects —
+// the real filename is what evidence cites — plus the classification the
+// engine echoes in the ExtractionResult.
 func TestHTTPExtract(t *testing.T) {
 	srv := newFakeEngine(t, 200, nil)
 	srv.rawResp = `{"contract_version":"1.0.0","fields":{}}`
 	c := newClient(srv)
 	raw, err := c.Extract(context.Background(), aiengine.ExtractRequest{
 		CorrelationID: uuid.New(), Subject: "s", Sender: "a@b.c",
-		ParsedMarkdowns: []string{"# md"},
+		ParsedMarkdowns: []aiengine.ParsedMarkdown{{Filename: "rates.xlsx", Markdown: "# md"}},
+		Classification: aiengine.ClassifyResult{
+			Label:         "RFQ",
+			Probabilities: map[string]float64{"RFQ": 0.9, "TARIFF_UPDATE": 0.05, "OTHER": 0.05},
+			Model:         "jev-1",
+		},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "/v1/extract", srv.lastPath)
 	assert.JSONEq(t, `{"contract_version":"1.0.0","fields":{}}`, string(raw))
 	mds, _ := srv.lastBody["parsed_markdown"].([]any)
 	require.Len(t, mds, 1)
-	assert.Equal(t, "# md", mds[0])
+	assert.Equal(t, "rates.xlsx", mds[0].(map[string]any)["filename"])
+	assert.Equal(t, "# md", mds[0].(map[string]any)["markdown"])
+	cls, _ := srv.lastBody["classification"].(map[string]any)
+	require.NotNil(t, cls, "the extract request must carry the classify result")
+	assert.Equal(t, "RFQ", cls["label"])
+	assert.Equal(t, "jev-1", cls["model"])
+	_, hasHTML := srv.lastBody["body_html"]
+	assert.False(t, hasHTML)
 }
 
 func TestHTTPParseAttachment(t *testing.T) {

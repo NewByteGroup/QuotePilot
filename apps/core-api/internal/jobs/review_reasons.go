@@ -49,11 +49,6 @@ const (
 	// most one retry, each attempt costs money). The invalid payload is
 	// never written; the validation error is audited.
 	ReviewReasonInvalidExtraction ReviewReason = "INVALID_EXTRACTION"
-	// ReviewReasonEngineUnavailable parks when transient ai-engine
-	// failures exhausted the job's attempts — committed NEEDS_REVIEW
-	// instead of letting the row sit invisible in PARSING after River
-	// discards the job. The analyst reprocesses once the engine is back.
-	ReviewReasonEngineUnavailable ReviewReason = "ENGINE_UNAVAILABLE"
 )
 
 // ReviewReasons is the closed list the stored-value test checks against:
@@ -67,5 +62,4 @@ var ReviewReasons = []ReviewReason{
 	ReviewReasonLowConfidence,
 	ReviewReasonNoUsableText,
 	ReviewReasonInvalidExtraction,
-	ReviewReasonEngineUnavailable,
 }

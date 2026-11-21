@@ -1,27 +1,29 @@
-package webapi
+package platform
 
-// htmlToText reduces an email's raw_html_body to the plain text
-// paragraphs() can segment — a byte-wise scanner, not a regex soup. A
-// tag only exists when '<' is followed by an optional '/' and then an
-// ASCII letter, so customer text like "Weight < 500 kg" or "I <3
-// freight" survives verbatim instead of being eaten as broken markup.
-// Comments, DOCTYPE/<??> declarations and quoted attribute values are
-// skipped without emitting; <script>/<style> contents — the CSS HTML
-// emails carry — must never reach the wire; block tags become the
-// paragraph breaks paraSplit reads and open td/th cells a space so
-// adjacent cells don't merge. Entities unescape once at the end. Raw
-// HTML itself never reaches the response.
+// HTMLToText reduces an email's raw_html_body to plain text — a
+// byte-wise scanner, not a regex soup. A tag only exists when '<' is
+// followed by an optional '/' and then an ASCII letter, so customer
+// text like "Weight < 500 kg" or "I <3 freight" survives verbatim
+// instead of being eaten as broken markup. Comments, DOCTYPE/<??>
+// declarations and quoted attribute values are skipped without
+// emitting; <script>/<style> contents — the CSS HTML emails carry —
+// must never reach the wire; block tags become paragraph breaks and
+// open td/th cells a space so adjacent cells don't merge. Entities
+// unescape once at the end. Raw HTML itself never crosses a boundary:
+// webapi renders the text for the audit view and rfq_extract sends it
+// to ai-engine as body_text (the provisional contract carries no
+// body_html — core converts before truncating).
 import (
 	"html"
 	"strings"
 )
 
 // blockTags are the tag names that mark a paragraph boundary in email
-// markup — each emits \n\n, the separator paraSplit reads, open and
-// closing alike (the doubled breaks collapse to empty paragraphs that
-// paragraphs() drops). td/th are deliberately absent: they separate
-// cells with a single space, and only on the open tag — the row's
-// tr/table already carries the paragraph break.
+// markup — each emits \n\n, open and closing alike (the doubled breaks
+// collapse to empty paragraphs downstream readers drop). td/th are
+// deliberately absent: they separate cells with a single space, and
+// only on the open tag — the row's tr/table already carries the
+// paragraph break.
 var blockTags = map[string]bool{
 	"p": true, "div": true, "li": true, "tr": true, "table": true,
 	"ul": true, "ol": true, "blockquote": true, "section": true,
@@ -29,12 +31,14 @@ var blockTags = map[string]bool{
 	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
 }
 
-// htmlToText strips src's markup to plain text: element contents are
+// HTMLToText strips src's markup to plain text: element contents are
 // copied verbatim, block tags emit a paragraph break, br a line break,
 // open table cells a separating space, script/style contents are
 // dropped outright, and entities are unescaped once everything is
 // assembled.
-func htmlToText(src string) string {
+//
+//	text := platform.HTMLToText("<p>Please quote <b>FCL</b></p>")
+func HTMLToText(src string) string {
 	var b strings.Builder
 	b.Grow(len(src))
 	for i := 0; i < len(src); {

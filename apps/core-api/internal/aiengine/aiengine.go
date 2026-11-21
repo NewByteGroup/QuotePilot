@@ -37,14 +37,14 @@ type AttachmentMeta struct {
 	ContentType string `json:"content_type"`
 }
 
-// ClassifyRequest is POST /v1/classify (provisional transport). body_html
-// rides along so HTML-only emails still classify on their content.
+// ClassifyRequest is POST /v1/classify (provisional transport, confirmed
+// by the engine owner). There is no body_html: raw markup never crosses
+// the wire — core reduces HTML-only emails to text before truncating.
 type ClassifyRequest struct {
 	CorrelationID   uuid.UUID        `json:"correlation_id"`
 	Subject         string           `json:"subject"`
 	Sender          string           `json:"sender"`
 	BodyText        string           `json:"body_text"`
-	BodyHTML        string           `json:"body_html"`
 	AttachmentMetas []AttachmentMeta `json:"attachment_metas"`
 }
 
@@ -57,15 +57,26 @@ type ClassifyResult struct {
 	Model         string             `json:"model"`
 }
 
-// ExtractRequest is POST /v1/extract: bodies plus the parsed markdown of
-// every attachment that yielded one.
+// ParsedMarkdown is one attachment's parse result on the extract wire —
+// the real filename rides along so evidence can cite ATTACHMENT:<filename>.
+// Only rows whose parse succeeded (parsed_markdown IS NOT NULL) are sent.
+type ParsedMarkdown struct {
+	Filename string `json:"filename"`
+	Markdown string `json:"markdown"`
+}
+
+// ExtractRequest is POST /v1/extract: the single textual body (HTML-only
+// emails arrive already reduced to text, like classify), the parsed
+// markdown of every attachment that yielded one, and the classification
+// the engine echoes back in the ExtractionResult — a second classify call
+// would waste money and could disagree.
 type ExtractRequest struct {
-	CorrelationID   uuid.UUID `json:"correlation_id"`
-	Subject         string    `json:"subject"`
-	Sender          string    `json:"sender"`
-	BodyText        string    `json:"body_text"`
-	BodyHTML        string    `json:"body_html"`
-	ParsedMarkdowns []string  `json:"parsed_markdown"`
+	CorrelationID   uuid.UUID        `json:"correlation_id"`
+	Subject         string           `json:"subject"`
+	Sender          string           `json:"sender"`
+	BodyText        string           `json:"body_text"`
+	ParsedMarkdowns []ParsedMarkdown `json:"parsed_markdown"`
+	Classification  ClassifyResult   `json:"classification"`
 }
 
 // ParseAttachmentRequest is POST /v1/attachments/parse; the bytes travel

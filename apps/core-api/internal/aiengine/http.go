@@ -23,9 +23,10 @@ const httpTimeout = 60 * time.Second
 // should record, but a huge error page must not blow up the payload.
 const errSnippetLimit = 512
 
-// HTTPClient calls ai-engine over HTTP: Bearer auth on
-// AI_ENGINE_SERVICE_TOKEN, JSON in/out. The three endpoints are the
-// provisional transport contract (packages/contracts/openapi/ai-engine.yaml).
+// HTTPClient calls ai-engine over HTTP: the AI_ENGINE_SERVICE_TOKEN
+// travels as X-Internal-Service-Key (ADR-005 §10), JSON in/out. The three
+// endpoints are the provisional transport contract
+// (packages/contracts/openapi/ai-engine.yaml).
 type HTTPClient struct {
 	baseURL string
 	token   string
@@ -149,7 +150,7 @@ func (c *HTTPClient) post(ctx context.Context, op, path string, in any, out any)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+		req.Header.Set("X-Internal-Service-Key", c.token)
 	}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {

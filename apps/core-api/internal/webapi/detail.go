@@ -205,8 +205,9 @@ func emailFor(ctx context.Context, tx pgx.Tx, rfq detailRow) (authapi.QuoteEmail
 }
 
 // emailBody picks the body the audit renders: the plain-text part when
-// the sender supplied one, else the HTML part reduced by htmlToText —
-// mail that arrives HTML-only must not render as an empty paragraph list.
+// the sender supplied one, else the HTML part reduced by
+// platform.HTMLToText — mail that arrives HTML-only must not render as an
+// empty paragraph list.
 func emailBody(rfq detailRow) *string {
 	if rfq.rawText != nil && *rfq.rawText != "" {
 		return rfq.rawText
@@ -214,7 +215,7 @@ func emailBody(rfq detailRow) *string {
 	if rfq.rawHTML == nil {
 		return nil
 	}
-	text := htmlToText(*rfq.rawHTML)
+	text := platform.HTMLToText(*rfq.rawHTML)
 	return &text
 }
 
