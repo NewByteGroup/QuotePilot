@@ -108,8 +108,17 @@ type PriceArgs struct {
 // Kind returns the River job kind.
 func (PriceArgs) Kind() string { return "rfq_price" }
 
-// InsertOpts routes the job to the price queue with entity uniqueness.
-func (PriceArgs) InsertOpts() river.InsertOpts { return entityUnique(QueuePrice) }
+// priceMaxAttempts pins the spec-§3 row: S3b gets five attempts, transient
+// DB errors only — every deterministic failure cancels long before that.
+const priceMaxAttempts = 5
+
+// InsertOpts routes the job to the price queue with entity uniqueness and
+// the stage's five-attempt budget.
+func (PriceArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueuePrice)
+	opts.MaxAttempts = priceMaxAttempts
+	return opts
+}
 
 // RenderArgs is S4 rfq_render: the draft quote document for one quote version.
 type RenderArgs struct {

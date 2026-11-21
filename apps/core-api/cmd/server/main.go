@@ -326,25 +326,31 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	river.AddWorker(workers, ingest)
 	extract := jobs.NewRfqExtractWorker(db, engine, storage)
 	river.AddWorker(workers, extract)
+	price := jobs.NewRfqPriceWorker(db, time.Now)
+	river.AddWorker(workers, price)
 	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
-		// Only queues with registered workers are declared: S2 chains
-		// rfq_fetch_rates into the `price` queue, whose worker lands in a
-		// later slice — an undeclared queue simply waits unworked instead
-		// of the job failing with UnknownJobKindError.
+		// Only queues with registered workers are declared: rfq_ingest
+		// chains rfq_extract into `extract`, S2 chains rfq_fetch_rates into
+		// `price`, and rfq_price chains rfq_render — each worker lands in a
+		// later slice, so an undeclared queue simply waits unworked instead
+		// of the job failing with UnknownJobKindError. The `price` queue
+		// hosts both S3a (rfq_fetch_rates) and S3b (rfq_price) per spec
+		// §3's stage table; `extract` is LLM-bound at ~4 workers.
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
-			jobs.QueueExtract:  {MaxWorkers: 4}, // spec §3: ~4 workers, LLM-bound
+			jobs.QueueExtract:  {MaxWorkers: 4},
+			jobs.QueuePrice:    {MaxWorkers: 4},
 			jobs.QueueSend:     {MaxWorkers: 4},
 		},
 		Workers:           workers,
 		Schema:            "river",
 		Logger:            slog.Default(),
 		ReindexerSchedule: river.NeverSchedule(),
-		// rfq_extract inserts rfq_fetch_rates (unregistered until the P3
-		// worker ships); without this River rejects the in-transaction
-		// enqueue.
+		// rfq_extract inserts rfq_fetch_rates and rfq_price inserts
+		// rfq_render, both unregistered until their workers ship; without
+		// this River rejects the in-transaction enqueue.
 		SkipUnknownJobCheck: true,
 		// Without SoftStopTimeout the worker context inherits the Start ctx —
 		// a signal would hard-cancel running jobs instantly instead of letting
@@ -356,9 +362,11 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	}
 	// The workers need the client for InsertTx; the client needs the worker
 	// registry at construction — so the seams are assigned post-build,
-	// pre-Start.
+	// pre-Start. rfq_price's enqueue is rfq_render, still unregistered:
+	// SkipUnknownJobCheck (above) stays on until S4 lands.
 	ingest.Inserter = client
 	extract.Inserter = client
+	price.Inserter = client
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("server: start river: %w", err)
 	}

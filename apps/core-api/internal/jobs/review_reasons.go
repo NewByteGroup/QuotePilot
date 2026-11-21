@@ -49,6 +49,25 @@ const (
 	// most one retry, each attempt costs money). The invalid payload is
 	// never written; the validation error is audited.
 	ReviewReasonInvalidExtraction ReviewReason = "INVALID_EXTRACTION"
+	// ReviewReasonRequiredFieldMissing parks an RFQ whose persisted
+	// extraction lacks (or cannot parse) a field pricing cannot run
+	// without — the analyst reviews the extraction, then reprocesses.
+	// S3b treats the extraction's required keys plus the modal-dependent
+	// ones (equipment for FCL/AIR, quantity for FCL) as required.
+	ReviewReasonRequiredFieldMissing ReviewReason = "REQUIRED_FIELD_MISSING"
+	// ReviewReasonDirectionAmbiguous parks an RFQ whose locodes do not
+	// resolve a direction: S3b derives IMPORT from a BR destination and
+	// EXPORT from a BR origin; both-BR or neither-BR is ambiguous under
+	// RFC-001 Q15 (still open) and needs the analyst, not a guess.
+	ReviewReasonDirectionAmbiguous ReviewReason = "DIRECTION_AMBIGUOUS"
+	// ReviewReasonPricingIncomplete is the generic park for every engine
+	// INCOMPLETE reason without a dedicated code (MISSING_FX:*,
+	// NO_USABLE_OFFER, MISSING_CARGO_VALUE, SEA_INCOTERM_ON_AIR,
+	// MODAL_OUT_OF_MVP, MISSING_TERMINAL_BAND, MISSING_DECLARED_FREIGHT,
+	// MISSING_CUSTOMS_FX, a missing pricing_rules row or a malformed
+	// optional extraction field). The engine's own Reasons ride the audit
+	// row verbatim, so the generic code loses no detail.
+	ReviewReasonPricingIncomplete ReviewReason = "PRICING_INCOMPLETE"
 )
 
 // ReviewReasons is the closed list the stored-value test checks against:
@@ -62,4 +81,7 @@ var ReviewReasons = []ReviewReason{
 	ReviewReasonLowConfidence,
 	ReviewReasonNoUsableText,
 	ReviewReasonInvalidExtraction,
+	ReviewReasonRequiredFieldMissing,
+	ReviewReasonDirectionAmbiguous,
+	ReviewReasonPricingIncomplete,
 }
