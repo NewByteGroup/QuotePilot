@@ -89,8 +89,10 @@ func (v shipmentVerdict) missing(field string) shipmentVerdict {
 //     truncated to day granularity like the tariff validity windows.
 //   - Snapshots stays nil: no extracted_rates_json shape is a repo
 //     contract yet, so no decoder is invented here (flagged).
-//   - FXRates is empty: no FX source table exists; quotes needing FX
-//     park via the engine's own MISSING_FX reason.
+//   - FXRates stays empty here: the worker pins the window
+//     fx.LoadRates returns after the candidate loads (migration 0011);
+//     a currency no feed covered still parks via the engine's own
+//     MISSING_FX reason.
 func buildShipment(fields map[string]extractedField, pricedAt time.Time) shipmentVerdict {
 	v := shipmentVerdict{}
 	modal, ok := parseModalField(fields)
@@ -141,7 +143,8 @@ func buildShipment(fields map[string]extractedField, pricedAt time.Time) shipmen
 	}
 	v.in.QuoteDate = quoteDateField(fields, pricedAt)
 	v.in.PricedAt = pricedAt
-	// TerminalRequested, Snapshots, FXRates: see the doc comment flags.
+	// TerminalRequested, Snapshots, FXRates: see the doc comment flags —
+	// FXRates is pinned later in price(), never from the extraction.
 	v.in.TerminalRequested = false
 	v.in.Snapshots = nil
 	v.in.FXRates = []pricing.FXRate{}

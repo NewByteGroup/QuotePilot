@@ -38,6 +38,7 @@ var platformTablesNoRLS = []string{
 	"auth_mail_outbox",
 	"auth_sessions",
 	"connectors",
+	"fx_rates",
 	"goose_db_version",
 	"healing_sessions",
 	"organization_memberships",
@@ -57,8 +58,10 @@ var layerATables = []string{
 var layerCTables = []string{"connectors", "public_snapshots", "healing_sessions"}
 
 // appendOnlyTables keep SELECT/INSERT but lose UPDATE/DELETE (comments 11, 14;
-// carrier_offers is an audit record the same way — RFC-002).
-var appendOnlyTables = []string{"private_tariffs", "tenant_audit_logs", "carrier_offers"}
+// carrier_offers is an audit record the same way — RFC-002; fx_rates is the
+// platform-global pin table, 0011: INSERT to sync, immutability trigger on
+// top).
+var appendOnlyTables = []string{"private_tariffs", "tenant_audit_logs", "carrier_offers", "fx_rates"}
 
 // tenantFunctions are the tenant-facing SECURITY DEFINER surface; qp_app gets
 // EXECUTE on exactly these signatures (spec section 3, tenant-resolution spec
