@@ -57,6 +57,10 @@ type Endpoints struct {
 	// in-transaction send enqueue — the same post-build assignment as
 	// jobs.RfqIngestWorker.Inserter). Nil fails the call loudly.
 	Approver QuoteApprover
+	// Web serves the four /v1/* read-surface routes on this same strict
+	// surface; assigned post-build in cmd/server alongside Approver. Nil
+	// fails the call loudly.
+	Web WebAPI
 }
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)

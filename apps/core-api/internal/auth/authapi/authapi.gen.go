@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -16,6 +17,51 @@ import (
 	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
+
+// Defines values for EmailSegmentHighlight.
+const (
+	Extracted EmailSegmentHighlight = "extracted"
+	Inferred  EmailSegmentHighlight = "inferred"
+	None      EmailSegmentHighlight = "none"
+)
+
+// Valid indicates whether the value is a known member of the EmailSegmentHighlight enum.
+func (e EmailSegmentHighlight) Valid() bool {
+	switch e {
+	case Extracted:
+		return true
+	case Inferred:
+		return true
+	case None:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for Equipment.
+const (
+	Air     Equipment = "air"
+	Fcl20Dv Equipment = "fcl_20dv"
+	Fcl40Hc Equipment = "fcl_40hc"
+	Lcl     Equipment = "lcl"
+)
+
+// Valid indicates whether the value is a known member of the Equipment enum.
+func (e Equipment) Valid() bool {
+	switch e {
+	case Air:
+		return true
+	case Fcl20Dv:
+		return true
+	case Fcl40Hc:
+		return true
+	case Lcl:
+		return true
+	default:
+		return false
+	}
+}
 
 // Defines values for ErrorCode.
 const (
@@ -50,6 +96,30 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeRateLimited:
 		return true
 	case ErrorCodeUnauthenticated:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for InboxQuoteStatus.
+const (
+	AwaitingReview InboxQuoteStatus = "awaiting_review"
+	Processing     InboxQuoteStatus = "processing"
+	ReadyToSend    InboxQuoteStatus = "ready_to_send"
+	Sent           InboxQuoteStatus = "sent"
+)
+
+// Valid indicates whether the value is a known member of the InboxQuoteStatus enum.
+func (e InboxQuoteStatus) Valid() bool {
+	switch e {
+	case AwaitingReview:
+		return true
+	case Processing:
+		return true
+	case ReadyToSend:
+		return true
+	case Sent:
 		return true
 	default:
 		return false
@@ -92,6 +162,24 @@ func (e MembershipRole) Valid() bool {
 	}
 }
 
+// Defines values for PriceSourceKind.
+const (
+	PrivateRate    PriceSourceKind = "private_rate"
+	PublicSnapshot PriceSourceKind = "public_snapshot"
+)
+
+// Valid indicates whether the value is a known member of the PriceSourceKind enum.
+func (e PriceSourceKind) Valid() bool {
+	switch e {
+	case PrivateRate:
+		return true
+	case PublicSnapshot:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QuoteStatus.
 const (
 	APPROVEDSENT QuoteStatus = "APPROVED_SENT"
@@ -128,6 +216,56 @@ func (e ResendEmailReceivedType) Valid() bool {
 	}
 }
 
+// Defines values for SessionUserRole.
+const (
+	Admin    SessionUserRole = "admin"
+	Operator SessionUserRole = "operator"
+)
+
+// Valid indicates whether the value is a known member of the SessionUserRole enum.
+func (e SessionUserRole) Valid() bool {
+	switch e {
+	case Admin:
+		return true
+	case Operator:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UserLanguage.
+const (
+	En UserLanguage = "en"
+	Es UserLanguage = "es"
+	Pt UserLanguage = "pt"
+)
+
+// Valid indicates whether the value is a known member of the UserLanguage enum.
+func (e UserLanguage) Valid() bool {
+	switch e {
+	case En:
+		return true
+	case Es:
+		return true
+	case Pt:
+		return true
+	default:
+		return false
+	}
+}
+
+// AppliedFxRate defines model for AppliedFxRate.
+type AppliedFxRate struct {
+	// Label Rate used to price, e.g. "dólar armador".
+	Label string `json:"label"`
+	Rate  string `json:"rate"`
+
+	// ReferenceLabel Reference rate shown for comparison, e.g. "PTAX".
+	ReferenceLabel string `json:"referenceLabel"`
+	ReferenceRate  string `json:"referenceRate"`
+}
+
 // ApproveQuoteResponse defines model for ApproveQuoteResponse.
 type ApproveQuoteResponse struct {
 	// ApprovedAt Timestamp the first approval stamped.
@@ -144,6 +282,27 @@ type ApproveQuoteResponse struct {
 	// `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
 	Status QuoteStatus `json:"status"`
 }
+
+// DecimalPercent Percentage as a decimal string (no floats), e.g. "12.0".
+type DecimalPercent = string
+
+// EmailAttachment defines model for EmailAttachment.
+type EmailAttachment struct {
+	FileName  string `json:"fileName"`
+	SizeBytes int    `json:"sizeBytes"`
+}
+
+// EmailSegment defines model for EmailSegment.
+type EmailSegment struct {
+	Highlight EmailSegmentHighlight `json:"highlight"`
+	Text      string                `json:"text"`
+}
+
+// EmailSegmentHighlight defines model for EmailSegment.Highlight.
+type EmailSegmentHighlight string
+
+// Equipment defines model for Equipment.
+type Equipment string
 
 // Error defines model for Error.
 type Error struct {
@@ -165,6 +324,79 @@ type Error struct {
 // `quote_superseded` and `negative_margin` are the two conflict
 // refusals of quote approval (spec 2026-11-11 section 4).
 type ErrorCode string
+
+// ExtractedField defines model for ExtractedField.
+type ExtractedField struct {
+	// Inferred True when the value was assumed, not read from the email.
+	Inferred bool   `json:"inferred"`
+	Label    string `json:"label"`
+	Value    string `json:"value"`
+}
+
+// InboxQuote defines model for InboxQuote.
+type InboxQuote struct {
+	// ConfidencePercent Deterministic extraction confidence (RFC-004). Null while processing.
+	ConfidencePercent *int   `json:"confidencePercent"`
+	CustomerName      string `json:"customerName"`
+
+	// Equipment Null until the extraction agent resolves the modal.
+	Equipment *Equipment `json:"equipment"`
+
+	// EstimatedTotal Null while the quote is still processing.
+	EstimatedTotal *Money `json:"estimatedTotal"`
+
+	// ID The RFQ's id (`app.rfq_requests.id`), stable across quote versions.
+	ID         openapi_types.UUID `json:"id"`
+	ReceivedAt time.Time          `json:"receivedAt"`
+	RfqNumber  int                `json:"rfqNumber"`
+
+	// Route Null until the extraction agent resolves the lane.
+	Route     *Route `json:"route"`
+	SLAAtRisk bool   `json:"slaAtRisk"`
+
+	// SLADueAt Deadline to answer the customer. Null once the quote is sent.
+	SLADueAt *time.Time `json:"slaDueAt"`
+
+	// Status The web-facing quote status (web-api.yaml's QuoteStatus, renamed —
+	// see the fold comment above): a coarser rollup of `app.rfq_status`
+	// for the inbox list.
+	Status  InboxQuoteStatus `json:"status"`
+	Subject string           `json:"subject"`
+}
+
+// InboxQuotePage defines model for InboxQuotePage.
+type InboxQuotePage struct {
+	Items        []InboxQuote      `json:"items"`
+	RefreshedAt  time.Time         `json:"refreshedAt"`
+	StatusCounts InboxStatusCounts `json:"statusCounts"`
+	Summary      InboxSummary      `json:"summary"`
+}
+
+// InboxQuoteStatus The web-facing quote status (web-api.yaml's QuoteStatus, renamed —
+// see the fold comment above): a coarser rollup of `app.rfq_status`
+// for the inbox list.
+type InboxQuoteStatus string
+
+// InboxStatusCounts defines model for InboxStatusCounts.
+type InboxStatusCounts struct {
+	All            int `json:"all"`
+	AwaitingReview int `json:"awaiting_review"`
+	Processing     int `json:"processing"`
+	ReadyToSend    int `json:"ready_to_send"`
+	Sent           int `json:"sent"`
+}
+
+// InboxSummary defines model for InboxSummary.
+type InboxSummary struct {
+	AutoApproveConfidencePercent int               `json:"autoApproveConfidencePercent"`
+	AvgResponseMinutes           int               `json:"avgResponseMinutes"`
+	MostUrgentSLARisk            *SLARiskHighlight `json:"mostUrgentSlaRisk"`
+	ReadyToSend                  int               `json:"readyToSend"`
+	ReceivedToday                int               `json:"receivedToday"`
+	ReceivedYesterday            int               `json:"receivedYesterday"`
+	ResponseTargetMinutes        int               `json:"responseTargetMinutes"`
+	SLAAtRiskCount               int               `json:"slaAtRiskCount"`
+}
 
 // LoginRequest defines model for LoginRequest.
 type LoginRequest struct {
@@ -216,6 +448,17 @@ type Membership struct {
 // MembershipRole Mirrors the `app.membership_role` enum (migration 0002).
 type MembershipRole string
 
+// Money defines model for Money.
+type Money struct {
+	// Amount Decimal amount as a string (no floats).
+	//
+	// Example: 23260.55
+	Amount string `json:"amount"`
+
+	// Currency Example: BRL
+	Currency string `json:"currency"`
+}
+
 // OrganizationResponse defines model for OrganizationResponse.
 type OrganizationResponse struct {
 	// BrandingJSON Free-form branding blob (colors, logo, legal footer) —
@@ -252,6 +495,73 @@ type PasswordSetRequest struct {
 	// `purpose='password_reset'` row; a login token is the same 401 as
 	// a dead one.
 	Token string `json:"token"`
+}
+
+// PriceComposition defines model for PriceComposition.
+type PriceComposition struct {
+	ConfidencePercent int `json:"confidencePercent"`
+
+	// Fx First applied FX rate; null when nothing was converted.
+	Fx     *AppliedFxRate `json:"fx"`
+	Margin Money          `json:"margin"`
+
+	// MarginPercent Target margin as a decimal string (no floats).
+	MarginPercent string `json:"marginPercent"`
+	ProposalTotal Money  `json:"proposalTotal"`
+
+	// RecalcFxThresholdPercent Percentage as a decimal string (no floats), e.g. "12.0".
+	RecalcFxThresholdPercent DecimalPercent `json:"recalcFxThresholdPercent"`
+	Sections                 []PriceSection `json:"sections"`
+	TotalCost                Money          `json:"totalCost"`
+	ValidityHours            int            `json:"validityHours"`
+}
+
+// PriceItem defines model for PriceItem.
+type PriceItem struct {
+	Amount   Money   `json:"amount"`
+	Detail   *string `json:"detail"`
+	Inferred bool    `json:"inferred"`
+	Label    string  `json:"label"`
+}
+
+// PriceSection defines model for PriceSection.
+type PriceSection struct {
+	Items  []PriceItem  `json:"items"`
+	Note   *string      `json:"note"`
+	Source *PriceSource `json:"source"`
+	Title  string       `json:"title"`
+}
+
+// PriceSource defines model for PriceSource.
+type PriceSource struct {
+	Kind  PriceSourceKind `json:"kind"`
+	Label string          `json:"label"`
+}
+
+// PriceSourceKind defines model for PriceSource.Kind.
+type PriceSourceKind string
+
+// QuoteDetail defines model for QuoteDetail.
+type QuoteDetail struct {
+	Email QuoteEmail `json:"email"`
+
+	// Extraction Fields the agent extracted (or inferred) from the email.
+	Extraction []ExtractedField `json:"extraction"`
+
+	// Pricing Null while the quote is still processing.
+	Pricing *PriceComposition `json:"pricing"`
+	Quote   InboxQuote        `json:"quote"`
+}
+
+// QuoteEmail defines model for QuoteEmail.
+type QuoteEmail struct {
+	Attachments []EmailAttachment   `json:"attachments"`
+	From        openapi_types.Email `json:"from"`
+
+	// Paragraphs Email body split into paragraphs of segments, so extracted spans can be highlighted.
+	Paragraphs [][]EmailSegment    `json:"paragraphs"`
+	ReceivedAt time.Time           `json:"receivedAt"`
+	To         openapi_types.Email `json:"to"`
 }
 
 // QuoteStatus Mirrors the `app.quote_status` enum (migration 0002). Approval
@@ -350,6 +660,34 @@ type ResendEmailReceivedData struct {
 	To []string `json:"to"`
 }
 
+// Route defines model for Route.
+type Route struct {
+	// Destination Example: BRSSZ
+	Destination UnLocode `json:"destination"`
+
+	// Origin Example: BRSSZ
+	Origin UnLocode `json:"origin"`
+}
+
+// Session defines model for Session.
+type Session struct {
+	Organization SessionOrganization `json:"organization"`
+
+	// Organizations Every organization the user belongs to, including the active one.
+	Organizations []SessionOrganization `json:"organizations"`
+	User          SessionUser           `json:"user"`
+}
+
+// SessionOrganization defines model for SessionOrganization.
+type SessionOrganization struct {
+	ID openapi_types.UUID `json:"id"`
+
+	// InboundAddress Address that receives RFQ emails for this organization.
+	InboundAddress openapi_types.Email `json:"inboundAddress"`
+	Name           string              `json:"name"`
+	PlanName       string              `json:"planName"`
+}
+
 // SessionRequest defines model for SessionRequest.
 type SessionRequest struct {
 	// Token Base64url 32-byte token from the magic link (spec section 4). It
@@ -362,6 +700,39 @@ type SessionResponse struct {
 	Memberships []Membership `json:"memberships"`
 	Profile     UserProfile  `json:"profile"`
 }
+
+// SessionUser defines model for SessionUser.
+type SessionUser struct {
+	// Email Synced from the identity provider; not editable in web.
+	Email *openapi_types.Email `json:"email,omitempty"`
+	ID    openapi_types.UUID   `json:"id"`
+
+	// Language Language core-api uses for the texts it sends to this user.
+	Language          UserLanguage    `json:"language"`
+	Name              string          `json:"name"`
+	OrganizationCount int             `json:"organizationCount"`
+	Role              SessionUserRole `json:"role"`
+}
+
+// SessionUserRole defines model for SessionUser.Role.
+type SessionUserRole string
+
+// SLARiskHighlight defines model for SlaRiskHighlight.
+type SLARiskHighlight struct {
+	CustomerName string    `json:"customerName"`
+	SLADueAt     time.Time `json:"slaDueAt"`
+}
+
+// SwitchOrganizationRequest defines model for SwitchOrganizationRequest.
+type SwitchOrganizationRequest struct {
+	OrganizationID openapi_types.UUID `json:"organizationId"`
+}
+
+// UnLocode Example: BRSSZ
+type UnLocode = string
+
+// UserLanguage Language core-api uses for the texts it sends to this user.
+type UserLanguage string
 
 // UserProfile defines model for UserProfile.
 type UserProfile struct {
@@ -426,6 +797,32 @@ type ApproveQuoteParams struct {
 	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
 }
 
+// ListInboxQuotesParams defines parameters for ListInboxQuotes.
+type ListInboxQuotesParams struct {
+	// Status Only quotes in this status. Omit for all.
+	Status *InboxQuoteStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// Q Case-insensitive match on RFQ number, customer name or subject.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+
+	// XOrganizationID Organization the request scopes to — required by the middleware, not
+	// the binding layer (an absent value reaches ResolveTenant as empty and
+	// gets the 400 {"error":"missing_organization"} only after
+	// authentication). Also part of the CSRF posture, since a cross-site
+	// form cannot set headers (ADR-005 section 4).
+	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
+}
+
+// GetQuoteDetailParams defines parameters for GetQuoteDetail.
+type GetQuoteDetailParams struct {
+	// XOrganizationID Organization the request scopes to — required by the middleware, not
+	// the binding layer (an absent value reaches ResolveTenant as empty and
+	// gets the 400 {"error":"missing_organization"} only after
+	// authentication). Also part of the CSRF posture, since a cross-site
+	// form cannot set headers (ADR-005 section 4).
+	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
+}
+
 // PostAuthLoginJSONRequestBody defines body for PostAuthLogin for application/json ContentType.
 type PostAuthLoginJSONRequestBody = LoginRequest
 
@@ -437,6 +834,9 @@ type PostAuthPasswordResetJSONRequestBody = PasswordResetRequest
 
 // PostAuthSessionJSONRequestBody defines body for PostAuthSession for application/json ContentType.
 type PostAuthSessionJSONRequestBody = SessionRequest
+
+// SwitchOrganizationJSONRequestBody defines body for SwitchOrganization for application/json ContentType.
+type SwitchOrganizationJSONRequestBody = SwitchOrganizationRequest
 
 // AsLoginResponse returns the union data inside the PostAuthLogin200JSONResponseBody as a LoginResponse
 func (t PostAuthLogin200JSONResponseBody) AsLoginResponse() (LoginResponse, error) {
@@ -529,6 +929,18 @@ type ServerInterface interface {
 	// ApproveQuote Approve a quote version — releases the send job.
 	// (POST /quotes/{id}/approve)
 	ApproveQuote(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params ApproveQuoteParams)
+	// ListInboxQuotes Quotes in the inbox of the active organization.
+	// (GET /v1/inbox/quotes)
+	ListInboxQuotes(w http.ResponseWriter, r *http.Request, params ListInboxQuotesParams)
+	// GetQuoteDetail Everything needed to audit one quote (split-screen audit).
+	// (GET /v1/quotes/{quoteId})
+	GetQuoteDetail(w http.ResponseWriter, r *http.Request, quoteID openapi_types.UUID, params GetQuoteDetailParams)
+	// GetSession Current user and active organization.
+	// (GET /v1/session)
+	GetSession(w http.ResponseWriter, r *http.Request)
+	// SwitchOrganization Make another of the user's organizations the active one.
+	// (POST /v1/session/organization)
+	SwitchOrganization(w http.ResponseWriter, r *http.Request)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -729,6 +1141,151 @@ func (siw *ServerInterfaceWrapper) ApproveQuote(w http.ResponseWriter, r *http.R
 	handler.ServeHTTP(w, r)
 }
 
+// ListInboxQuotes operation middleware
+func (siw *ServerInterfaceWrapper) ListInboxQuotes(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListInboxQuotesParams
+
+	// ------------- Optional query parameter "status" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "status", r.URL.Query(), &params.Status, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "status"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "status", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "q" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "q", r.URL.Query(), &params.Q, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "q"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "q", Err: err})
+		}
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Organization-Id" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Organization-Id")]; found {
+		var XOrganizationID OrganizationIDHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Organization-Id", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Organization-Id", valueList[0], &XOrganizationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Organization-Id", Err: err})
+			return
+		}
+
+		params.XOrganizationID = &XOrganizationID
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListInboxQuotes(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetQuoteDetail operation middleware
+func (siw *ServerInterfaceWrapper) GetQuoteDetail(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "quoteId" -------------
+	var quoteID openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "quoteId", r.PathValue("quoteId"), &quoteID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "quoteId", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetQuoteDetailParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Organization-Id" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Organization-Id")]; found {
+		var XOrganizationID OrganizationIDHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Organization-Id", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Organization-Id", valueList[0], &XOrganizationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Organization-Id", Err: err})
+			return
+		}
+
+		params.XOrganizationID = &XOrganizationID
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetQuoteDetail(w, r, quoteID, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetSession operation middleware
+func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetSession(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SwitchOrganization operation middleware
+func (siw *ServerInterfaceWrapper) SwitchOrganization(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SwitchOrganization(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -858,6 +1415,10 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me", wrapper.GetMe)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/me/organization", wrapper.GetMeOrganization)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/quotes/{id}/approve", wrapper.ApproveQuote)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/session", wrapper.GetSession)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/session/organization", wrapper.SwitchOrganization)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/inbox/quotes", wrapper.ListInboxQuotes)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/quotes/{quoteId}", wrapper.GetQuoteDetail)
 
 	return m
 }
@@ -1466,6 +2027,304 @@ func (response ApproveQuote500JSONResponse) VisitApproveQuoteResponse(w http.Res
 	return err
 }
 
+type ListInboxQuotesRequestObject struct {
+	Params ListInboxQuotesParams
+}
+
+type ListInboxQuotesResponseObject interface {
+	VisitListInboxQuotesResponse(w http.ResponseWriter) error
+}
+
+type ListInboxQuotes200JSONResponse InboxQuotePage
+
+func (response ListInboxQuotes200JSONResponse) VisitListInboxQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInboxQuotes400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response ListInboxQuotes400JSONResponse) VisitListInboxQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInboxQuotes401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ListInboxQuotes401JSONResponse) VisitListInboxQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInboxQuotes404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response ListInboxQuotes404JSONResponse) VisitListInboxQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListInboxQuotes500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ListInboxQuotes500JSONResponse) VisitListInboxQuotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetQuoteDetailRequestObject struct {
+	QuoteID openapi_types.UUID `json:"quoteId"`
+	Params  GetQuoteDetailParams
+}
+
+type GetQuoteDetailResponseObject interface {
+	VisitGetQuoteDetailResponse(w http.ResponseWriter) error
+}
+
+type GetQuoteDetail200JSONResponse QuoteDetail
+
+func (response GetQuoteDetail200JSONResponse) VisitGetQuoteDetailResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetQuoteDetail401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetQuoteDetail401JSONResponse) VisitGetQuoteDetailResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetQuoteDetail404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response GetQuoteDetail404JSONResponse) VisitGetQuoteDetailResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetQuoteDetail500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response GetQuoteDetail500JSONResponse) VisitGetQuoteDetailResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSessionRequestObject struct {
+}
+
+type GetSessionResponseObject interface {
+	VisitGetSessionResponse(w http.ResponseWriter) error
+}
+
+type GetSession200JSONResponse Session
+
+func (response GetSession200JSONResponse) VisitGetSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSession400JSONResponse Error
+
+func (response GetSession400JSONResponse) VisitGetSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSession401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetSession401JSONResponse) VisitGetSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSession404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response GetSession404JSONResponse) VisitGetSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetSession500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response GetSession500JSONResponse) VisitGetSessionResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SwitchOrganizationRequestObject struct {
+	Body *SwitchOrganizationJSONRequestBody
+}
+
+type SwitchOrganizationResponseObject interface {
+	VisitSwitchOrganizationResponse(w http.ResponseWriter) error
+}
+
+type SwitchOrganization200JSONResponse Session
+
+func (response SwitchOrganization200JSONResponse) VisitSwitchOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SwitchOrganization400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response SwitchOrganization400JSONResponse) VisitSwitchOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SwitchOrganization401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response SwitchOrganization401JSONResponse) VisitSwitchOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SwitchOrganization404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response SwitchOrganization404JSONResponse) VisitSwitchOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type SwitchOrganization500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response SwitchOrganization500JSONResponse) VisitSwitchOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// PostAuthLogin Log in — request a magic link, or authenticate with email + password.
@@ -1495,6 +2354,18 @@ type StrictServerInterface interface {
 	// ApproveQuote Approve a quote version — releases the send job.
 	// (POST /quotes/{id}/approve)
 	ApproveQuote(ctx context.Context, request ApproveQuoteRequestObject) (ApproveQuoteResponseObject, error)
+	// ListInboxQuotes Quotes in the inbox of the active organization.
+	// (GET /v1/inbox/quotes)
+	ListInboxQuotes(ctx context.Context, request ListInboxQuotesRequestObject) (ListInboxQuotesResponseObject, error)
+	// GetQuoteDetail Everything needed to audit one quote (split-screen audit).
+	// (GET /v1/quotes/{quoteId})
+	GetQuoteDetail(ctx context.Context, request GetQuoteDetailRequestObject) (GetQuoteDetailResponseObject, error)
+	// GetSession Current user and active organization.
+	// (GET /v1/session)
+	GetSession(ctx context.Context, request GetSessionRequestObject) (GetSessionResponseObject, error)
+	// SwitchOrganization Make another of the user's organizations the active one.
+	// (POST /v1/session/organization)
+	SwitchOrganization(ctx context.Context, request SwitchOrganizationRequestObject) (SwitchOrganizationResponseObject, error)
 }
 
 type StrictHandlerFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error)
@@ -1778,6 +2649,114 @@ func (sh *strictHandler) ApproveQuote(w http.ResponseWriter, r *http.Request, id
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ApproveQuoteResponseObject); ok {
 		if err := validResponse.VisitApproveQuoteResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListInboxQuotes operation middleware
+func (sh *strictHandler) ListInboxQuotes(w http.ResponseWriter, r *http.Request, params ListInboxQuotesParams) {
+	var request ListInboxQuotesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListInboxQuotes(ctx, request.(ListInboxQuotesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListInboxQuotes")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListInboxQuotesResponseObject); ok {
+		if err := validResponse.VisitListInboxQuotesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetQuoteDetail operation middleware
+func (sh *strictHandler) GetQuoteDetail(w http.ResponseWriter, r *http.Request, quoteID openapi_types.UUID, params GetQuoteDetailParams) {
+	var request GetQuoteDetailRequestObject
+
+	request.QuoteID = quoteID
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetQuoteDetail(ctx, request.(GetQuoteDetailRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetQuoteDetail")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetQuoteDetailResponseObject); ok {
+		if err := validResponse.VisitGetQuoteDetailResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetSession operation middleware
+func (sh *strictHandler) GetSession(w http.ResponseWriter, r *http.Request) {
+	var request GetSessionRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetSession(ctx, request.(GetSessionRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetSession")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetSessionResponseObject); ok {
+		if err := validResponse.VisitGetSessionResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SwitchOrganization operation middleware
+func (sh *strictHandler) SwitchOrganization(w http.ResponseWriter, r *http.Request) {
+	var request SwitchOrganizationRequestObject
+
+	var body SwitchOrganizationJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SwitchOrganization(ctx, request.(SwitchOrganizationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SwitchOrganization")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SwitchOrganizationResponseObject); ok {
+		if err := validResponse.VisitSwitchOrganizationResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

@@ -169,6 +169,21 @@ func rfqExists(ctx context.Context, tx pgx.Tx, resendID string) (bool, error) {
 	return err == nil, err
 }
 
+// allocRfqNumber is the org_rfq_counters upsert every rfq_requests insert
+// runs as its CTE (migration 0009): one row-lock inside the tenant
+// transaction serializes allocation per org, so concurrent ingests get
+// sequential numbers. A replay that loses the INSERT race still burns its
+// allocated number — gaps in rfq_number are the documented cost of the
+// conflict-tolerant promotion path, exactly like quote_number.
+const allocRfqNumber = `
+	WITH alloc AS (
+		INSERT INTO app.org_rfq_counters (organization_id, next_seq)
+		VALUES ($1, 2)
+		ON CONFLICT (organization_id) DO UPDATE
+			SET next_seq = org_rfq_counters.next_seq + 1
+		RETURNING next_seq - 1 AS n
+	)`
+
 // insertRfq writes the RECEIVED checkpoint row; ON CONFLICT DO NOTHING keeps
 // the (org, resend_message_id) race idempotent — created=false means replay.
 func insertRfq(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundReceipt, em *resend.InboundEmail) (uuid.UUID, bool, error) {
@@ -178,11 +193,12 @@ func insertRfq(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundRece
 		return uuid.Nil, false, fmt.Errorf("jobs: rfq_ingest: thread headers: %w", err)
 	}
 	var id uuid.UUID
-	err = tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, allocRfqNumber+`
 		INSERT INTO app.rfq_requests
-			(organization_id, resend_message_id, rfc_message_id, thread_headers_json,
+			(organization_id, rfq_number, resend_message_id, rfc_message_id, thread_headers_json,
 			 customer_email, customer_name, subject, received_at, raw_text_body, raw_html_body)
-		VALUES ($1, $2, NULLIF($3,''), $4, $5, NULLIF($6,''), $7, $8, NULLIF($9,''), NULLIF($10,''))
+		SELECT $1, alloc.n, $2, NULLIF($3,''), $4, $5, NULLIF($6,''), $7, $8, NULLIF($9,''), NULLIF($10,'')
+		FROM alloc
 		ON CONFLICT (organization_id, resend_message_id) DO NOTHING
 		RETURNING id`,
 		args.OrganizationID, rcpt.ResendMessageID, rfcMessageID(em), threadJSON,
@@ -201,10 +217,11 @@ func insertRfq(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundRece
 // failure_reason so a permanently-unfetchable message stays visible.
 func insertFailedShell(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundReceipt, cause error) error {
 	reason := truncate("rfq_ingest: "+cause.Error(), maxFailureReason)
-	if _, err := tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, allocRfqNumber+`
 		INSERT INTO app.rfq_requests
-			(organization_id, resend_message_id, customer_email, subject, received_at, status, failure_reason)
-		VALUES ($1, $2, '', $3, $4, 'FAILED', $5)
+			(organization_id, rfq_number, resend_message_id, customer_email, subject, received_at, status, failure_reason)
+		SELECT $1, alloc.n, $2, '', $3, $4, 'FAILED', $5
+		FROM alloc
 		ON CONFLICT (organization_id, resend_message_id) DO NOTHING`,
 		args.OrganizationID, rcpt.ResendMessageID, rcpt.Subject, rcpt.ReceivedAt, reason); err != nil {
 		return fmt.Errorf("jobs: rfq_ingest: insert failed shell: %w", err)

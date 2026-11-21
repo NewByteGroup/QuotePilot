@@ -32,6 +32,7 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/webapi"
 )
 
 func main() {
@@ -77,8 +78,10 @@ func run(ctx context.Context) error {
 	endpoints := buildEndpoints(&cfg, db, store, enqueueAuthMail(riverClient))
 	// The strict surface's approve delegate needs the built River client
 	// for the in-transaction quote_send enqueue (post-build assignment,
-	// like ingest.Inserter above).
+	// like ingest.Inserter above); the web read surface joins it on the
+	// same generated mux.
 	endpoints.Approver = quotes.NewEndpoints(db, riverClient)
+	endpoints.Web = webapi.NewEndpoints(db, store, &cfg, time.Now)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -261,14 +264,33 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	// POST /quotes/{id}/approve — spec section 4 "Approval": the analyst's
 	// central act. RequireRole narrows membership to the approval set; the
 	// strict surface inside authSrv routes the path to the QuoteApprover
-	// delegate. No CheckOrigin: ResolveTenant already demands the custom
-	// X-Organization-Id header a cross-site browser form cannot set.
+	// delegate. CheckOrigin guards the qp_org cookie transport: the
+	// fallback ended "the custom header is the CSRF defense" — a same-site
+	// sibling origin posts cookies freely and a browser POST always
+	// carries Origin or Sec-Fetch-Site for CrossOriginProtection to judge.
 	mux.Handle("POST /quotes/{id}/approve", platform.Correlation(
-		platform.Authenticate(cfg)(
-			platform.ResolveTenant(store)(
-				platform.RequireRole(
-					platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
-					authSrv)))))
+		platform.CheckOrigin(cfg)(
+			platform.Authenticate(cfg)(
+				platform.ResolveTenant(store)(
+					platform.RequireRole(
+						platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+						authSrv))))))
+	// The web v1 read surface (core-api.yaml's web tag). The session pair
+	// mounts Authenticate only — GET /v1/session resolves its own org hint
+	// (OrgHints plants header + qp_org for the handler's fallback chain)
+	// and stamps the resolved org onto qp_org itself; the org switch is
+	// state-changing so CheckOrigin guards it. The two org-scoped reads
+	// run ResolveTenantDefault — header, qp_org cookie, then the
+	// first-membership default for safe methods — so a fresh session
+	// (qp_access only, no qp_org yet) loads the inbox instead of 400ing.
+	mux.Handle("GET /v1/session", platform.Correlation(
+		platform.Authenticate(cfg)(webapi.OrgHints(authSrv))))
+	mux.Handle("POST /v1/session/organization", platform.Correlation(
+		platform.CheckOrigin(cfg)(platform.Authenticate(cfg)(authSrv))))
+	mux.Handle("GET /v1/inbox/quotes", platform.Correlation(
+		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
+	mux.Handle("GET /v1/quotes/{quoteId}", platform.Correlation(
+		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}

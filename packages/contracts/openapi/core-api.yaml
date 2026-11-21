@@ -58,6 +58,12 @@ tags:
     description: |
       Quote lifecycle endpoints of the staged pipeline (spec
       2026-11-11-staged-quote-pipeline section 4).
+  - name: web
+    description: |
+      The web v1 read surface (web-api.yaml folded in per its header
+      comment): session bootstrap, org switching and the inbox/quote-audit
+      reads apps/web swaps its MSW mock for. Field names and wire shapes
+      are the mock contract's verbatim — Amanda's client changes nothing.
 
 paths:
   /auth/login:
@@ -407,6 +413,162 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/session:
+    get:
+      operationId: getSession
+      tags: [web]
+      summary: Current user and active organization.
+      description: |
+        The web app's session bootstrap: `Authenticate` verifies
+        `qp_access`, then the handler answers the caller's profile plus
+        every organization they belong to. The ACTIVE organization is
+        resolved server-side — the `X-Organization-Id` header when an API
+        client sends it, else the `qp_org` cookie POST
+        /v1/session/organization sets, else the user's first membership
+        (`list_memberships_for_email` ordered by created_at), so
+        `organization` is always non-null. The route mounts Authenticate
+        only: no org context is a fallback, not a 400.
+      security:
+        - qpAccess: []
+      responses:
+        '200':
+          description: Session of the signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          description: |
+            A malformed `X-Organization-Id` header —
+            `{"error":"missing_organization"}` like ResolveTenant emits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/session/organization:
+    post:
+      operationId: switchOrganization
+      tags: [web]
+      summary: Make another of the user's organizations the active one.
+      description: |
+        Checks live membership (`get_membership` — a non-member and a
+        nonexistent organization get the same byte-identical 404), then
+        sets the `qp_org` cookie (HttpOnly, Secure, SameSite=Lax, Path=/):
+        the tenant transport for browser clients that cannot send the
+        custom header on every call. ResolveTenant reads it only as the
+        fallback after the header — the cookie is transport, the
+        per-request membership re-check stays the security boundary.
+      security:
+        - qpAccess: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchOrganizationRequest'
+      responses:
+        '200':
+          description: Session with the new active organization.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/inbox/quotes:
+    get:
+      operationId: listInboxQuotes
+      tags: [web]
+      summary: Quotes in the inbox of the active organization.
+      description: |
+        `Authenticate` + `ResolveTenant` — the tenant is the
+        `X-Organization-Id` header when present, else the `qp_org` cookie
+        (server behavior, not contract: the parameter stays optional so a
+        cookie-only client still reaches the middleware). Every read runs
+        inside `InTenantReadTx` under RLS.
+      security:
+        - qpAccess: []
+      parameters:
+        - $ref: '#/components/parameters/OrganizationIdHeader'
+        - name: status
+          in: query
+          required: false
+          description: Only quotes in this status. Omit for all.
+          schema:
+            $ref: '#/components/schemas/InboxQuoteStatus'
+        - name: q
+          in: query
+          required: false
+          description: Case-insensitive match on RFQ number, customer name or subject.
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        '200':
+          description: Inbox page with summary counters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxQuotePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v1/quotes/{quoteId}:
+    get:
+      operationId: getQuoteDetail
+      tags: [web]
+      summary: Everything needed to audit one quote (split-screen audit).
+      description: |
+        `Authenticate` + `ResolveTenant`, same chain as /v1/inbox/quotes.
+        `quoteId` is the RFQ's id (`app.rfq_requests.id` — the inbox item
+        id, stable across quote versions), NOT a quote version id; the
+        latest version rides along. An unknown or other-tenant id gets the
+        same uniform 404 — RLS makes the row invisible.
+      security:
+        - qpAccess: []
+      parameters:
+        - name: quoteId
+          in: path
+          required: true
+          description: RFQ UUID (`app.rfq_requests.id` — see operation description).
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/OrganizationIdHeader'
+      responses:
+        '200':
+          description: Quote with the original email, agent extraction and price composition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuoteDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -793,6 +955,436 @@ components:
           description: |
             Content-ID of inline attachments referenced from the HTML body
             (e.g. `img001` for `<img src="cid:img001">`).
+
+    # --- web v1 read surface (folded verbatim from web-api.yaml) -----------
+    # Deltas vs the mock file, all agreed with Pedro:
+    #   * the mock's QuoteStatus is renamed InboxQuoteStatus — core-api.yaml
+    #     already uses QuoteStatus for the quote-version lifecycle enum
+    #     (DRAFT/SUPERSEDED/APPROVED_SENT); the wire values are unchanged.
+    #   * InboxQuote.route and InboxQuote.equipment are nullable: both stay
+    #     null until the extraction agent fills them.
+    #   * PriceComposition.fx is nullable: no FX applied is common.
+    #   * The mock's own Error schema is NOT copied — these endpoints reuse
+    #     this file's {"error": ...} shape like every core route.
+    Session:
+      type: object
+      required: [user, organization, organizations]
+      properties:
+        user:
+          $ref: '#/components/schemas/SessionUser'
+        organization:
+          description: Active organization; all organization-scoped endpoints answer for it.
+          $ref: '#/components/schemas/SessionOrganization'
+        organizations:
+          type: array
+          description: Every organization the user belongs to, including the active one.
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/SessionOrganization'
+    SwitchOrganizationRequest:
+      type: object
+      required: [organizationId]
+      properties:
+        organizationId:
+          type: string
+          format: uuid
+    SessionUser:
+      type: object
+      required: [id, name, email, role, organizationCount, language]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        email:
+          type: string
+          format: email
+          readOnly: true
+          description: Synced from the identity provider; not editable in web.
+        role:
+          type: string
+          enum: [admin, operator]
+        organizationCount:
+          type: integer
+          minimum: 1
+        language:
+          $ref: '#/components/schemas/UserLanguage'
+    UserLanguage:
+      type: string
+      description: Language core-api uses for the texts it sends to this user.
+      enum: [pt, en, es]
+    SessionOrganization:
+      type: object
+      required: [id, name, planName, inboundAddress]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        planName:
+          type: string
+        inboundAddress:
+          type: string
+          format: email
+          description: Address that receives RFQ emails for this organization.
+    InboxQuoteStatus:
+      type: string
+      description: |
+        The web-facing quote status (web-api.yaml's QuoteStatus, renamed —
+        see the fold comment above): a coarser rollup of `app.rfq_status`
+        for the inbox list.
+      enum: [processing, awaiting_review, ready_to_send, sent]
+    Equipment:
+      type: string
+      enum: [fcl_20dv, fcl_40hc, lcl, air]
+    UnLocode:
+      type: string
+      pattern: "^[A-Z]{2}[A-Z2-9]{3}$"
+      example: BRSSZ
+    Route:
+      type: object
+      required: [origin, destination]
+      properties:
+        origin:
+          $ref: '#/components/schemas/UnLocode'
+        destination:
+          $ref: '#/components/schemas/UnLocode'
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: "^-?\\d+(\\.\\d+)?$"
+          description: Decimal amount as a string (no floats).
+          example: "23260.55"
+        currency:
+          type: string
+          pattern: "^[A-Z]{3}$"
+          example: BRL
+    InboxQuote:
+      type: object
+      required:
+        - id
+        - rfqNumber
+        - customerName
+        - subject
+        - route
+        - equipment
+        - status
+        - estimatedTotal
+        - confidencePercent
+        - slaDueAt
+        - slaAtRisk
+        - receivedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The RFQ's id (`app.rfq_requests.id`), stable across quote versions.
+        rfqNumber:
+          type: integer
+          minimum: 1
+        customerName:
+          type: string
+        subject:
+          type: string
+        route:
+          description: Null until the extraction agent resolves the lane.
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Route'
+        equipment:
+          description: Null until the extraction agent resolves the modal.
+          type: string
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Equipment'
+        status:
+          $ref: '#/components/schemas/InboxQuoteStatus'
+        estimatedTotal:
+          description: Null while the quote is still processing.
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Money'
+        confidencePercent:
+          description: Deterministic extraction confidence (RFC-004). Null while processing.
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        slaDueAt:
+          description: Deadline to answer the customer. Null once the quote is sent.
+          type: string
+          nullable: true
+          format: date-time
+        slaAtRisk:
+          type: boolean
+        receivedAt:
+          type: string
+          format: date-time
+    InboxStatusCounts:
+      type: object
+      required: [all, processing, awaiting_review, ready_to_send, sent]
+      properties:
+        all:
+          type: integer
+          minimum: 0
+        processing:
+          type: integer
+          minimum: 0
+        awaiting_review:
+          type: integer
+          minimum: 0
+        ready_to_send:
+          type: integer
+          minimum: 0
+        sent:
+          type: integer
+          minimum: 0
+    SlaRiskHighlight:
+      type: object
+      required: [customerName, slaDueAt]
+      properties:
+        customerName:
+          type: string
+        slaDueAt:
+          type: string
+          format: date-time
+    InboxSummary:
+      type: object
+      required:
+        - receivedToday
+        - receivedYesterday
+        - readyToSend
+        - autoApproveConfidencePercent
+        - avgResponseMinutes
+        - responseTargetMinutes
+        - slaAtRiskCount
+        - mostUrgentSlaRisk
+      properties:
+        receivedToday:
+          type: integer
+          minimum: 0
+        receivedYesterday:
+          type: integer
+          minimum: 0
+        readyToSend:
+          type: integer
+          minimum: 0
+        autoApproveConfidencePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        avgResponseMinutes:
+          type: integer
+          minimum: 0
+        responseTargetMinutes:
+          type: integer
+          minimum: 0
+        slaAtRiskCount:
+          type: integer
+          minimum: 0
+        mostUrgentSlaRisk:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/SlaRiskHighlight'
+    InboxQuotePage:
+      type: object
+      required: [items, summary, statusCounts, refreshedAt]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InboxQuote'
+        summary:
+          $ref: '#/components/schemas/InboxSummary'
+        statusCounts:
+          $ref: '#/components/schemas/InboxStatusCounts'
+        refreshedAt:
+          type: string
+          format: date-time
+    QuoteDetail:
+      type: object
+      required: [quote, email, extraction, pricing]
+      properties:
+        quote:
+          $ref: '#/components/schemas/InboxQuote'
+        email:
+          $ref: '#/components/schemas/QuoteEmail'
+        extraction:
+          type: array
+          description: Fields the agent extracted (or inferred) from the email.
+          items:
+            $ref: '#/components/schemas/ExtractedField'
+        pricing:
+          description: Null while the quote is still processing.
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/PriceComposition'
+    QuoteEmail:
+      type: object
+      required: [from, to, receivedAt, paragraphs, attachments]
+      properties:
+        from:
+          type: string
+          format: email
+        to:
+          type: string
+          format: email
+        receivedAt:
+          type: string
+          format: date-time
+        paragraphs:
+          type: array
+          description: Email body split into paragraphs of segments, so extracted spans can be highlighted.
+          items:
+            type: array
+            items:
+              $ref: '#/components/schemas/EmailSegment'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/EmailAttachment'
+    EmailSegment:
+      type: object
+      required: [text, highlight]
+      properties:
+        text:
+          type: string
+        highlight:
+          type: string
+          enum: [none, extracted, inferred]
+    EmailAttachment:
+      type: object
+      required: [fileName, sizeBytes]
+      properties:
+        fileName:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+    ExtractedField:
+      type: object
+      required: [label, value, inferred]
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+        inferred:
+          type: boolean
+          description: True when the value was assumed, not read from the email.
+    PriceComposition:
+      type: object
+      required:
+        - sections
+        - totalCost
+        - marginPercent
+        - margin
+        - proposalTotal
+        - confidencePercent
+        - fx
+        - validityHours
+        - recalcFxThresholdPercent
+      properties:
+        sections:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceSection'
+        totalCost:
+          $ref: '#/components/schemas/Money'
+        marginPercent:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
+          description: Target margin as a decimal string (no floats).
+        margin:
+          $ref: '#/components/schemas/Money'
+        proposalTotal:
+          $ref: '#/components/schemas/Money'
+        confidencePercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+        fx:
+          description: First applied FX rate; null when nothing was converted.
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AppliedFxRate'
+        validityHours:
+          type: integer
+          minimum: 1
+        recalcFxThresholdPercent:
+          $ref: '#/components/schemas/DecimalPercent'
+    PriceSection:
+      type: object
+      required: [title, source, items, note]
+      properties:
+        title:
+          type: string
+        source:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/PriceSource'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceItem'
+        note:
+          type: string
+          nullable: true
+    PriceSource:
+      type: object
+      required: [label, kind]
+      properties:
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [private_rate, public_snapshot]
+    PriceItem:
+      type: object
+      required: [label, detail, amount, inferred]
+      properties:
+        label:
+          type: string
+        detail:
+          type: string
+          nullable: true
+        amount:
+          $ref: '#/components/schemas/Money'
+        inferred:
+          type: boolean
+    DecimalPercent:
+      type: string
+      pattern: "^\\d+(\\.\\d+)?$"
+      description: Percentage as a decimal string (no floats), e.g. "12.0".
+    AppliedFxRate:
+      type: object
+      required: [label, rate, referenceLabel, referenceRate]
+      properties:
+        label:
+          type: string
+          description: Rate used to price, e.g. "dólar armador".
+        rate:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
+        referenceLabel:
+          type: string
+          description: Reference rate shown for comparison, e.g. "PTAX".
+        referenceRate:
+          type: string
+          pattern: "^\\d+(\\.\\d+)?$"
 
   responses:
     BadRequest:

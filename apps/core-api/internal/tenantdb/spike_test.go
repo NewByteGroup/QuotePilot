@@ -269,8 +269,9 @@ func seedRFQ(t *testing.T, ctx context.Context, tx pgx.Tx, org uuid.UUID) uuid.U
 	t.Helper()
 	var id uuid.UUID
 	require.NoError(t, tx.QueryRow(ctx,
-		`INSERT INTO app.rfq_requests (organization_id, resend_message_id, customer_email)
-		 VALUES ($1, $2, 'cust@example.test') RETURNING id`,
+		`INSERT INTO app.rfq_requests (organization_id, rfq_number, resend_message_id, customer_email)
+		 VALUES ($1, (SELECT coalesce(max(rfq_number),0)+1 FROM app.rfq_requests WHERE organization_id=$1),
+		         $2, 'cust@example.test') RETURNING id`,
 		org.String(), "rfq-"+uuid.NewString()).Scan(&id))
 	return id
 }
