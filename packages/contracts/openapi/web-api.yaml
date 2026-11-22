@@ -335,11 +335,15 @@ paths:
       summary: Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint
       description: |
         The review queue's release action. For an RFQ parked in
-        `NEEDS_REVIEW` or `FAILED`, the server clears the parked reason,
+        `NEEDS_REVIEW` or `FAILED` — or `READY` while its `DRAFT` quote
+        awaits its first render — the server clears the parked reason,
         moves the RFQ back to the resumed stage's active status and
         enqueues that stage's job in one transaction. `resumed_stage`
         names the River job kind the pipeline resumes at. A second call
-        inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`.
+        inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`;
+        while an accepted resume is still running the RFQ sits in the
+        stage's active status and a call answers 409 with that current
+        status — the 429 applies only between parked reprocesses.
       tags: [rfqs]
       parameters:
         - name: id
@@ -356,11 +360,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/ReprocessRfqResponse"
         "401":
-          $ref: "#/components/responses/Unauthorized"
+          description: Missing or invalid credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessError"
         "404":
-          $ref: "#/components/responses/NotFound"
+          description: RFQ does not exist in the active organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessError"
         "409":
-          description: The RFQ is not in `NEEDS_REVIEW`/`FAILED`; `status` carries its current state.
+          description: The RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state.
           content:
             application/json:
               schema:
@@ -1164,7 +1176,7 @@ components:
     ReprocessStage:
       type: string
       description: River job kind of the pipeline stage a reprocess resumed.
-      enum: [rfq_extract, rfq_fetch_rates, rfq_price, rfq_render]
+      enum: [rfq_ingest, rfq_extract, rfq_fetch_rates, rfq_price, rfq_render]
     ReprocessRfqResponse:
       type: object
       additionalProperties: false

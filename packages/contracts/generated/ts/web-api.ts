@@ -247,11 +247,15 @@ export interface paths {
         /**
          * Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint
          * @description The review queue's release action. For an RFQ parked in
-         *     `NEEDS_REVIEW` or `FAILED`, the server clears the parked reason,
+         *     `NEEDS_REVIEW` or `FAILED` — or `READY` while its `DRAFT` quote
+         *     awaits its first render — the server clears the parked reason,
          *     moves the RFQ back to the resumed stage's active status and
          *     enqueues that stage's job in one transaction. `resumed_stage`
          *     names the River job kind the pipeline resumes at. A second call
-         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`.
+         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`;
+         *     while an accepted resume is still running the RFQ sits in the
+         *     stage's active status and a call answers 409 with that current
+         *     status — the 429 applies only between parked reprocesses.
          */
         post: operations["reprocessRfq"];
         delete?: never;
@@ -615,7 +619,7 @@ export interface components {
          * @description River job kind of the pipeline stage a reprocess resumed.
          * @enum {string}
          */
-        ReprocessStage: "rfq_extract" | "rfq_fetch_rates" | "rfq_price" | "rfq_render";
+        ReprocessStage: "rfq_ingest" | "rfq_extract" | "rfq_fetch_rates" | "rfq_price" | "rfq_render";
         ReprocessRfqResponse: {
             /** @enum {string} */
             status: "accepted";
@@ -1047,9 +1051,25 @@ export interface operations {
                     "application/json": components["schemas"]["ReprocessRfqResponse"];
                 };
             };
-            401: components["responses"]["Unauthorized"];
-            404: components["responses"]["NotFound"];
-            /** @description The RFQ is not in `NEEDS_REVIEW`/`FAILED`; `status` carries its current state. */
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+            /** @description RFQ does not exist in the active organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+            /** @description The RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. */
             409: {
                 headers: {
                     [name: string]: unknown;

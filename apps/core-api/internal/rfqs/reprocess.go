@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 	"github.com/shopspring/decimal"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
@@ -25,11 +26,14 @@ import (
 )
 
 // app.rfq_status values the endpoint reads/writes. needsReview and failed
-// are the only reprocessable states (spec Reprocess: IGNORED is
-// intentionally terminal, everything else 409s).
+// are the reprocessable parks; ready is the one conditional status — S4's
+// terminal failure strands the RFQ at READY with an unrendered DRAFT, so
+// READY is accepted iff a DRAFT quote still awaits its first render (spec
+// Reprocess: IGNORED is intentionally terminal, everything else 409s).
 const (
 	statusNeedsReview = "NEEDS_REVIEW"
 	statusFailed      = "FAILED"
+	statusReady       = "READY"
 )
 
 // actionReprocessed is the tenant_audit_logs action every accepted
@@ -101,14 +105,29 @@ type reprocessOutcome struct {
 }
 
 // reprocessRfq is the locked slice of app.rfq_requests the decision
-// reads — including the reasons it clears (the audit row needs them).
+// reads — including the reasons it clears (the audit row needs them) and
+// the ingest-shell columns the step-0 signature needs: resend_message_id
+// resolves the receipt, the body pair detects the dead-letter shell.
 type reprocessRfq struct {
-	ID            uuid.UUID
-	Status        string
-	ReviewReason  *string
-	FailureReason *string
-	Payload       []byte
-	ConfidenceSet bool
+	ID              uuid.UUID
+	Status          string
+	ReviewReason    *string
+	FailureReason   *string
+	ResendMessageID string
+	RawText         *string
+	RawHTML         *string
+	Payload         []byte
+	ConfidenceSet   bool
+}
+
+// shellFacts projects the row onto DecideResume's step-0 input: both body
+// columns NULL is the dead-letter-shell signature (every later stage
+// failure keeps at least one stored body).
+func (r reprocessRfq) shellFacts() jobs.ShellFacts {
+	return jobs.ShellFacts{
+		ResendMessageID: r.ResendMessageID,
+		BodiesMissing:   r.RawText == nil && r.RawHTML == nil,
+	}
 }
 
 // clearedReason is the reason the reprocess cleared — review_reason for
@@ -139,7 +158,17 @@ func (e *Endpoints) reprocess(
 			out = reprocessOutcome{kind: kindNotFound}
 			return nil
 		}
-		if r.Status != statusNeedsReview && r.Status != statusFailed {
+		reprocessable := r.Status == statusNeedsReview || r.Status == statusFailed
+		if !reprocessable && r.Status == statusReady {
+			// S4's terminal failure strands the RFQ at READY with an
+			// unrendered DRAFT — exactly the shape a reprocess recovers.
+			// Any other READY shape (no DRAFT, or a rendered one) 409s.
+			reprocessable, err = jobs.DraftAwaitingRender(ctx, tx, r.ID)
+			if err != nil {
+				return err
+			}
+		}
+		if !reprocessable {
 			out = reprocessOutcome{kind: kindNotParked, status: r.Status}
 			return nil
 		}
@@ -163,9 +192,11 @@ func lockRfq(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (reprocessRfq, boo
 	var confidence decimal.NullDecimal
 	err := tx.QueryRow(ctx, `
 		SELECT id, status::text, review_reason, failure_reason,
+		       resend_message_id, raw_text_body, raw_html_body,
 		       coalesce(extracted_payload_json::text,''), extraction_confidence
 		FROM app.rfq_requests WHERE id = $1 FOR UPDATE`, rfqID).
-		Scan(&r.ID, &r.Status, &r.ReviewReason, &r.FailureReason, &r.Payload, &confidence)
+		Scan(&r.ID, &r.Status, &r.ReviewReason, &r.FailureReason,
+			&r.ResendMessageID, &r.RawText, &r.RawHTML, &r.Payload, &confidence)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return reprocessRfq{}, false, nil
 	}
@@ -209,7 +240,7 @@ func (e *Endpoints) resume(
 	r reprocessRfq,
 	out *reprocessOutcome,
 ) error {
-	d, err := jobs.DecideResume(ctx, tx, r.ID, r.Payload, r.ConfidenceSet, e.now())
+	d, err := jobs.DecideResume(ctx, tx, r.ID, r.shellFacts(), r.Payload, r.ConfidenceSet, e.now())
 	if err != nil {
 		return err
 	}
@@ -251,10 +282,12 @@ func (e *Endpoints) auditReprocessed(ctx context.Context, tx pgx.Tx, orgID, user
 }
 
 // enqueue stages the resumed stage's job — ExtractArgs and its
-// RateArgs/PriceArgs twins share fields, so one base converts; render is
-// the quote-keyed exception. Uniqueness rides each args' InsertOpts:
-// entityUnique dedupes only live states, so a terminal job never blocks
-// the reprocess re-enqueue (spec Reprocess).
+// RateArgs/PriceArgs twins share fields, so one base converts; ingest is
+// the receipt-keyed and render the quote-keyed exceptions. Uniqueness
+// rides each args' InsertOpts: entityUnique dedupes only live states, so
+// a terminal job never blocks the reprocess re-enqueue — and a dedupe hit
+// on `running` is force-inserted past the about-to-complete job so the
+// RFQ is never stranded without one (spec Reprocess).
 func (e *Endpoints) enqueue(ctx context.Context, tx pgx.Tx, orgID, correlationID, rfqID uuid.UUID, d jobs.ResumeDecision) error {
 	if e.inserter == nil {
 		return errors.New("rfqs: reprocess: job inserter not configured")
@@ -262,6 +295,12 @@ func (e *Endpoints) enqueue(ctx context.Context, tx pgx.Tx, orgID, correlationID
 	base := jobs.ExtractArgs{OrganizationID: orgID, CorrelationID: correlationID, RfqID: rfqID}
 	var args river.JobArgs
 	switch d.Stage {
+	case jobs.ResumeIngest:
+		args = jobs.IngestArgs{
+			OrganizationID:   orgID,
+			CorrelationID:    correlationID,
+			InboundMessageID: d.InboundMessageID,
+		}
 	case jobs.ResumeExtract:
 		args = base
 	case jobs.ResumeRates:
@@ -278,8 +317,22 @@ func (e *Endpoints) enqueue(ctx context.Context, tx pgx.Tx, orgID, correlationID
 	default:
 		return fmt.Errorf("rfqs: reprocess: unknown resume stage %q", d.Stage)
 	}
-	if _, err := e.inserter.InsertTx(ctx, tx, args, nil); err != nil {
+	res, err := e.inserter.InsertTx(ctx, tx, args, nil)
+	if err != nil {
 		return fmt.Errorf("rfqs: reprocess: enqueue %s on %s: %w", d.Stage, rfqID, err)
+	}
+	if res != nil && res.UniqueSkippedAsDuplicate && res.Job != nil && res.Job.State == rivertype.JobStateRunning {
+		// A dedupe hit on `running` while we hold FOR UPDATE on the RFQ
+		// row can only be an about-to-complete job: any stage worker still
+		// inside its InTenantTx would hold that lock, so this one is past
+		// its work and finalizing. Accepting the dedupe would strand the
+		// RFQ — active status, no live job once it completes — so insert
+		// the same args again with the shifted unique key (ReprocessForceOpts).
+		// Dedupe hits in available/scheduled/retryable/pending are correct:
+		// that job will run the resumed work.
+		if _, err := e.inserter.InsertTx(ctx, tx, args, jobs.ReprocessForceOpts()); err != nil {
+			return fmt.Errorf("rfqs: reprocess: force enqueue %s on %s: %w", d.Stage, rfqID, err)
+		}
 	}
 	return nil
 }

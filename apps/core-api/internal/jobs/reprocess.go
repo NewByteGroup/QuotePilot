@@ -27,6 +27,7 @@ import (
 type ResumeStage string
 
 var (
+	ResumeIngest  = ResumeStage(IngestArgs{}.Kind())
 	ResumeExtract = ResumeStage(ExtractArgs{}.Kind())
 	ResumeRates   = ResumeStage(RateArgs{}.Kind())
 	ResumePrice   = ResumeStage(PriceArgs{}.Kind())
@@ -37,15 +38,36 @@ var (
 // and the rfq_status the RFQ takes while the stage re-runs. QuoteID is set
 // for ResumeRender only — rfq_render is the one stage keyed off a quote
 // row (the DRAFT version whose pdf_storage_key is missing).
+// InboundMessageID is set for ResumeIngest only — rfq_ingest is keyed off
+// the inbound_messages receipt the shell's resend_message_id resolved to.
 type ResumeDecision struct {
-	Stage   ResumeStage
-	Status  string
-	QuoteID uuid.UUID
+	Stage            ResumeStage
+	Status           string
+	QuoteID          uuid.UUID
+	InboundMessageID uuid.UUID
+}
+
+// ShellFacts is the ingest-shell input the endpoint read off its
+// already-locked RFQ row: the resend_message_id the shell stored (the
+// receipt lookup key) and whether both body columns are NULL — the exact
+// signature of the S1 dead-letter shell insertFailedShell writes (every
+// later stage failure has at least one body stored, so bodies-NULL alone
+// identifies the shell; reprocess also only sees parked/READY rows).
+type ShellFacts struct {
+	ResendMessageID string
+	BodiesMissing   bool
 }
 
 // DecideResume walks the checkpoint chain for one already-locked RFQ row
 // inside the caller's tenant transaction:
 //
+//  0. Ingest shell — both body columns NULL is the signature of the S1
+//     dead-letter shell (permanent Resend fetch failure): re-running
+//     extraction with nothing to extract is hopeless, so rfq_ingest
+//     re-runs for the receipt instead (RECEIVED) and the worker promotes
+//     the shell in place. A missing inbound_messages receipt can't
+//     resurrect the message — the walk falls through to rfq_extract,
+//     which parks NO_USABLE_TEXT and stays visible.
 //  1. Usable extraction — extracted_payload_json and
 //     extraction_confidence are the pair S2 commits together; either
 //     absent ⇒ rfq_extract (PARSING). NO_USABLE_TEXT, INVALID_EXTRACTION,
@@ -73,7 +95,16 @@ type ResumeDecision struct {
 // send, a dead-lettered delivery), so the honest resume is rfq_price —
 // S3b supersedes the stale DRAFT into a new version (rule 9) instead of
 // re-rendering the questioned one.
-func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, payload []byte, confidenceSet bool, now time.Time) (ResumeDecision, error) {
+func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFacts, payload []byte, confidenceSet bool, now time.Time) (ResumeDecision, error) {
+	if shell.BodiesMissing {
+		id, found, err := inboundMessageID(ctx, tx, shell.ResendMessageID)
+		if err != nil {
+			return ResumeDecision{}, err
+		}
+		if found {
+			return ResumeDecision{Stage: ResumeIngest, Status: "RECEIVED", InboundMessageID: id}, nil
+		}
+	}
 	if len(payload) == 0 || !confidenceSet {
 		return ResumeDecision{Stage: ResumeExtract, Status: "PARSING"}, nil
 	}
@@ -130,6 +161,34 @@ func carrierCheckpointMissing(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, f
 		return false, fmt.Errorf("jobs: reprocess: carrier checkpoint on %s: %w", rfqID, err)
 	}
 	return !exists, nil
+}
+
+// inboundMessageID resolves the receipt an ingest shell points at. RLS
+// scopes the lookup to the tenant org and (organization_id,
+// resend_message_id) is UNIQUE, so at most one row answers.
+func inboundMessageID(ctx context.Context, tx pgx.Tx, resendID string) (uuid.UUID, bool, error) {
+	var id uuid.UUID
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM app.inbound_messages WHERE resend_message_id = $1`, resendID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("jobs: reprocess: receipt for %q: %w", resendID, err)
+	}
+	return id, true, nil
+}
+
+// DraftAwaitingRender reports whether the RFQ's DRAFT quote still waits on
+// its first render — the READY-status carveout of the reprocess gate (S4's
+// terminal failure leaves the RFQ READY with an unrendered DRAFT; every
+// other READY shape stays a 409).
+func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (bool, error) {
+	_, rendered, found, err := draftRenderState(ctx, tx, rfqID)
+	if err != nil {
+		return false, err
+	}
+	return found && !rendered, nil
 }
 
 // draftRenderState reads the RFQ's DRAFT quote — at most one exists

@@ -223,6 +223,7 @@ func (e ReprocessRfqResponseStatus) Valid() bool {
 const (
 	RfqExtract    ReprocessStage = "rfq_extract"
 	RfqFetchRates ReprocessStage = "rfq_fetch_rates"
+	RfqIngest     ReprocessStage = "rfq_ingest"
 	RfqPrice      ReprocessStage = "rfq_price"
 	RfqRender     ReprocessStage = "rfq_render"
 )
@@ -233,6 +234,8 @@ func (e ReprocessStage) Valid() bool {
 	case RfqExtract:
 		return true
 	case RfqFetchRates:
+		return true
+	case RfqIngest:
 		return true
 	case RfqPrice:
 		return true

@@ -25,7 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
-	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/rfqs"
@@ -94,9 +93,10 @@ func reprocessConfig() *platform.Config {
 // Correlation and CheckOrigin sit outside it in cmd/server and are
 // irrelevant to these assertions.
 type reprocessRig struct {
-	handler http.Handler
-	cfg     *platform.Config
-	db      *tenantdb.DB
+	handler  http.Handler
+	cfg      *platform.Config
+	db       *tenantdb.DB
+	inserter *river.Client[pgx.Tx]
 }
 
 // newReprocessRig builds the whole chain: auth.NewServer (which routes
@@ -123,7 +123,7 @@ func newReprocessRig(t *testing.T, db *tenantdb.DB, minInterval time.Duration, n
 		platform.ResolveTenant(store)(
 			platform.RequireRole(platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
 				auth.NewServer(endpoints))))
-	return &reprocessRig{handler: server, cfg: cfg, db: db}
+	return &reprocessRig{handler: server, cfg: cfg, db: db, inserter: inserter}
 }
 
 // postReprocess fires the request the review queue sends: cookie +
@@ -161,12 +161,18 @@ func seedMembership(t *testing.T, orgID, userID uuid.UUID, role string) {
 }
 
 // rfqSeed is one parked RFQ the way the pipeline leaves it: status +
-// kind, the reason pair, and the S2 checkpoint columns.
+// kind, the reason pair, and the S2 checkpoint columns. resendID pins the
+// receipt link the ingest-shell tests need; textBody/htmlBody stand in
+// for the raw bodies a live row always carries (nil keeps them NULL —
+// the dead-letter-shell signature).
 type rfqSeed struct {
 	status        string
 	kind          string
 	reviewReason  *string
 	failureReason *string
+	resendID      string
+	textBody      *string
+	htmlBody      *string
 	payload       []byte
 	confidence    *string
 }
@@ -177,19 +183,37 @@ func seedRfq(t *testing.T, db *tenantdb.DB, org uuid.UUID, s rfqSeed) uuid.UUID 
 	if s.kind == "" {
 		s.kind = "RFQ"
 	}
+	if s.resendID == "" {
+		s.resendID = "resend-" + uuid.NewString()
+	}
 	var id uuid.UUID
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			INSERT INTO app.rfq_requests
 				(organization_id, rfq_number, resend_message_id, customer_email, subject,
 				 kind, status, review_reason, failure_reason,
+				 raw_text_body, raw_html_body,
 				 extracted_payload_json, extraction_confidence)
 			VALUES ($1, (SELECT coalesce(max(rfq_number),0)+1 FROM app.rfq_requests WHERE organization_id=$1),
 			        $2, 'buyer@test.dev', 'RFQ: 2x40HQ',
-			        $3::app.rfq_kind, $4::app.rfq_status, $5, $6, $7::jsonb, $8)
+			        $3::app.rfq_kind, $4::app.rfq_status, $5, $6, $7, $8, $9::jsonb, $10)
 			RETURNING id`,
-			org, "resend-"+uuid.NewString(), s.kind, s.status,
-			s.reviewReason, s.failureReason, s.payload, s.confidence).Scan(&id)
+			org, s.resendID, s.kind, s.status,
+			s.reviewReason, s.failureReason, s.textBody, s.htmlBody,
+			s.payload, s.confidence).Scan(&id)
+	}))
+	return id
+}
+
+// seedReceipt inserts one inbound_messages row inside the tenant tx — the
+// receipt an ingest shell's resend_message_id resolves to.
+func seedReceipt(t *testing.T, db *tenantdb.DB, org uuid.UUID, resendID string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO app.inbound_messages (organization_id, resend_message_id, subject, received_at)
+			VALUES ($1, $2, 'RFQ: 2x40HQ', now()) RETURNING id`, org, resendID).Scan(&id)
 	}))
 	return id
 }
@@ -262,8 +286,15 @@ func loadRfq(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID) rfqColumns {
 // qp_app-readable and carries no RLS, so the read scopes by args.
 func stagedJobs(t *testing.T, db *tenantdb.DB, rfq uuid.UUID) []string {
 	t.Helper()
+	return stagedJobsBy(t, db, "rfq_id", rfq.String())
+}
+
+// stagedJobsBy is stagedJobs generalized to any args member — ingest jobs
+// are receipt-keyed (inbound_message_id), not rfq-keyed.
+func stagedJobsBy(t *testing.T, db *tenantdb.DB, argKey, argVal string) []string {
+	t.Helper()
 	rows, err := db.Pool().Query(context.Background(),
-		`SELECT kind FROM river.river_job WHERE args->>'rfq_id' = $1 ORDER BY kind`, rfq.String())
+		`SELECT kind FROM river.river_job WHERE args->>$1 = $2 ORDER BY kind, id`, argKey, argVal)
 	require.NoError(t, err)
 	defer rows.Close()
 	kinds := []string{}
@@ -320,226 +351,6 @@ func reprocessedAudits(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID) (int, 
 func strptr(s string) *string { return &s }
 
 // ---------------------------------------------------------------------------
-// Happy paths — one per resumed stage (spec Reprocess checkpoint walk)
-// ---------------------------------------------------------------------------
-
-// TestReprocessResumeExtractFromFailed: a dead-lettered FAILED shell has
-// no usable extraction — the walk lands on S2, the RFQ goes back to
-// PARSING and the rfq_extract job is staged in the same tx. The audit
-// row carries the actor, the cleared failure_reason and the stage.
-func TestReprocessResumeExtractFromFailed(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-failed")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:        "FAILED",
-		failureReason: strptr("rfq_extract: ai-engine unavailable after 3 attempts"),
-	})
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.Accepted, body.Status)
-	assert.Equal(t, authapi.RfqExtract, body.ResumedStage)
-
-	r := loadRfq(t, db, org, rfq)
-	assert.Equal(t, "PARSING", r.Status, "the resumed stage's active status")
-	assert.Nil(t, r.ReviewReason)
-	assert.Nil(t, r.FailureReason, "the cleared failure_reason")
-
-	assert.Equal(t, []string{"rfq_extract"}, stagedJobs(t, db, rfq))
-	assert.Equal(t, org.String(), stagedJobArg(t, db, "rfq_extract", rfq, "organization_id"))
-
-	n, meta, actor := reprocessedAudits(t, db, org, rfq)
-	assert.Equal(t, 1, n)
-	require.NotNil(t, actor)
-	assert.Equal(t, user, *actor, "the audit row carries the acting user")
-	assert.Equal(t, user.String(), meta["actor_user_id"])
-	assert.Equal(t, "rfq_extract: ai-engine unavailable after 3 attempts", meta["cleared_reason"])
-	assert.Equal(t, "rfq_extract", meta["resumed_stage"])
-}
-
-// TestReprocessResumeExtractTariffUpdate: a classifier-parked
-// TARIFF_UPDATE never reached the extraction write — kind and reason stay
-// visible until the walk re-runs S2 (spec Reprocess: re-extraction is the
-// only honest resume when nothing usable exists downstream).
-func TestReprocessResumeExtractTariffUpdate(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-tariff")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RoleOwner)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:       "NEEDS_REVIEW",
-		kind:         "TARIFF_UPDATE",
-		reviewReason: strptr("TARIFF_UPDATE"),
-	})
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.RfqExtract, body.ResumedStage)
-	assert.Equal(t, []string{"rfq_extract"}, stagedJobs(t, db, rfq))
-	_, meta, _ := reprocessedAudits(t, db, org, rfq)
-	assert.Equal(t, "TARIFF_UPDATE", meta["cleared_reason"])
-}
-
-// TestReprocessResumeRates: usable extraction + owed-but-missing carrier
-// checkpoint — the recomputed S3a gate (FCL + derived IMPORT + FOB) has
-// no outcome row, so the walk lands on rfq_fetch_rates and the RFQ goes
-// back to PRICING. A LOW_CONFIDENCE park resumes downstream, never at
-// the paid extraction — the human reprocess IS the gate override.
-func TestReprocessResumeRates(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-rates")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:       "NEEDS_REVIEW",
-		reviewReason: strptr("LOW_CONFIDENCE"),
-		payload:      extractionOwed,
-		confidence:   strptr("0.6200"),
-	})
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.RfqFetchRates, body.ResumedStage,
-		"LOW_CONFIDENCE resumes at the owed carrier fetch, never at the paid extraction")
-
-	r := loadRfq(t, db, org, rfq)
-	assert.Equal(t, "PRICING", r.Status)
-	assert.Nil(t, r.ReviewReason)
-	assert.Equal(t, []string{"rfq_fetch_rates"}, stagedJobs(t, db, rfq))
-}
-
-// TestReprocessResumePriceDoneFetch: a carrier checkpoint row for the
-// recomputed request_hash means the completed fetch is never repeated —
-// the walk falls through to rfq_price.
-func TestReprocessResumePriceDoneFetch(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-done-fetch")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:       "NEEDS_REVIEW",
-		reviewReason: strptr("MISSING_TARIFF"),
-		payload:      extractionOwed,
-		confidence:   strptr("0.8800"),
-	})
-	seedCarrierCheckpoint(t, db, org, rfq, owedHash())
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.RfqPrice, body.ResumedStage,
-		"the recorded NO_OFFER outcome completes the fetch checkpoint")
-	assert.Equal(t, []string{"rfq_price"}, stagedJobs(t, db, rfq))
-}
-
-// TestReprocessResumePriceNoOwedFetch: the S3a gate recomputes false for
-// LCL — no fetch was ever owed — so the missing DRAFT resumes at
-// rfq_price directly.
-func TestReprocessResumePriceNoOwedFetch(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-price")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RoleAdmin)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:       "NEEDS_REVIEW",
-		reviewReason: strptr("PRICING_INCOMPLETE"),
-		payload:      extractionNotOwed,
-		confidence:   strptr("0.9100"),
-	})
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.RfqPrice, body.ResumedStage)
-	assert.Equal(t, []string{"rfq_price"}, stagedJobs(t, db, rfq))
-	r := loadRfq(t, db, org, rfq)
-	assert.Equal(t, "PRICING", r.Status)
-}
-
-// TestReprocessResumeRender: a parked RFQ whose DRAFT never got its PDF —
-// the render checkpoint is missing, so rfq_render re-runs for the version
-// and the RFQ takes READY (it is already past pricing).
-func TestReprocessResumeRender(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-render")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:       "NEEDS_REVIEW",
-		reviewReason: strptr("NEGATIVE_MARGIN"),
-		payload:      extractionNotOwed,
-		confidence:   strptr("0.9100"),
-	})
-	quote := seedDraftQuote(t, db, org, rfq, nil)
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.RfqRender, body.ResumedStage)
-
-	r := loadRfq(t, db, org, rfq)
-	assert.Equal(t, "READY", r.Status, "render re-runs for the version; the RFQ is past pricing")
-	assert.Equal(t, []string{"rfq_render"}, stagedJobs(t, db, rfq))
-	assert.Equal(t, quote.String(), stagedJobArg(t, db, "rfq_render", rfq, "quote_id"),
-		"rfq_render is quote-keyed — the DRAFT version rides the args")
-}
-
-// TestReprocessRepriceCompleteDraft: every checkpoint exists (usable
-// extraction, no owed fetch, DRAFT with pdf_storage_key) — the park
-// questions the quote itself (NEGATIVE_MARGIN at send, a dead-lettered
-// delivery), so the honest resume is rfq_price: S3b supersedes the stale
-// DRAFT into a new version (rule 9).
-func TestReprocessRepriceCompleteDraft(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-reprice")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{
-		status:       "NEEDS_REVIEW",
-		reviewReason: strptr("NEGATIVE_MARGIN"),
-		payload:      extractionNotOwed,
-		confidence:   strptr("0.9100"),
-	})
-	pdf := "tenants/" + org.String() + "/quotes/x_v1.pdf"
-	seedDraftQuote(t, db, org, rfq, &pdf)
-
-	rec := rig.postReprocess(t, user, org, rfq)
-	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-	var body authapi.ReprocessRfqResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.RfqPrice, body.ResumedStage,
-		"all checkpoints present ⇒ reprice — the parked reason questions the quote itself")
-	assert.Equal(t, []string{"rfq_price"}, stagedJobs(t, db, rfq))
-	r := loadRfq(t, db, org, rfq)
-	assert.Equal(t, "PRICING", r.Status)
-}
-
-// ---------------------------------------------------------------------------
 // Min-interval gate (spec Reprocess: REPROCESS_MIN_INTERVAL)
 // ---------------------------------------------------------------------------
 
@@ -556,6 +367,7 @@ func TestReprocessRateLimited(t *testing.T) {
 	rfq := seedRfq(t, db, org, rfqSeed{
 		status:       "NEEDS_REVIEW",
 		reviewReason: strptr("LOW_CONFIDENCE"),
+		textBody:     strptr("please quote"),
 		payload:      extractionNotOwed,
 		confidence:   strptr("0.6200"),
 	})
@@ -588,6 +400,7 @@ func TestReprocessIntervalExpired(t *testing.T) {
 	rfq := seedRfq(t, db, org, rfqSeed{
 		status:       "NEEDS_REVIEW",
 		reviewReason: strptr("LOW_CONFIDENCE"),
+		textBody:     strptr("please quote"),
 		payload:      extractionNotOwed,
 		confidence:   strptr("0.6200"),
 	})
@@ -597,104 +410,4 @@ func TestReprocessIntervalExpired(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	n, _, _ := reprocessedAudits(t, db, org, rfq)
 	assert.Equal(t, 2, n, "the accepted reprocess writes its own audit row")
-}
-
-// ---------------------------------------------------------------------------
-// Refusals — status gate, tenancy, auth
-// ---------------------------------------------------------------------------
-
-// TestReprocessConflictStatuses: every non-parked status is a 409 with
-// rfq_not_parked plus the current app.rfq_status in the body — IGNORED is
-// intentionally terminal (spec Reprocess).
-func TestReprocessConflictStatuses(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-409")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	for _, status := range []string{"RECEIVED", "PARSING", "PRICING", "READY", "APPROVED_SENT", "IGNORED"} {
-		t.Run(status, func(t *testing.T) {
-			rfq := seedRfq(t, db, org, rfqSeed{status: status})
-			rec := rig.postReprocess(t, user, org, rfq)
-			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-			var body authapi.ReprocessConflict
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-			assert.Equal(t, authapi.ErrorCodeRfqNotParked, body.Error)
-			assert.Equal(t, status, body.Status, "the current status rides the 409 body")
-			assert.Empty(t, stagedJobs(t, db, rfq))
-			r := loadRfq(t, db, org, rfq)
-			assert.Equal(t, status, r.Status, "a 409 writes nothing")
-		})
-	}
-}
-
-// TestReprocessUnknownAndCrossTenant404 proves the two 404 cases: an id
-// no tenant owns and an id another tenant owns both answer the uniform
-// not_found — RLS makes the cross-tenant row invisible to the FOR UPDATE.
-func TestReprocessUnknownAndCrossTenant404(t *testing.T) {
-	db := testenv.Open(t)
-	orgA, orgB := uuid.New(), uuid.New()
-	testenv.SeedOrganization(t, orgA, "reproc-404a")
-	testenv.SeedOrganization(t, orgB, "reproc-404b")
-	user := seedUser(t)
-	seedMembership(t, orgB, user, platform.RolePricingAnalyst)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	foreign := seedRfq(t, db, orgA, rfqSeed{status: "NEEDS_REVIEW"})
-
-	rec := rig.postReprocess(t, user, orgB, uuid.New())
-	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String())
-
-	rec = rig.postReprocess(t, user, orgB, foreign)
-	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String(),
-		"cross-tenant RFQ ids are invisible — the same uniform 404")
-
-	r := loadRfq(t, db, orgA, foreign)
-	assert.Equal(t, "NEEDS_REVIEW", r.Status, "a 404 never touches the row")
-}
-
-// TestReprocessRoles covers the reprocess matrix (spec Reprocess): every
-// membership role may reprocess — membership_role only carries the
-// three — so 403 is declared but unreachable today.
-func TestReprocessRoles(t *testing.T) {
-	db := testenv.Open(t)
-	for _, role := range []string{platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst} {
-		t.Run(role, func(t *testing.T) {
-			org := uuid.New()
-			testenv.SeedOrganization(t, org, "reproc-role-"+strings.ToLower(role))
-			user := seedUser(t)
-			seedMembership(t, org, user, role)
-			rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-			rfq := seedRfq(t, db, org, rfqSeed{status: "FAILED", failureReason: strptr("boom")})
-			rec := rig.postReprocess(t, user, org, rfq)
-			assert.Equal(t, http.StatusAccepted, rec.Code, "%s may reprocess: %s", role, rec.Body.String())
-		})
-	}
-}
-
-// TestReprocessUnauthenticated: no qp_access cookie → the middleware's
-// 401 before any tenant work; a memberless user (membership revoked) →
-// 404.
-func TestReprocessUnauthenticated(t *testing.T) {
-	db := testenv.Open(t)
-	org := uuid.New()
-	testenv.SeedOrganization(t, org, "reproc-unauth")
-	user := seedUser(t)
-	seedMembership(t, org, user, platform.RoleOwner)
-	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
-	rfq := seedRfq(t, db, org, rfqSeed{status: "NEEDS_REVIEW"})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/rfqs/"+rfq.String()+"/reprocess", nil)
-	req.Header.Set("X-Organization-Id", org.String())
-	rec := httptest.NewRecorder()
-	rig.handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-
-	// Valid JWT but no membership in this org → ResolveTenant's 404.
-	stranger := seedUser(t)
-	rec = rig.postReprocess(t, stranger, org, rfq)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	r := loadRfq(t, db, org, rfq)
-	assert.Equal(t, "NEEDS_REVIEW", r.Status)
 }

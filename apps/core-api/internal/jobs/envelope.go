@@ -30,22 +30,45 @@ const (
 	QueueSend    = "send"
 )
 
+// liveJobStates is the dedupe window every pipeline enqueue shares: a
+// terminal job (completed/cancelled/discarded) must not block the
+// re-enqueue that the spec's "reclassify as RFQ" and reprocess actions
+// issue by entity id. A fresh slice per call so a caller cannot mutate
+// the shared list.
+func liveJobStates() []rivertype.JobState {
+	return []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRetryable,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+	}
+}
+
 // entityUnique is the shared insert policy: unique on kind + the tagged
 // entity field, so a double enqueue collapses (spec section 3). ByState
-// restricts the dedupe window to live states — a terminal job
-// (completed/cancelled/discarded) must not block the re-enqueue that the
-// spec's "reclassify as RFQ" and reprocess actions issue by entity id.
-// Every worker is idempotent on entity state, so a re-run is always safe.
+// restricts the dedupe window to live states. Every worker is idempotent
+// on entity state, so a re-run is always safe.
 func entityUnique(queue string) river.InsertOpts {
 	return river.InsertOpts{Queue: queue, UniqueOpts: river.UniqueOpts{
-		ByArgs: true,
-		ByState: []rivertype.JobState{
-			rivertype.JobStateAvailable,
-			rivertype.JobStatePending,
-			rivertype.JobStateRetryable,
-			rivertype.JobStateRunning,
-			rivertype.JobStateScheduled,
-		},
+		ByArgs:  true,
+		ByState: liveJobStates(),
+	}}
+}
+
+// ReprocessForceOpts is the force-insert policy for the reprocess enqueue
+// (internal/rfqs): entityUnique's kind+entity dimensions plus ByQueue.
+// The extra queue dimension shifts the computed unique_key, so the insert
+// cannot collide with the about-to-complete `running` job it replaces —
+// while two force-inserts still dedupe against each other in live states.
+// River v0.51.2 offers no uniqueness-off through InsertOpts: an empty
+// UniqueOpts falls back to the args' InsertOpts(), so shifting the key is
+// the only bypass. Queue and MaxAttempts stay inherited from the args.
+func ReprocessForceOpts() *river.InsertOpts {
+	return &river.InsertOpts{UniqueOpts: river.UniqueOpts{
+		ByArgs:  true,
+		ByQueue: true,
+		ByState: liveJobStates(),
 	}}
 }
 

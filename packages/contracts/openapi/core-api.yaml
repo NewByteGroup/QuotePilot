@@ -594,7 +594,11 @@ paths:
 
         The resume point is the earliest missing checkpoint, so the paid
         extraction and a completed carrier fetch are never repeated:
-        (1) a usable extraction — `extracted_payload_json` and
+        (0) both body columns NULL is the S1 dead-letter shell (permanent
+        Resend fetch failure) — `rfq_ingest` re-runs for the resolved
+        `inbound_messages` receipt and promotes the shell in place, or
+        `rfq_extract` when no receipt exists to resurrect; (1) a usable
+        extraction — `extracted_payload_json` and
         `extraction_confidence` are the pair S2 commits together — else
         `rfq_extract` re-runs (`NO_USABLE_TEXT`, `INVALID_EXTRACTION`,
         `TARIFF_UPDATE` parks and dead-lettered `FAILED` shells land
@@ -610,14 +614,20 @@ paths:
         `REQUIRED_FIELD_MISSING` and the other business parks keep their
         persisted extraction and resume at pricing. Every other
         `app.rfq_status` — `RECEIVED`, `PARSING`, `PRICING`, `READY`,
-        `APPROVED_SENT`, `IGNORED` — answers 409; `IGNORED` is
+        `APPROVED_SENT`, `IGNORED` — answers 409, except `READY` while
+        its `DRAFT` quote awaits its first render (a dead-lettered
+        `rfq_render` leaves exactly that shape); `IGNORED` is
         intentionally terminal.
 
         `REPROCESS_MIN_INTERVAL` (default 60s) bounds one reprocess per
         RFQ: a second call inside the interval answers 429 with
         `Retry-After` and enqueues nothing — a double click or retry
         loop cannot fan out jobs or carrier calls. The last reprocess
-        time is read off the audit log, so no column is added.
+        time is read off the audit log, so no column is added. The 429
+        applies only between parked reprocesses: while an accepted
+        resume is still running, the RFQ sits in the resumed stage's
+        active status (`RECEIVED`/`PARSING`/`PRICING`/`READY`) and a
+        reprocess call answers 409 with that current status.
       security:
         - qpAccess: []
       parameters:
@@ -651,8 +661,11 @@ paths:
           description: |
             `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` —
             the RFQ is not in a reprocessable state
-            (`NEEDS_REVIEW`/`FAILED`); `status` reports its current
-            `app.rfq_status` value so the client can refresh its row.
+            (`NEEDS_REVIEW`/`FAILED`, or `READY` while its `DRAFT`
+            quote awaits its first render); `status` reports its
+            current `app.rfq_status` value so the client can refresh
+            its row — including the active status an accepted resume
+            is still running under.
           content:
             application/json:
               schema:
@@ -919,7 +932,7 @@ components:
       description: |
         River job kind of the pipeline stage a reprocess resumed — the
         `resumed_stage` vocabulary of POST /v1/rfqs/{id}/reprocess.
-      enum: [rfq_extract, rfq_fetch_rates, rfq_price, rfq_render]
+      enum: [rfq_ingest, rfq_extract, rfq_fetch_rates, rfq_price, rfq_render]
     ReprocessRfqResponse:
       type: object
       additionalProperties: false
