@@ -86,11 +86,8 @@ type ShellFacts struct {
 //     the PR.)
 //  2. DRAFT quote — its existence PROVES the S3a checkpoint committed
 //     (S3a always writes its outcome row before enqueueing S3b — every
-//     outcome releases pricing), so the walk never reaches the
-//     time-dependent request_hash recompute for a priced RFQ: a next-day
-//     reprocess would recompute ready_date off `now`, drift the hash and
-//     mistake the completed fetch for a missing one — a paid re-fetch
-//     the spec forbids (Devin Review). NULL pdf_storage_key ⇒
+//     outcome releases pricing), so a priced RFQ never even reaches the
+//     request_hash recompute. NULL pdf_storage_key ⇒
 //     rfq_render (READY — the RFQ is already past pricing; render
 //     re-runs for that version). A rendered DRAFT means every
 //     checkpoint exists ⇒ rfq_price (PRICING): the park questions the
@@ -101,13 +98,20 @@ type ShellFacts struct {
 //     owed gate off the stored extraction (freightOwed: FCL + derived
 //     IMPORT + OwesImportFreight); no carrier_offers row for the
 //     recomputed request_hash ⇒ rfq_fetch_rates (PRICING), else
-//     rfq_price. Any recorded outcome — OFFER_FOUND, NO_OFFER,
+//     rfq_price. The hash's ready_date fallback is the RFQ's received_at
+//     — stable per entity, so a next-day reprocess recomputes the SAME
+//     digest S3a pinned and the completed (paid) fetch is never
+//     mistaken for missing (Devin Review round 3). Any recorded outcome
+//     — OFFER_FOUND, NO_OFFER,
 //     FETCH_FAILED, NOT_APPLICABLE — counts as completed: the fetch is
 //     never repeated (spec Reprocess). LOW_CONFIDENCE, MISSING_TARIFF,
 //     REQUIRED_FIELD_MISSING and the other business parks land here —
 //     the human reprocess IS the gate override; fields stay persisted
 //     and the quote keeps the pinned confidence.
-func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFacts, payload []byte, confidenceSet bool, now time.Time) (ResumeDecision, error) {
+//
+// receivedAt is the locked RFQ's received_at — the stable ready_date
+// fallback the hash recompute shares with the S3a worker.
+func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFacts, payload []byte, confidenceSet bool, receivedAt time.Time) (ResumeDecision, error) {
 	if shell.BodiesMissing && shell.NoAttachments && len(payload) == 0 {
 		id, found, err := inboundMessageID(ctx, tx, shell.ResendMessageID)
 		if err != nil {
@@ -138,7 +142,7 @@ func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFa
 		// bytes and cancel.
 		return ResumeDecision{}, fmt.Errorf("jobs: reprocess: extraction on %s: %w", rfqID, err)
 	}
-	missing, err := carrierCheckpointMissing(ctx, tx, rfqID, fields, now)
+	missing, err := carrierCheckpointMissing(ctx, tx, rfqID, fields, receivedAt)
 	if err != nil {
 		return ResumeDecision{}, err
 	}
@@ -151,11 +155,11 @@ func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFa
 // carrierCheckpointMissing recomputes the S3a owed gate off the stored
 // extraction fields — the same parse helpers and freightOwed call the
 // rfq_fetch_rates worker runs — and reports whether no outcome row exists
-// for the request hash the fetch would carry today. owed=false
+// for the request hash the fetch would carry. owed=false
 // short-circuits: no fetch was ever owed, so nothing is missing
 // (NOT_APPLICABLE rows are an S3a write, not a checkpoint the reprocess
 // owes).
-func carrierCheckpointMissing(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, fields map[string]extractedField, now time.Time) (bool, error) {
+func carrierCheckpointMissing(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, fields map[string]extractedField, receivedAt time.Time) (bool, error) {
 	modal, _ := parseModalField(fields)
 	incoterm, _ := parseIncotermField(fields)
 	origin, _ := requiredLocode(fields, "origin_locode")
@@ -165,8 +169,9 @@ func carrierCheckpointMissing(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, f
 	}
 	// The hash must match what S3a computes for this extraction — the
 	// worker's own rateRequest normalizes it (locodes, equipment,
-	// quantity and the ready_date fallback off the injected clock).
-	req, _ := rateRequest(fields, now)
+	// quantity and the ready_date fallback off the RFQ's received_at,
+	// the same value the worker read off its own locked row).
+	req, _ := rateRequest(fields, receivedAt)
 	exists, err := checkpointExists(ctx, tx, rfqID, carrier.RequestHash(req))
 	if err != nil {
 		return false, fmt.Errorf("jobs: reprocess: carrier checkpoint on %s: %w", rfqID, err)

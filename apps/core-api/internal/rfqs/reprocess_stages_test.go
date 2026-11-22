@@ -370,11 +370,11 @@ func TestReprocessAttachmentOnlyRfqIsNotShell(t *testing.T) {
 }
 
 // TestReprocessNextDayRenderResumesRender: the next-day render recovery —
-// S3a ran yesterday with no extracted ready_date, so its checkpoint hash
-// carries the run-day fallback; a DRAFT was priced and is still awaiting
-// its first render. Reprocessing today must resume rfq_render — the
-// DRAFT's existence proves the fetch checkpoint committed, so the
-// time-dependent request_hash recompute never runs and the completed
+// the RFQ arrived yesterday and S3a ran with no extracted ready_date, so
+// its checkpoint hash carries the received_at-day fallback; a DRAFT was
+// priced and is still awaiting its first render. Reprocessing today must
+// resume rfq_render — the DRAFT's existence proves the fetch checkpoint
+// committed, so the request_hash recompute never runs and the completed
 // (paid) fetch is never repeated.
 func TestReprocessNextDayRenderResumesRender(t *testing.T) {
 	db := testenv.Open(t)
@@ -383,18 +383,19 @@ func TestReprocessNextDayRenderResumesRender(t *testing.T) {
 	user := seedUser(t)
 	seedMembership(t, org, user, platform.RolePricingAnalyst)
 	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
+	arrived := rigNow.AddDate(0, 0, -1)
 	rfq := seedRfq(t, db, org, rfqSeed{
 		status:     "READY",
 		textBody:   strptr("please quote"),
 		payload:    extractionOwedNoReady,
 		confidence: strptr("0.8800"),
+		receivedAt: arrived,
 	})
-	// Yesterday's S3a run pinned the OFFER_FOUND checkpoint under the
-	// run-day ready_date — today's recompute would hash a different
-	// request and call the checkpoint missing.
+	// S3a pinned the OFFER_FOUND checkpoint under the received_at-day
+	// ready_date — the digest today's recompute must reproduce.
 	seedCarrierOutcome(t, db, org, rfq, "OFFER_FOUND",
 		[]byte(`{"carrier":"CMA_CGM","charges":[],"expires_at":"2026-11-19T00:00:00Z"}`),
-		owedHashOn(rigNow.AddDate(0, 0, -1)))
+		owedHashOn(arrived))
 	quote := seedDraftQuote(t, db, org, rfq, nil)
 
 	rec := rig.postReprocess(t, user, org, rfq)
@@ -409,6 +410,51 @@ func TestReprocessNextDayRenderResumesRender(t *testing.T) {
 	assert.Equal(t, []string{"rfq_render"}, stagedJobs(t, db, rfq),
 		"no rfq_fetch_rates re-fetch and no rfq_price supersede")
 	assert.Equal(t, quote.String(), stagedJobArg(t, db, "rfq_render", rfq, "quote_id"))
+}
+
+// TestReprocessNextDayNoDraftResumesPrice is the Devin Review round-3
+// drift case the DRAFT-first reorder could not cover: a parked-pre-DRAFT
+// RFQ (MISSING_TARIFF — S3b parked before committing a quote) whose
+// extraction carries no ready_date. S3a ran the day the RFQ arrived and
+// pinned the checkpoint under the received_at-day fallback. Reprocessing
+// today recomputes the hash off the SAME received_at — the digest
+// matches, the completed fetch is found and the walk resumes rfq_price,
+// never rfq_fetch_rates (a paid re-fetch the spec forbids). Under the
+// old now-derived fallback the next-day recompute drifted to a different
+// hash and called the checkpoint missing.
+func TestReprocessNextDayNoDraftResumesPrice(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "reproc-nodraft-day")
+	user := seedUser(t)
+	seedMembership(t, org, user, platform.RolePricingAnalyst)
+	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
+	arrived := rigNow.AddDate(0, 0, -1)
+	rfq := seedRfq(t, db, org, rfqSeed{
+		status:       "NEEDS_REVIEW",
+		reviewReason: strptr("MISSING_TARIFF"),
+		textBody:     strptr("please quote"),
+		payload:      extractionOwedNoReady,
+		confidence:   strptr("0.8800"),
+		receivedAt:   arrived,
+	})
+	// No DRAFT — the walk reaches the carrier-checkpoint recompute. The
+	// seeded outcome's request_hash is the production digest
+	// (carrier.RequestHash over the normalized request) with ready_date
+	// resolved to the received_at day, exactly as S3a pinned it.
+	seedCarrierCheckpoint(t, db, org, rfq, owedHashOn(arrived))
+
+	rec := rig.postReprocess(t, user, org, rfq)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var body authapi.ReprocessRfqResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, authapi.RfqPrice, body.ResumedStage,
+		"the received_at-derived hash matches across days — the fetch is never repeated")
+
+	r := loadRfq(t, db, org, rfq)
+	assert.Equal(t, "PRICING", r.Status)
+	assert.Equal(t, []string{"rfq_price"}, stagedJobs(t, db, rfq),
+		"rfq_price, not a second rfq_fetch_rates")
 }
 
 // TestReprocessDraftShortCircuitsCarrierWalk: a priced RFQ parked for

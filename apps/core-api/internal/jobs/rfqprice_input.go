@@ -327,13 +327,17 @@ func declaredMoney(fields map[string]extractedField, amountKey, currencyKey stri
 }
 
 // quoteDateField is ready_date when extracted and parseable, else the
-// pricedAt date — both truncated to day granularity, matching how the
-// engine compares tariff validity windows (eligibleRow truncates too).
-func quoteDateField(fields map[string]extractedField, pricedAt time.Time) time.Time {
+// caller's fallback day — both truncated to day granularity, matching how
+// the engine compares tariff validity windows (eligibleRow truncates
+// too). The fallback is the caller's choice: S3b passes pricedAt (the
+// quote's own date), S3a and the reprocess recompute pass the RFQ's
+// received_at so request_hash is stable across days (Devin Review
+// round 3).
+func quoteDateField(fields map[string]extractedField, fallback time.Time) time.Time {
 	if s, ok := fieldString(fields, "ready_date"); ok {
 		if d, err := time.Parse(isoDate, s); err == nil {
 			return d
 		}
 	}
-	return time.Date(pricedAt.Year(), pricedAt.Month(), pricedAt.Day(), 0, 0, 0, 0, time.UTC)
+	return time.Date(fallback.Year(), fallback.Month(), fallback.Day(), 0, 0, 0, 0, time.UTC)
 }

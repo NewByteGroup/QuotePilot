@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/pricing"
 )
 
@@ -158,6 +159,40 @@ func TestQuoteDateField(t *testing.T) {
 	bad := map[string]extractedField{"ready_date": {Value: "not-a-date"}}
 	assert.Equal(t, time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC), quoteDateField(bad, now),
 		"an unparseable ready_date is ignored, never guessed")
+}
+
+// TestRateRequestHashStableAcrossDays pins the Devin Review round-3
+// contract: absent an extracted ready_date, rateRequest resolves the
+// fallback off the RFQ's received_at — a stable per-entity timestamp —
+// so the digest is identical no matter which day the worker runs or the
+// reprocess recomputes. A different received_at day still re-keys the
+// request (the date component stays sensitive).
+func TestRateRequestHashStableAcrossDays(t *testing.T) {
+	fields := map[string]extractedField{
+		"incoterm":          {Value: "FOB"},
+		"modal":             {Value: "FCL"},
+		"origin_locode":     {Value: "CNSHA"},
+		"dest_locode":       {Value: "BRSSZ"},
+		"equipment_or_unit": {Value: "40HC"},
+		"quantity":          {Value: "2"},
+		// no ready_date — the fallback path under test
+	}
+	arrived := time.Date(2026, 3, 1, 8, 30, 0, 0, time.UTC)
+
+	reqA, _ := rateRequest(fields, arrived)
+	assert.Equal(t, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), reqA.ReadyDate,
+		"the fallback resolves to the received_at day")
+
+	// Same arrival day at a different clock time — same digest.
+	reqB, _ := rateRequest(fields, arrived.Add(5*time.Hour))
+	assert.Equal(t, carrier.RequestHash(reqA), carrier.RequestHash(reqB),
+		"day truncation makes the hash insensitive to the time component")
+
+	// A different arrival day re-keys the request — the date component
+	// still participates, so the test is not vacuous.
+	reqC, _ := rateRequest(fields, arrived.AddDate(0, 0, 1))
+	assert.NotEqual(t, carrier.RequestHash(reqA), carrier.RequestHash(reqC),
+		"a different received_at day yields a different hash")
 }
 
 // TestMissingGroupCategory maps the MISSING_TARIFF_GROUP parameter back

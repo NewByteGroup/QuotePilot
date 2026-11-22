@@ -32,9 +32,11 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/testenv"
 )
 
-// rigNow is the frozen clock every rig reads — the interval gate and the
-// S3a request-hash recompute both need determinism. The carrier fixture's
-// ready_date sits past it.
+// rigNow is the frozen clock every rig reads — the interval gate needs
+// determinism. The S3a request-hash recompute no longer reads it: its
+// ready_date fallback is the RFQ's received_at (Devin Review round 3),
+// which the seeds pin explicitly. The carrier fixture's ready_date sits
+// past it.
 var rigNow = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 // extractionOwed is a usable extraction whose S3a gate fires: FCL + FOB
@@ -62,9 +64,10 @@ var extractionNotOwed = []byte(`{"fields":{
 }}`)
 
 // extractionOwedNoReady is extractionOwed minus the ready_date field —
-// the shape whose S3a run pins request_hash with the run-day fallback
-// (quoteDateField's `now`), which is exactly the day-drift a next-day
-// render reprocess must not recompute (Devin Review).
+// the shape whose S3a run pins request_hash with the received_at-day
+// fallback (Devin Review round 3: the fallback used to be the run-day
+// clock, which is exactly the day-drift a next-day reprocess must never
+// recompute).
 var extractionOwedNoReady = []byte(`{"fields":{
 	"modal":             {"value":"FCL"},
 	"incoterm":          {"value":"FOB"},
@@ -88,9 +91,9 @@ func owedHash() string {
 	})
 }
 
-// owedHashOn is owedHash for a run-day ready_date — the hash an S3a worker
-// running on `day` pins for extractionOwedNoReady (quoteDateField falls
-// back to the injected clock truncated to the day).
+// owedHashOn is owedHash for a fallback-day ready_date — the hash S3a
+// pins for extractionOwedNoReady when the RFQ's received_at falls on
+// `day` (quoteDateField truncates the fallback to the day).
 func owedHashOn(day time.Time) string {
 	return carrier.RequestHash(carrier.Request{
 		OriginLOCODE:    "DEHAM",
@@ -201,6 +204,10 @@ type rfqSeed struct {
 	htmlBody      *string
 	payload       []byte
 	confidence    *string
+	// receivedAt pins received_at — the S3a hash fallback's source — so
+	// the day-drift tests control which day "the RFQ arrived"; zero
+	// falls back to the column default now().
+	receivedAt time.Time
 }
 
 // seedRfq inserts the RFQ inside the tenant tx; kind defaults to RFQ.
@@ -212,6 +219,10 @@ func seedRfq(t *testing.T, db *tenantdb.DB, org uuid.UUID, s rfqSeed) uuid.UUID 
 	if s.resendID == "" {
 		s.resendID = "resend-" + uuid.NewString()
 	}
+	var receivedAt any
+	if !s.receivedAt.IsZero() {
+		receivedAt = s.receivedAt
+	}
 	var id uuid.UUID
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
@@ -219,14 +230,15 @@ func seedRfq(t *testing.T, db *tenantdb.DB, org uuid.UUID, s rfqSeed) uuid.UUID 
 				(organization_id, rfq_number, resend_message_id, customer_email, subject,
 				 kind, status, review_reason, failure_reason,
 				 raw_text_body, raw_html_body,
-				 extracted_payload_json, extraction_confidence)
+				 extracted_payload_json, extraction_confidence, received_at)
 			VALUES ($1, (SELECT coalesce(max(rfq_number),0)+1 FROM app.rfq_requests WHERE organization_id=$1),
 			        $2, 'buyer@test.dev', 'RFQ: 2x40HQ',
-			        $3::app.rfq_kind, $4::app.rfq_status, $5, $6, $7, $8, $9::jsonb, $10)
+			        $3::app.rfq_kind, $4::app.rfq_status, $5, $6, $7, $8, $9::jsonb, $10,
+			        coalesce($11::timestamptz, now()))
 			RETURNING id`,
 			org, s.resendID, s.kind, s.status,
 			s.reviewReason, s.failureReason, s.textBody, s.htmlBody,
-			s.payload, s.confidence).Scan(&id)
+			s.payload, s.confidence, receivedAt).Scan(&id)
 	}))
 	return id
 }
@@ -459,4 +471,38 @@ func TestReprocessIntervalExpired(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	n, _, _ := reprocessedAudits(t, db, org, rfq)
 	assert.Equal(t, 2, n, "the accepted reprocess writes its own audit row")
+}
+
+// TestReprocessRateLimitedBeatsStatusGate pins the Devin Review round-3
+// gate order: the interval gate runs BEFORE the status gate. A previous
+// reprocess left its audit row 30 s ago; meanwhile the resumed render
+// completed, so the RFQ sits at READY with a rendered DRAFT — a shape
+// the status gate would 409. Inside the interval the answer is still
+// 429 + Retry-After, unconditionally: the spec's "a second reprocess
+// inside the interval is rate-limited" never depends on status (and the
+// refusal never waits on the render's quote lock to find out).
+func TestReprocessRateLimitedBeatsStatusGate(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "reproc-429-first")
+	user := seedUser(t)
+	seedMembership(t, org, user, platform.RolePricingAnalyst)
+	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
+	rfq := seedRfq(t, db, org, rfqSeed{
+		status:     "READY",
+		textBody:   strptr("please quote"),
+		payload:    extractionNotOwed,
+		confidence: strptr("0.9100"),
+	})
+	pdf := "tenants/" + org.String() + "/quotes/x_v1.pdf"
+	seedDraftQuote(t, db, org, rfq, &pdf)
+	seedReprocessedAudit(t, db, org, rfq, user, rigNow.Add(-30*time.Second))
+
+	rec := rig.postReprocess(t, user, org, rfq)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.JSONEq(t, `{"error":"rate_limited"}`, rec.Body.String())
+	assert.Empty(t, stagedJobs(t, db, rfq), "a 429 enqueues nothing")
+	n, _, _ := reprocessedAudits(t, db, org, rfq)
+	assert.Equal(t, 1, n, "only the seeded audit row — the refusal never writes")
 }

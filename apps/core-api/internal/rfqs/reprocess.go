@@ -46,8 +46,9 @@ const actionReprocessed = "rfq.reprocessed"
 // resumed stage's job inside the same tenant transaction that clears the
 // reasons and flips the status — status, audit row and job commit or roll
 // back together (spec Reprocess). minInterval is the per-RFQ reprocess
-// floor (REPROCESS_MIN_INTERVAL, default 60s) and now is the one clock
-// the gate and the S3a hash recompute read.
+// floor (REPROCESS_MIN_INTERVAL, default 60s) and now is the interval
+// gate's clock — the one genuine clock use left: the S3a hash recompute
+// reads the RFQ's received_at, never now (Devin Review round 3).
 type Endpoints struct {
 	runner      tenantdb.TenantRunner
 	inserter    jobs.JobInserter
@@ -110,7 +111,9 @@ type reprocessOutcome struct {
 // resolves the receipt, the body pair plus the rfq_attachments count
 // detect the dead-letter shell (the shell never stores attachments, so
 // zero rows is what keeps an attachment-only ingest out of step 0 —
-// Devin Review).
+// Devin Review). ReceivedAt feeds the S3a request-hash recompute's
+// ready_date fallback — stable per RFQ, so a next-day reprocess
+// recomputes the digest S3a pinned (Devin Review round 3).
 type reprocessRfq struct {
 	ID              uuid.UUID
 	Status          string
@@ -122,6 +125,7 @@ type reprocessRfq struct {
 	Payload         []byte
 	ConfidenceSet   bool
 	AttachmentCount int
+	ReceivedAt      time.Time
 }
 
 // shellFacts projects the row onto DecideResume's step-0 input: both body
@@ -149,8 +153,17 @@ func (r reprocessRfq) clearedReason() *string {
 }
 
 // reprocess runs the whole Reprocess contract inside one InTenantTx:
-// lock → status gate → min-interval gate → resume decision → clear+status
-// → audit → enqueue.
+// lock → min-interval gate → status gate → resume decision →
+// clear+status → audit → enqueue. The interval gate runs BEFORE the
+// status gate (Devin Review round 3): a repeat reprocess inside
+// REPROCESS_MIN_INTERVAL answers 429 + Retry-After unconditionally,
+// whatever the status — the READY carveout's DraftAwaitingRender FOR
+// UPDATE blocks on a mid-flight render's quote lock, and a render
+// completing during that wait would answer a stale 409 for a request
+// that is, spec-wise, simply too soon. Bonus: the 429 now answers
+// without waiting on the render's quote lock at all. A first-ever
+// reprocess still reaches the status gate — no audit row means the
+// interval passes — so a non-parked RFQ keeps its 409.
 func (e *Endpoints) reprocess(
 	ctx context.Context,
 	orgID, userID, correlationID, rfqID uuid.UUID,
@@ -163,6 +176,14 @@ func (e *Endpoints) reprocess(
 		}
 		if !found {
 			out = reprocessOutcome{kind: kindNotFound}
+			return nil
+		}
+		limited, err := e.inInterval(ctx, tx, rfqID)
+		if err != nil {
+			return err
+		}
+		if limited > 0 {
+			out = reprocessOutcome{kind: kindRateLimited, retryAfter: limited}
 			return nil
 		}
 		reprocessable := r.Status == statusNeedsReview || r.Status == statusFailed
@@ -179,14 +200,6 @@ func (e *Endpoints) reprocess(
 			out = reprocessOutcome{kind: kindNotParked, status: r.Status}
 			return nil
 		}
-		limited, err := e.inInterval(ctx, tx, rfqID)
-		if err != nil {
-			return err
-		}
-		if limited > 0 {
-			out = reprocessOutcome{kind: kindRateLimited, retryAfter: limited}
-			return nil
-		}
 		return e.resume(ctx, tx, orgID, userID, correlationID, r, &out)
 	})
 	return out, err
@@ -201,11 +214,12 @@ func lockRfq(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (reprocessRfq, boo
 		SELECT id, status::text, review_reason, failure_reason,
 		       resend_message_id, raw_text_body, raw_html_body,
 		       coalesce(extracted_payload_json::text,''), extraction_confidence,
-		       (SELECT count(*) FROM app.rfq_attachments a WHERE a.rfq_id = rfq_requests.id)
+		       (SELECT count(*) FROM app.rfq_attachments a WHERE a.rfq_id = rfq_requests.id),
+		       received_at
 		FROM app.rfq_requests WHERE id = $1 FOR UPDATE`, rfqID).
 		Scan(&r.ID, &r.Status, &r.ReviewReason, &r.FailureReason,
 			&r.ResendMessageID, &r.RawText, &r.RawHTML, &r.Payload, &confidence,
-			&r.AttachmentCount)
+			&r.AttachmentCount, &r.ReceivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return reprocessRfq{}, false, nil
 	}
@@ -249,7 +263,7 @@ func (e *Endpoints) resume(
 	r reprocessRfq,
 	out *reprocessOutcome,
 ) error {
-	d, err := jobs.DecideResume(ctx, tx, r.ID, r.shellFacts(), r.Payload, r.ConfidenceSet, e.now())
+	d, err := jobs.DecideResume(ctx, tx, r.ID, r.shellFacts(), r.Payload, r.ConfidenceSet, r.ReceivedAt)
 	if err != nil {
 		return err
 	}

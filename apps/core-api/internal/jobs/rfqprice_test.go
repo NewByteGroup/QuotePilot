@@ -205,6 +205,17 @@ func setRFQStatus(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID, status stri
 	}))
 }
 
+// setRFQReceivedAt pins received_at — the request-hash ready_date
+// fallback's source — so day-drift tests control which day "the RFQ
+// arrived" independent of the test's wall clock.
+func setRFQReceivedAt(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID, at time.Time) {
+	t.Helper()
+	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE app.rfq_requests SET received_at = $2 WHERE id = $1`, rfq, at)
+		return err
+	}))
+}
+
 // rfqState reads the row's status and review_reason inside the tenant tx.
 func rfqState(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID) (status, review string) {
 	t.Helper()
