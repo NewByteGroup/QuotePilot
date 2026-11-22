@@ -27,11 +27,53 @@ export function useMe() {
   return useQuery({ queryKey: ME_KEY, queryFn: loadMe, retry: false })
 }
 
-export function useRequestLoginLink() {
+export class InvalidCredentialsError extends Error {}
+export class RateLimitedError extends Error {}
+
+function failure(operation: string, status: number, code?: string): Error {
+  if (status === 401) return new InvalidCredentialsError(`${operation}: ${code ?? status}`)
+  if (status === 429) return new RateLimitedError(`${operation}: ${code ?? status}`)
+  return new Error(`${operation} failed: ${code ?? status}`)
+}
+
+// The password path of POST /auth/login answers like POST /auth/session: cookies plus
+// the profile and memberships (ADR-005 amendment 2026-11-16).
+export function usePasswordLogin() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (credentials: { email: string; password: string }) => {
+      const { data, error, response } = await coreClient.POST('/auth/login', {
+        body: credentials,
+      })
+      if (!data || !('profile' in data)) {
+        throw failure('POST /auth/login', response.status, error?.error)
+      }
+      return data
+    },
+    onSuccess: ({ profile, memberships }) => {
+      queryClient.setQueryData<CoreSchemas['MeResponse']>(ME_KEY, { ...profile, memberships })
+    },
+  })
+}
+
+export function useRequestPasswordReset() {
   return useMutation({
     mutationFn: async (email: string) => {
-      const { data, error, response } = await coreClient.POST('/auth/login', { body: { email } })
-      if (!data) throw new Error(`POST /auth/login failed: ${error?.error ?? response.status}`)
+      const { data, error, response } = await coreClient.POST('/auth/password-reset', {
+        body: { email },
+      })
+      if (!data) throw failure('POST /auth/password-reset', response.status, error?.error)
+      return data
+    },
+  })
+}
+
+// Consumes the reset link token; no session starts, the user logs in with the new password.
+export function useSetPassword() {
+  return useMutation({
+    mutationFn: async (body: { token: string; password: string }) => {
+      const { data, error, response } = await coreClient.POST('/auth/password', { body })
+      if (!data) throw failure('POST /auth/password', response.status, error?.error)
       return data
     },
   })

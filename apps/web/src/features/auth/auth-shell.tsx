@@ -1,15 +1,26 @@
 import type { ReactNode } from 'react'
 
-export function AuthShell({ title, children }: { title: string; children: ReactNode }) {
+type AuthShellProps = {
+  title: string
+  description?: ReactNode
+  children: ReactNode
+}
+
+export function AuthShell({ title, description, children }: AuthShellProps) {
   return (
-    <main className="bg-muted/40 flex min-h-svh items-center justify-center p-6">
-      <div className="bg-card w-full max-w-sm space-y-5 rounded-xl border p-6 shadow-sm">
-        <div className="flex items-center gap-2">
-          <img src="/logo.png" alt="" aria-hidden className="size-7" />
-          <span className="font-semibold">QuotePilot</span>
+    <main className="bg-muted/40 flex h-svh items-center justify-center overflow-y-auto p-6">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="flex items-center justify-center gap-2.5">
+          <img src="/logo.png" alt="" aria-hidden className="size-10" />
+          <span className="text-2xl font-semibold tracking-tight">QuotePilot</span>
         </div>
-        <h1 className="text-lg font-semibold">{title}</h1>
-        {children}
+        <div className="bg-card space-y-6 rounded-xl border p-8 shadow-sm">
+          <div className="space-y-1.5">
+            <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+            {description ? <p className="text-muted-foreground text-sm">{description}</p> : null}
+          </div>
+          {children}
+        </div>
       </div>
     </main>
   )

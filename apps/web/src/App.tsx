@@ -2,8 +2,10 @@ import { BrowserRouter, Route, Routes } from 'react-router'
 
 import { AppLayout } from '@/components/layout/app-layout'
 import { ExchangePage } from '@/features/auth/exchange-page'
+import { ForgotPasswordPage } from '@/features/auth/forgot-password-page'
 import { LoginPage } from '@/features/auth/login-page'
 import { RequireAuth } from '@/features/auth/require-auth'
+import { SetPasswordPage } from '@/features/auth/set-password-page'
 import { InboxPage } from '@/features/inbox/inbox-page'
 import { ConnectorsPage } from '@/features/platform/connectors-page'
 import { RepairsPage } from '@/features/platform/repairs-page'
@@ -18,7 +20,9 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="login" element={<LoginPage />} />
+      <Route path="recuperar-senha" element={<ForgotPasswordPage />} />
       <Route path="auth/exchange" element={<ExchangePage />} />
+      <Route path="auth/set-password" element={<SetPasswordPage />} />
       <Route element={<RequireAuth />}>
         <Route element={<AppLayout />}>
           <Route index element={<InboxPage />} />

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { Loader2 } from 'lucide-react'
 import { Link, Navigate, useSearchParams } from 'react-router'
 
 import { useExchangeLoginToken } from '@/api/auth'
@@ -24,23 +25,31 @@ export function ExchangePage() {
 
   if (!token || exchange.isError) {
     return (
-      <AuthShell title="Link inválido ou expirado">
-        <p role="alert" className="text-muted-foreground text-sm">
-          Este link de acesso não é mais válido. Links valem por poucos minutos e só podem ser
-          usados uma vez.
-        </p>
-        <Link to="/login" className="text-primary text-sm underline">
-          Pedir um novo link
+      <AuthShell
+        title="Link inválido ou expirado"
+        description={
+          <span role="alert">
+            Este link de acesso não é mais válido. Links valem por poucos minutos e só podem ser
+            usados uma vez.
+          </span>
+        }
+      >
+        <Link
+          to="/login"
+          className="bg-primary text-primary-foreground hover:bg-primary/90 flex h-11 w-full items-center justify-center rounded-md text-sm font-medium transition-colors"
+        >
+          Voltar para o login
         </Link>
       </AuthShell>
     )
   }
 
   return (
-    <AuthShell title="Entrando…">
-      <p role="status" className="text-muted-foreground text-sm">
-        Validando o seu link de acesso.
-      </p>
+    <AuthShell
+      title="Entrando…"
+      description={<span role="status">Validando o seu link de acesso.</span>}
+    >
+      <Loader2 className="text-primary mx-auto size-8 animate-spin" />
     </AuthShell>
   )
 }
