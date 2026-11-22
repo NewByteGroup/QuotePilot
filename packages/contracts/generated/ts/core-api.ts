@@ -14,17 +14,96 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Request a magic-link login email.
-         * @description If `email` belongs to a provisioned user, the server stores a
-         *     `create_login_token` hash and sends `${WEB_URL}/auth/exchange?token=…`
-         *     through the platform sender; otherwise it does nothing. The 200 body
-         *     is identical either way — this endpoint cannot enumerate users (spec
-         *     section 8). Rate limited per email and per IP (spec section 8.1:
-         *     proposed 5 tokens/email/hour and 30 requests/IP/hour); the link opens
-         *     a page and the state change is this POST, so mail scanners prefetching
-         *     it consume nothing.
+         * Log in — request a magic link, or authenticate with email + password.
+         * @description Two paths keyed on the request body (ADR-005 amendment 2026-11-16 —
+         *     the pilot meeting made user + password the MVP login, with the
+         *     magic-link pipeline retained as the reset mechanism and a fallback):
+         *
+         *     - `password` ABSENT — the magic-link path: if `email` belongs to a
+         *       provisioned user, the server stores a `create_login_token` hash and
+         *       sends `${WEB_URL}/auth/exchange?token=…` through the platform
+         *       sender; otherwise it does nothing. The 200 `{"status":"ok"}` body is
+         *       identical either way — the endpoint cannot enumerate users (spec
+         *       section 8). The link opens a page and the state change is this POST,
+         *       so mail scanners prefetching it consume nothing.
+         *     - `password` PRESENT — even as the empty string — the password path:
+         *       the password is verified against the argon2id hash
+         *       `get_user_auth_by_email` returns. Success answers exactly like
+         *       `POST /auth/session`: the `qp_access`/`qp_refresh` cookie pair plus
+         *       the profile and memberships the organization switcher renders.
+         *       Failure is the single uniform 401 `{"error":"unauthenticated"}` —
+         *       an unknown email, an unset password (NULL hash) and a wrong
+         *       password are indistinguishable on the wire.
+         *
+         *     Rate limited per email and per IP on both paths (spec section 8.1:
+         *     proposed 5 tokens/email/hour and 30 requests/IP/hour); every password
+         *     attempt spends both buckets.
          */
         post: operations["postAuthLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/password-reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request a password-reset link — never enumerates.
+         * @description The amendment's "forgot password" request (ADR-005 amendment
+         *     2026-11-16 — the magic-link pipeline is retained as the reset
+         *     mechanism): if `email` belongs to a provisioned user the server
+         *     stages a `purpose='password_reset'` token and queues
+         *     `${WEB_URL}/auth/set-password?token=…` through the same
+         *     outbox + token machinery as the magic link — same hash-at-rest,
+         *     single use, short expiry; otherwise it does nothing. The 200
+         *     `{"status":"ok"}` body is identical either way — the endpoint
+         *     cannot enumerate users (spec section 8). The link lands on a
+         *     set-password page and never starts a session, and a reset token
+         *     is not a magic-link token: `POST /auth/session` will not consume
+         *     it — the two token classes are not interchangeable in either
+         *     direction. Rate limited like `/auth/login`: per email and per IP.
+         */
+        post: operations["postAuthPasswordReset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set a new password from a reset token — answers no session.
+         * @description The set-password side of "forgot password" (ADR-005 amendment
+         *     2026-11-16): consumes a `purpose='password_reset'` token
+         *     (`consume_password_reset_token` — the same single-use row-lock
+         *     consume as the magic-link token), stores the argon2id hash
+         *     (`set_user_password`) and revokes every live session of the user
+         *     (`revoke_user_sessions` — OWASP: a credential reset invalidates
+         *     existing sessions), all in one transaction. Success is
+         *     `{"status":"ok"}` only: the set-password page does not start a
+         *     session, the user logs in through `/auth/login`'s password path
+         *     next. A used, expired or unknown token — including a LOGIN token
+         *     presented here — gets the single uniform 401, byte-identical to
+         *     `/auth/session`'s. Rate limited per IP (no email key exists on
+         *     this route).
+         */
+        post: operations["postAuthPassword"];
         delete?: never;
         options?: never;
         head?: never;
@@ -160,6 +239,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/quotes/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a quote version — releases the send job.
+         * @description The analyst's central act (spec section 4 "Approval"):
+         *     `Authenticate` + `ResolveTenant` +
+         *     `RequireRole(OWNER, ADMIN, PRICING_ANALYST)` — the same user may
+         *     prepare and approve. Inside one tenant transaction the handler
+         *     row-locks the quote, refuses a `SUPERSEDED` version (409
+         *     `quote_superseded`) and a negative-margin price (409
+         *     `negative_margin`, audited as `quote.approve_refused`), stamps
+         *     `approved_at`/`approved_by_user_id`/`approved_via='api'`, audits
+         *     `quote.approved` and enqueues the S5 `quote_send` job — one commit.
+         *     Re-approving an already-approved version is an idempotent no-op
+         *     returning the stored approval; an unknown or other-tenant quote id
+         *     gets the same uniform 404.
+         */
+        post: operations["approveQuote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -170,9 +280,11 @@ export interface components {
          *     the middleware contract of spec section 7; `bad_request` covers
          *     malformed bodies and `rate_limited` the login bucket (spec section
          *     8.1 leaves the code unpinned — this contract fixes it).
+         *     `quote_superseded` and `negative_margin` are the two conflict
+         *     refusals of quote approval (spec 2026-11-11 section 4).
          * @enum {string}
          */
-        ErrorCode: "bad_request" | "unauthenticated" | "missing_organization" | "not_found" | "forbidden" | "rate_limited" | "internal";
+        ErrorCode: "bad_request" | "unauthenticated" | "missing_organization" | "not_found" | "forbidden" | "rate_limited" | "internal" | "quote_superseded" | "negative_margin";
         Error: {
             error: components["schemas"]["ErrorCode"];
         };
@@ -198,11 +310,19 @@ export interface components {
         LoginRequest: {
             /**
              * @description RFC 5322 addr-spec; matched case-insensitively
-             *     (`find_user_by_email` lower-cases and trims). Plain `string` on
-             *     purpose — see `OrganizationIdHeader` for the format/dependency
-             *     trade-off.
+             *     (`find_user_by_email` and `get_user_auth_by_email` lower-case and
+             *     trim). Plain `string` on purpose — see `OrganizationIdHeader` for
+             *     the format/dependency trade-off.
              */
             email: string;
+            /**
+             * @description Present — even as the empty string — selects the password-login
+             *     path (ADR-005 amendment 2026-11-16); absent selects the magic-link
+             *     request. Deliberately no `minLength`: an empty password is just a
+             *     wrong one and earns the same uniform 401. An explicit JSON `null`
+             *     or a non-string value is malformed — 400, never a magic link.
+             */
+            password?: string;
         };
         LoginResponse: {
             /**
@@ -210,6 +330,29 @@ export interface components {
              * @enum {string}
              */
             status: "ok";
+        };
+        PasswordResetRequest: {
+            /**
+             * @description RFC 5322 addr-spec, same normalization as `LoginRequest.email` —
+             *     an unknown address answers the identical 200.
+             */
+            email: string;
+        };
+        PasswordSetRequest: {
+            /**
+             * @description Base64url 32-byte token from the reset link — `SessionRequest`'s
+             *     transport story verbatim: it crosses the wire once and the server
+             *     stores only its SHA-256. Must come from a
+             *     `purpose='password_reset'` row; a login token is the same 401 as
+             *     a dead one.
+             */
+            token: string;
+            /**
+             * @description The new secret — the 8..128 policy is declared here and enforced
+             *     by the endpoint (violations answer the uniform 400). Only its
+             *     argon2id PHC ever reaches the store.
+             */
+            password: string;
         };
         SessionRequest: {
             /**
@@ -228,6 +371,25 @@ export interface components {
             email: string;
             full_name: string;
             memberships: components["schemas"]["Membership"][];
+        };
+        /**
+         * @description Mirrors the `app.quote_status` enum (migration 0002). Approval
+         *     leaves the version `DRAFT` — the send worker flips it to
+         *     `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
+         * @enum {string}
+         */
+        QuoteStatus: "DRAFT" | "SUPERSEDED" | "APPROVED_SENT";
+        ApproveQuoteResponse: {
+            /** @description Quote version UUID. */
+            id: string;
+            status: components["schemas"]["QuoteStatus"];
+            /**
+             * Format: date-time
+             * @description Timestamp the first approval stamped.
+             */
+            approved_at: string;
+            /** @description User UUID of the approving analyst. */
+            approved_by_user_id: string;
         };
         OrganizationResponse: {
             /** @description Organization UUID. */
@@ -373,6 +535,32 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /**
+         * @description `{"error":"forbidden"}` — the caller is a member but its role is
+         *     outside the operation's allowed set (spec section 7).
+         */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /**
+         * @description `{"error":"quote_superseded"}` or `{"error":"negative_margin"}` —
+         *     the two business refusals of quote approval (spec 2026-11-11
+         *     section 4): a retired version and a below-cost price are both hard
+         *     blocks, machine-readable so the client can route each differently.
+         */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description Login bucket exhausted — `{"error":"rate_limited"}` (spec section 8.1). */
         RateLimited: {
             headers: {
@@ -422,8 +610,41 @@ export interface operations {
         };
         responses: {
             /**
-             * @description Always `{"status":"ok"}` for any well-formed email — existing
-             *     user or not.
+             * @description Magic-link path: `{"status":"ok"}` for any well-formed email —
+             *     existing user or not. Password path: session created — the
+             *     `qp_access`/`qp_refresh` cookie pair is set as described in the
+             *     operation description and the body carries the switcher payload.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"] | components["schemas"]["SessionResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    postAuthPasswordReset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordResetRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description `{"status":"ok"}` for any well-formed email — existing user or
+             *     not. Identical to the magic-link request's uniform answer.
              */
             200: {
                 headers: {
@@ -434,6 +655,37 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    postAuthPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordSetRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description Password updated and existing sessions revoked. No cookie is
+             *     set and no session is created.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -577,6 +829,48 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    approveQuote: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description Organization the request scopes to — required by the middleware, not
+                 *     the binding layer (an absent value reaches ResolveTenant as empty and
+                 *     gets the 400 {"error":"missing_organization"} only after
+                 *     authentication). Also part of the CSRF posture, since a cross-site
+                 *     form cannot set headers (ADR-005 section 4).
+                 */
+                "X-Organization-Id"?: components["parameters"]["OrganizationIdHeader"];
+            };
+            path: {
+                /** @description Quote version UUID (`app.quotes.id`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description The approved version's status and stored approval stamp —
+             *     identical on a re-approve (the no-op returns what the first
+             *     approval wrote).
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApproveQuoteResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
         };
     };
