@@ -27,6 +27,7 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/aiengine"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/fx"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
@@ -69,7 +70,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg), newAIEngine(&cfg))
+	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg), newAIEngine(&cfg), newRateFetcher(&cfg))
 	if err != nil {
 		return err
 	}
@@ -193,6 +194,27 @@ func newAIEngine(cfg *platform.Config) aiengine.Client {
 	}
 	slog.Warn("server: AI_ENGINE_URL unset — rfq_extract binds the unconfigured engine (calls fail loudly)")
 	return aiengine.UnconfiguredClient{}
+}
+
+// newRateFetcher picks the S3a carrier-offer binding (spec S3a):
+// MIRROR_PORTAL_ENABLED=true selects the deterministic demo mirror —
+// the APP_ENV guard already refused that flag in production, so the
+// mirror can only ever bind where a simulated offer is safe — otherwise
+// the LIVE ai-engine binding (pilot carrier: CMA CGM, the first approved
+// real connector). The mirror flag keeps its os.Getenv read here where
+// the binding happens — the same shape AUTH_DEV_MAILER keeps inside
+// newMailer. Without AI_ENGINE_URL the fail-soft stub binds and calls
+// fail loudly as contract violations.
+func newRateFetcher(cfg *platform.Config) carrier.Fetcher {
+	if os.Getenv("MIRROR_PORTAL_ENABLED") == "true" {
+		slog.Warn("server: MIRROR_PORTAL_ENABLED on — rfq_fetch_rates binds the deterministic mirror (rows carry source=MIRROR; never production — the config guard refuses it there)")
+		return carrier.MirrorFetcher{}
+	}
+	if cfg.AIEngineURL != "" {
+		return carrier.NewLiveFetcher(aiengine.NewHTTPClient(cfg.AIEngineURL, cfg.AIEngineToken), "CMA_CGM")
+	}
+	slog.Warn("server: AI_ENGINE_URL unset — rfq_fetch_rates binds the unconfigured fetcher (calls fail loudly)")
+	return carrier.NewLiveFetcher(aiengine.UnconfiguredClient{}, "CMA_CGM")
 }
 
 // newSender picks the Resend Sending client for the quote_send worker —
@@ -319,7 +341,7 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 // rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
 // is disabled (its fast schedule was a spike affordance; production never
 // owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string, engine aiengine.Client) (*river.Client[pgx.Tx], error) {
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string, engine aiengine.Client, fetcher carrier.Fetcher) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
@@ -327,6 +349,8 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	river.AddWorker(workers, ingest)
 	extract := jobs.NewRfqExtractWorker(db, engine, storage)
 	river.AddWorker(workers, extract)
+	rates := jobs.NewRfqRatesWorker(db, fetcher, time.Now)
+	river.AddWorker(workers, rates)
 	price := jobs.NewRfqPriceWorker(db, time.Now)
 	// Phase B's PTAX warm-up writes the platform-global fx_rates table,
 	// so it runs on the plain qp_app pool — outside every tenant tx and
@@ -336,12 +360,12 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		// Only queues with registered workers are declared: rfq_ingest
-		// chains rfq_extract into `extract`, S2 chains rfq_fetch_rates into
-		// `price`, and rfq_price chains rfq_render — each worker lands in a
-		// later slice, so an undeclared queue simply waits unworked instead
-		// of the job failing with UnknownJobKindError. The `price` queue
-		// hosts both S3a (rfq_fetch_rates) and S3b (rfq_price) per spec
-		// §3's stage table; `extract` is LLM-bound at ~4 workers.
+		// chains rfq_extract into `extract`, S2 chains rfq_fetch_rates and
+		// S3a chains rfq_price — both share the `price` queue per spec
+		// §3's stage table — and rfq_price chains rfq_render into the
+		// still-unregistered `render` queue, which simply waits unworked
+		// instead of the job failing with UnknownJobKindError. `extract`
+		// is LLM-bound at ~4 workers.
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
@@ -353,9 +377,8 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 		Schema:            "river",
 		Logger:            slog.Default(),
 		ReindexerSchedule: river.NeverSchedule(),
-		// rfq_extract inserts rfq_fetch_rates and rfq_price inserts
-		// rfq_render, both unregistered until their workers ship; without
-		// this River rejects the in-transaction enqueue.
+		// rfq_price inserts rfq_render, still unregistered until S4 ships;
+		// without this River rejects the in-transaction enqueue.
 		SkipUnknownJobCheck: true,
 		// Without SoftStopTimeout the worker context inherits the Start ctx —
 		// a signal would hard-cancel running jobs instantly instead of letting
@@ -371,6 +394,7 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	// SkipUnknownJobCheck (above) stays on until S4 lands.
 	ingest.Inserter = client
 	extract.Inserter = client
+	rates.Inserter = client
 	price.Inserter = client
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("server: start river: %w", err)

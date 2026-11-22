@@ -116,6 +116,24 @@ func TestRequiredGroups_AirOnlyIncotermsAllowedOnAir(t *testing.T) {
 	}
 }
 
+// TestOwesImportFreight pins the S3a fetch decision to the matrix's
+// freight column: the EXW/FCA/FAS/FOB family owes ocean freight,
+// every seller-paid import Incoterm does not, and out-of-matrix
+// values (DDP, garbage) report false rather than guessing.
+func TestOwesImportFreight(t *testing.T) {
+	for _, inc := range []Incoterm{IncotermEXW, IncotermFCA, IncotermFAS, IncotermFOB} {
+		if !OwesImportFreight(inc) {
+			t.Fatalf("%s must owe ocean freight", inc)
+		}
+	}
+	for _, inc := range []Incoterm{IncotermCFR, IncotermCIF, IncotermCPT,
+		IncotermCIP, IncotermDAP, IncotermDPU, IncotermDDP, Incoterm("BOGUS")} {
+		if OwesImportFreight(inc) {
+			t.Fatalf("%s must not owe ocean freight", inc)
+		}
+	}
+}
+
 // Carrier surcharges are the freight payer's charges, not a required
 // group: the pool opens only while freight is owed, and an empty pool
 // never makes the quote INCOMPLETE.

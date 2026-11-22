@@ -95,8 +95,18 @@ type RateArgs struct {
 // Kind returns the River job kind.
 func (RateArgs) Kind() string { return "rfq_fetch_rates" }
 
-// InsertOpts routes the job to the price queue with entity uniqueness.
-func (RateArgs) InsertOpts() river.InsertOpts { return entityUnique(QueuePrice) }
+// rateMaxAttempts pins the spec-§3 row: S3a gets three attempts —
+// FETCH_FAILED releases pricing anyway, so waiting longer only delays
+// the quote.
+const rateMaxAttempts = 3
+
+// InsertOpts routes the job to the price queue with entity uniqueness
+// and the stage's three-attempt budget.
+func (RateArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueuePrice)
+	opts.MaxAttempts = rateMaxAttempts
+	return opts
+}
 
 // PriceArgs is S3b rfq_price: deterministic pricing.
 type PriceArgs struct {

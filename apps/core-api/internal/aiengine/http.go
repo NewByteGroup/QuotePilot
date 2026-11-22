@@ -136,6 +136,18 @@ func (c *HTTPClient) ParseAttachment(ctx context.Context, req ParseAttachmentReq
 	return out.ParsedMarkdown, nil
 }
 
+// SearchCarrierOffer calls POST /v1/carrier-offers/search (PROVISIONAL
+// route — pending engine-owner alignment). The offer payload returns raw:
+// sanity bounds and the OFFER_FOUND/no-offer split are the caller's job
+// (internal/carrier, rule 6).
+func (c *HTTPClient) SearchCarrierOffer(ctx context.Context, req CarrierOfferSearchRequest) (*CarrierOfferSearchResult, error) {
+	var out CarrierOfferSearchResult
+	if err := c.post(ctx, "carrier_offer_search", "/v1/carrier-offers/search", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // post issues an authenticated JSON POST and decodes the body into out.
 // Non-2xx statuses become EngineError with the HTTP status so Transient()
 // can classify them; transport failures stay transient EngineErrors.

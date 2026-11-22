@@ -148,6 +148,66 @@ func TestHTTPParseAttachment(t *testing.T) {
 	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("PDF-DATA")), srv.lastBody["bytes_b64"])
 }
 
+// TestHTTPSearchCarrierOffer: the S3a wire shape — correlation_id plus
+// the normalized request, auth header, the raw offer handed back
+// unvalidated (caller bounds it, rule 6), and a null offer decoded as
+// the no-offer shape.
+func TestHTTPSearchCarrierOffer(t *testing.T) {
+	srv := newFakeEngine(t, 200, nil)
+	srv.rawResp = `{"offer":{"carrier":"CMA_CGM","charges":[{"category":"OCEAN_FREIGHT","code":"OCEAN","amount":900,"currency":"USD","equipment_or_unit":"40HC"}],"expires_at":"2026-04-01T00:00:00Z"},"offer_reference":"CMA-123"}`
+	c := newClient(srv)
+	res, err := c.SearchCarrierOffer(context.Background(), aiengine.CarrierOfferSearchRequest{
+		CorrelationID: uuid.New(), OriginLOCODE: "CNSHA", DestLOCODE: "BRSSZ",
+		EquipmentOrUnit: "40HC", Quantity: 2, ReadyDate: "2026-03-15",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/carrier-offers/search", srv.lastPath)
+	assert.Equal(t, "test-token", srv.lastServiceKey)
+	assert.Equal(t, "CNSHA", srv.lastBody["origin_locode"])
+	assert.Equal(t, float64(2), srv.lastBody["quantity"])
+	assert.Equal(t, "2026-03-15", srv.lastBody["ready_date"])
+	_, hasOrg := srv.lastBody["organization_id"]
+	assert.False(t, hasOrg, "organization_id never crosses the wire (rule 2)")
+	assert.Contains(t, string(res.Offer), `"carrier":"CMA_CGM"`)
+	require.NotNil(t, res.OfferReference)
+	assert.Equal(t, "CMA-123", *res.OfferReference)
+}
+
+// TestHTTPSearchCarrierOfferNoOffer: the wire's null offer decodes to
+// the NO_OFFER shape; an absent offer_reference decodes nil.
+func TestHTTPSearchCarrierOfferNoOffer(t *testing.T) {
+	srv := newFakeEngine(t, 200, nil)
+	srv.rawResp = `{"offer":null,"offer_reference":null}`
+	c := newClient(srv)
+	res, err := c.SearchCarrierOffer(context.Background(), aiengine.CarrierOfferSearchRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "null", string(res.Offer))
+	assert.Nil(t, res.OfferReference)
+}
+
+// TestHTTPSearchCarrierOfferErrors: the shared taxonomy applies —
+// transient statuses retry, a schema-invalid body is a contract
+// violation, and the unconfigured stub fails loudly.
+func TestHTTPSearchCarrierOfferErrors(t *testing.T) {
+	srv := newFakeEngine(t, 503, map[string]any{"error": "x"})
+	c := newClient(srv)
+	_, err := c.SearchCarrierOffer(context.Background(), aiengine.CarrierOfferSearchRequest{})
+	require.Error(t, err)
+	assert.True(t, aiengine.IsTransient(err))
+
+	srv = newFakeEngine(t, 200, nil)
+	srv.rawResp = `not json`
+	c = newClient(srv)
+	_, err = c.SearchCarrierOffer(context.Background(), aiengine.CarrierOfferSearchRequest{})
+	require.Error(t, err)
+	assert.True(t, aiengine.IsContractViolation(err))
+
+	_, err = aiengine.UnconfiguredClient{}.SearchCarrierOffer(context.Background(), aiengine.CarrierOfferSearchRequest{})
+	require.Error(t, err)
+	assert.True(t, aiengine.IsContractViolation(err),
+		"the unconfigured binding fails loudly, never transient")
+}
+
 // TestHTTPErrorClassification pins the spec's retry rule per status:
 // transient retries, the rest is a contract violation (one retry max).
 func TestHTTPErrorClassification(t *testing.T) {

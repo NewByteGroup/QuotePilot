@@ -89,6 +89,30 @@ type ParseAttachmentRequest struct {
 	Bytes         []byte    `json:"-"`
 }
 
+// CarrierOfferSearchRequest is POST /v1/carrier-offers/search — the S3a
+// normalized request (spec S3a). PROVISIONAL route, pending engine-owner
+// alignment — the same process classify/extract/parse went through. The
+// request carries correlation_id plus the normalized shipment slice only;
+// organization_id never crosses the wire (rule 2).
+type CarrierOfferSearchRequest struct {
+	CorrelationID   uuid.UUID `json:"correlation_id"`
+	OriginLOCODE    string    `json:"origin_locode"`
+	DestLOCODE      string    `json:"dest_locode"`
+	EquipmentOrUnit string    `json:"equipment_or_unit"`
+	Quantity        int       `json:"quantity"`
+	ReadyDate       string    `json:"ready_date"`
+}
+
+// CarrierOfferSearchResult is the decoded 200 body of the offer search:
+// offer is the raw payload (pricing.CarrierOffer minus id — validated by
+// the caller before persisting, rule 6); a JSON null (or absent key) means
+// the carrier answered with nothing usable — NO_OFFER. offer_reference is
+// the carrier-side id when one was issued.
+type CarrierOfferSearchResult struct {
+	Offer          json.RawMessage `json:"offer"`
+	OfferReference *string         `json:"offer_reference"`
+}
+
 // EngineError reports a failed ai-engine call: an HTTP status (when the
 // engine answered), a transport failure (StatusCode 0) or a
 // contract-violating response body (Contract=true). The classification
@@ -162,4 +186,9 @@ func (UnconfiguredClient) Extract(context.Context, ExtractRequest) (json.RawMess
 // ParseAttachment fails loudly: the engine is not configured.
 func (UnconfiguredClient) ParseAttachment(context.Context, ParseAttachmentRequest) (string, error) {
 	return "", &EngineError{Op: "parse_attachment", Contract: true, Detail: "AI_ENGINE_URL is not configured"}
+}
+
+// SearchCarrierOffer fails loudly: the engine is not configured.
+func (UnconfiguredClient) SearchCarrierOffer(context.Context, CarrierOfferSearchRequest) (*CarrierOfferSearchResult, error) {
+	return nil, &EngineError{Op: "carrier_offer_search", Contract: true, Detail: "AI_ENGINE_URL is not configured"}
 }
