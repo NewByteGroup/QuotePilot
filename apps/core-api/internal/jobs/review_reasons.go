@@ -29,6 +29,26 @@ const (
 	// negative-margin quote is never sent; the analyst reprices as a new
 	// version — nothing broke, the margin gate did its job).
 	ReviewReasonNegativeMargin ReviewReason = "NEGATIVE_MARGIN"
+
+	// P2 (rfq_extract) codes — spec S2 parks three ways before pricing.
+	// ReviewReasonTariffUpdate parks a classifier-flagged tariff update:
+	// a tariff never enters pricing without a reviewed batch (RFC-002),
+	// and a misclassified real RFQ stays visible on the review list
+	// instead of being priced or dropped.
+	ReviewReasonTariffUpdate ReviewReason = "TARIFF_UPDATE"
+	// ReviewReasonLowConfidence parks a valid extraction whose minimum
+	// field confidence sits below the gate — fields stay persisted so the
+	// review queue is pre-filled (the gate is the triage).
+	ReviewReasonLowConfidence ReviewReason = "LOW_CONFIDENCE"
+	// ReviewReasonNoUsableText parks an RFQ with no usable body text and
+	// no successfully parsed attachment — nothing worth paying an LLM
+	// call for. The analyst supplies the missing info, then reprocesses.
+	ReviewReasonNoUsableText ReviewReason = "NO_USABLE_TEXT"
+	// ReviewReasonInvalidExtraction parks after a contract-violating
+	// ai-engine output survived its single retry (spec section 3: at
+	// most one retry, each attempt costs money). The invalid payload is
+	// never written; the validation error is audited.
+	ReviewReasonInvalidExtraction ReviewReason = "INVALID_EXTRACTION"
 	// ReviewReasonRequiredFieldMissing parks an RFQ whose persisted
 	// extraction lacks (or cannot parse) a field pricing cannot run
 	// without — the analyst reviews the extraction, then reprocesses.
@@ -57,6 +77,10 @@ var ReviewReasons = []ReviewReason{
 	ReviewReasonMissingTariff,
 	ReviewReasonStaleTariff,
 	ReviewReasonNegativeMargin,
+	ReviewReasonTariffUpdate,
+	ReviewReasonLowConfidence,
+	ReviewReasonNoUsableText,
+	ReviewReasonInvalidExtraction,
 	ReviewReasonRequiredFieldMissing,
 	ReviewReasonDirectionAmbiguous,
 	ReviewReasonPricingIncomplete,

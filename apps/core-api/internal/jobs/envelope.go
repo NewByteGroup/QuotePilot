@@ -17,6 +17,7 @@ package jobs
 import (
 	"github.com/google/uuid"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // Pipeline queue names (ADR-004: queue limits are configuration, not code —
@@ -30,9 +31,22 @@ const (
 )
 
 // entityUnique is the shared insert policy: unique on kind + the tagged
-// entity field, so a double enqueue collapses (spec section 3).
+// entity field, so a double enqueue collapses (spec section 3). ByState
+// restricts the dedupe window to live states — a terminal job
+// (completed/cancelled/discarded) must not block the re-enqueue that the
+// spec's "reclassify as RFQ" and reprocess actions issue by entity id.
+// Every worker is idempotent on entity state, so a re-run is always safe.
 func entityUnique(queue string) river.InsertOpts {
-	return river.InsertOpts{Queue: queue, UniqueOpts: river.UniqueOpts{ByArgs: true}}
+	return river.InsertOpts{Queue: queue, UniqueOpts: river.UniqueOpts{
+		ByArgs: true,
+		ByState: []rivertype.JobState{
+			rivertype.JobStateAvailable,
+			rivertype.JobStatePending,
+			rivertype.JobStateRetryable,
+			rivertype.JobStateRunning,
+			rivertype.JobStateScheduled,
+		},
+	}}
 }
 
 // IngestArgs is S1 rfq_ingest: promote one inbound_messages receipt to an
@@ -59,8 +73,17 @@ type ExtractArgs struct {
 // Kind returns the River job kind.
 func (ExtractArgs) Kind() string { return "rfq_extract" }
 
+// extractMaxAttempts pins the spec-§3 row: S2 gets three attempts,
+// transient errors only — contract-violating output gives up earlier
+// inside the worker (each attempt costs money).
+const extractMaxAttempts = 3
+
 // InsertOpts routes the job to the extract queue with entity uniqueness.
-func (ExtractArgs) InsertOpts() river.InsertOpts { return entityUnique(QueueExtract) }
+func (ExtractArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueueExtract)
+	opts.MaxAttempts = extractMaxAttempts
+	return opts
+}
 
 // RateArgs is S3a rfq_fetch_rates: the conditional carrier-offer fetch.
 type RateArgs struct {

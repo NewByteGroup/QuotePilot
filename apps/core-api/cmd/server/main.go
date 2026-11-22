@@ -25,6 +25,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/aiengine"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
@@ -67,7 +68,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg))
+	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg), newAIEngine(&cfg))
 	if err != nil {
 		return err
 	}
@@ -178,6 +179,19 @@ func newReceiver(cfg *platform.Config) resend.Receiver {
 	}
 	slog.Warn("server: RESEND_API_KEY unset — rfq_ingest binds the unconfigured receiver (fetches fail loudly)")
 	return resend.UnconfiguredReceiver{}
+}
+
+// newAIEngine picks the ai-engine binding for the rfq_extract worker —
+// the same fail-soft contract as the receiver/sender: without
+// AI_ENGINE_URL the unconfigured client binds and calls fail loudly as
+// contract violations (never retried forever on a credential that cannot
+// appear).
+func newAIEngine(cfg *platform.Config) aiengine.Client {
+	if cfg.AIEngineURL != "" {
+		return aiengine.NewHTTPClient(cfg.AIEngineURL, cfg.AIEngineToken)
+	}
+	slog.Warn("server: AI_ENGINE_URL unset — rfq_extract binds the unconfigured engine (calls fail loudly)")
+	return aiengine.UnconfiguredClient{}
 }
 
 // newSender picks the Resend Sending client for the quote_send worker —
@@ -304,25 +318,29 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 // rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
 // is disabled (its fast schedule was a spike affordance; production never
 // owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string) (*river.Client[pgx.Tx], error) {
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string, engine aiengine.Client) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
+	extract := jobs.NewRfqExtractWorker(db, engine, storage)
+	river.AddWorker(workers, extract)
 	price := jobs.NewRfqPriceWorker(db, time.Now)
 	river.AddWorker(workers, price)
 	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
 		// Only queues with registered workers are declared: rfq_ingest
-		// chains rfq_extract into the `extract` queue, whose worker lands in
-		// a later slice — an undeclared queue simply waits unworked instead
+		// chains rfq_extract into `extract`, S2 chains rfq_fetch_rates into
+		// `price`, and rfq_price chains rfq_render — each worker lands in a
+		// later slice, so an undeclared queue simply waits unworked instead
 		// of the job failing with UnknownJobKindError. The `price` queue
-		// hosts both S3a (rfq_fetch_rates, lands with the S3a worker) and
-		// S3b (rfq_price, registered below) per spec §3's stage table.
+		// hosts both S3a (rfq_fetch_rates) and S3b (rfq_price) per spec
+		// §3's stage table; `extract` is LLM-bound at ~4 workers.
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
+			jobs.QueueExtract:  {MaxWorkers: 4},
 			jobs.QueuePrice:    {MaxWorkers: 4},
 			jobs.QueueSend:     {MaxWorkers: 4},
 		},
@@ -330,8 +348,9 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 		Schema:            "river",
 		Logger:            slog.Default(),
 		ReindexerSchedule: river.NeverSchedule(),
-		// rfq_ingest inserts rfq_extract (unregistered until the P2 worker
-		// ships); without this River rejects the in-transaction enqueue.
+		// rfq_extract inserts rfq_fetch_rates and rfq_price inserts
+		// rfq_render, both unregistered until their workers ship; without
+		// this River rejects the in-transaction enqueue.
 		SkipUnknownJobCheck: true,
 		// Without SoftStopTimeout the worker context inherits the Start ctx —
 		// a signal would hard-cancel running jobs instantly instead of letting
@@ -342,10 +361,11 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 		return nil, fmt.Errorf("server: river client: %w", err)
 	}
 	// The workers need the client for InsertTx; the client needs the worker
-	// registry at construction — so the seam is assigned post-build,
+	// registry at construction — so the seams are assigned post-build,
 	// pre-Start. rfq_price's enqueue is rfq_render, still unregistered:
 	// SkipUnknownJobCheck (above) stays on until S4 lands.
 	ingest.Inserter = client
+	extract.Inserter = client
 	price.Inserter = client
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("server: start river: %w", err)

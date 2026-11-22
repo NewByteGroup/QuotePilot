@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -123,4 +124,33 @@ func TestJobArgsInsertOpts(t *testing.T) {
 	opts = ext.InsertOpts()
 	assert.Equal(t, jobs.QueueExtract, opts.Queue)
 	assert.True(t, opts.UniqueOpts.ByArgs)
+}
+
+// TestJobArgsUniqueStates pins the dedupe window to live states only:
+// terminal jobs (completed/cancelled/discarded) must not block a re-enqueue
+// — the spec's "reclassify as RFQ" action inserts rfq_extract by rfq_id
+// after its first job finished, and every worker is idempotent on entity
+// state so a re-run is safe.
+func TestJobArgsUniqueStates(t *testing.T) {
+	live := []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRetryable,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+	}
+	for _, args := range pipelineArgs() {
+		withOpts, ok := args.(river.JobArgsWithInsertOpts)
+		require.True(t, ok, "%T must implement JobArgsWithInsertOpts", args)
+		states := withOpts.InsertOpts().UniqueOpts.ByState
+		assert.ElementsMatch(t, live, states, "%T unique states", args)
+		for _, terminal := range []rivertype.JobState{
+			rivertype.JobStateCompleted,
+			rivertype.JobStateCancelled,
+			rivertype.JobStateDiscarded,
+		} {
+			assert.NotContains(t, states, terminal,
+				"%T dedupe must not cover terminal jobs (reclassify needs re-enqueue)", args)
+		}
+	}
 }
