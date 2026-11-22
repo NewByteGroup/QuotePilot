@@ -369,8 +369,8 @@ func insertQuoteLines(ctx context.Context, tx pgx.Tx, org, quoteID uuid.UUID, li
 }
 
 // enqueueRender chains S4 in the same transaction; queue and uniqueness
-// come from RenderArgs.InsertOpts(). The render queue is not registered
-// yet — the job waits unworked, which SkipUnknownJobCheck allows.
+// come from RenderArgs.InsertOpts() (a re-enqueue dedupes on live
+// states — the render worker itself is idempotent on pdf_storage_key).
 func (w *RfqPriceWorker) enqueueRender(ctx context.Context, tx pgx.Tx, args PriceArgs, quoteID uuid.UUID) error {
 	if w.Inserter == nil {
 		return errors.New("jobs: rfq_price: Inserter not configured")

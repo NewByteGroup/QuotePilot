@@ -16,6 +16,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 // Client is the ai-engine surface the pipeline workers use. Tests bind a
@@ -29,6 +30,9 @@ type Client interface {
 	Extract(ctx context.Context, req ExtractRequest) (json.RawMessage, error)
 	// ParseAttachment converts one attachment's bytes to markdown.
 	ParseAttachment(ctx context.Context, req ParseAttachmentRequest) (string, error)
+	// RenderQuote renders one quote version (S4 rfq_render); the adapter
+	// validates the response before returning it (rule 6).
+	RenderQuote(ctx context.Context, req RenderRequest) (*RenderResult, error)
 }
 
 // AttachmentMeta is the filename/content_type pair classify receives.
@@ -113,6 +117,75 @@ type CarrierOfferSearchResult struct {
 	OfferReference *string         `json:"offer_reference"`
 }
 
+// RenderRequest is POST /v1/render/quote — the S4 document stage
+// (PROVISIONAL route, pending engine-owner alignment, the same process
+// classify/extract/parse went through). organization_id never crosses the
+// wire (rule 2): the document's tenant arrives as display content only —
+// org name/from_name/reply_to plus the verbatim branding_json blob, which
+// is org content like any other tenant content the engine already sees.
+type RenderRequest struct {
+	CorrelationID uuid.UUID       `json:"correlation_id"`
+	Quote         RenderQuoteData `json:"quote"`
+	Branding      json.RawMessage `json:"branding"`
+	Org           RenderOrg       `json:"org"`
+}
+
+// RenderQuoteData is the quote slice a template needs — trimmed from the
+// quote row, its line items and the decoded pricing_result_json. Money
+// rides as decimal (never float). Pricing internals — inputs_hash, cost
+// basis, tariff pins — stay in core: the document shows sell figures.
+type RenderQuoteData struct {
+	QuoteNumber string `json:"quote_number"`
+	Version     int    `json:"version"`
+	// QuoteDate/ValidUntil are IsoDate strings, omitted when the row has
+	// none — quotes has no validity column yet, so valid_until is a
+	// reserved slot for when it lands (flagged on the PR).
+	QuoteDate       string       `json:"quote_date,omitempty"`
+	ValidUntil      string       `json:"valid_until,omitempty"`
+	Modal           string       `json:"modal"`
+	Direction       string       `json:"direction"`
+	Incoterm        string       `json:"incoterm"`
+	OriginLOCODE    string       `json:"origin_locode"`
+	DestLOCODE      string       `json:"dest_locode"`
+	EquipmentOrUnit string       `json:"equipment_or_unit,omitempty"`
+	Lines           []RenderLine `json:"lines"`
+	// TotalBRL is final_price_brl — the internal BRL total; the template
+	// decides whether customer-facing output shows it or grouped
+	// original-currency totals (RFC-001 §5).
+	TotalBRL          decimal.Decimal `json:"total_brl"`
+	OverallConfidence decimal.Decimal `json:"overall_confidence"`
+	Warnings          []string        `json:"warnings"`
+	Assumptions       []string        `json:"assumptions"`
+}
+
+// RenderLine is one persisted quote_line_items row on the wire.
+type RenderLine struct {
+	Category         string          `json:"category"`
+	Description      string          `json:"description"`
+	OriginalCurrency string          `json:"original_currency"`
+	OriginalAmount   decimal.Decimal `json:"original_amount"`
+	FXRateUsed       decimal.Decimal `json:"fx_rate_used"`
+	SellAmountBRL    decimal.Decimal `json:"sell_amount_brl"`
+	Flags            []string        `json:"flags"`
+}
+
+// RenderOrg is the tenant's display identity for the document header —
+// never an identifier (rule 2).
+type RenderOrg struct {
+	Name     string `json:"name"`
+	FromName string `json:"from_name"`
+	ReplyTo  string `json:"reply_to"`
+}
+
+// RenderResult is the validated render: the PDF already decoded from the
+// wire's pdf_b64 (the adapter checked base64, %PDF magic and the size
+// bound — rule 6) plus the optional email HTML. A result that reaches the
+// caller is safe to persist.
+type RenderResult struct {
+	PDF       []byte
+	EmailHTML string
+}
+
 // EngineError reports a failed ai-engine call: an HTTP status (when the
 // engine answered), a transport failure (StatusCode 0) or a
 // contract-violating response body (Contract=true). The classification
@@ -191,4 +264,9 @@ func (UnconfiguredClient) ParseAttachment(context.Context, ParseAttachmentReques
 // SearchCarrierOffer fails loudly: the engine is not configured.
 func (UnconfiguredClient) SearchCarrierOffer(context.Context, CarrierOfferSearchRequest) (*CarrierOfferSearchResult, error) {
 	return nil, &EngineError{Op: "carrier_offer_search", Contract: true, Detail: "AI_ENGINE_URL is not configured"}
+}
+
+// RenderQuote fails loudly: the engine is not configured.
+func (UnconfiguredClient) RenderQuote(context.Context, RenderRequest) (*RenderResult, error) {
+	return nil, &EngineError{Op: "render_quote", Contract: true, Detail: "AI_ENGINE_URL is not configured"}
 }
