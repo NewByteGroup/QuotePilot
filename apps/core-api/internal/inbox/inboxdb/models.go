@@ -642,6 +642,16 @@ type AppConnector struct {
 	UpdatedAt       pgtype.Timestamptz
 }
 
+type AppFxRate struct {
+	ID        pgtype.UUID
+	Source    string
+	Currency  string
+	Rate      decimal.Decimal
+	RateDate  pgtype.Date
+	FetchedAt pgtype.Timestamptz
+	SourceRef *string
+}
+
 type AppHealingSession struct {
 	ID                       pgtype.UUID
 	ConnectorID              pgtype.UUID

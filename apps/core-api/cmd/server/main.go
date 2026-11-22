@@ -27,6 +27,7 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/aiengine"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/fx"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
@@ -327,6 +328,10 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	extract := jobs.NewRfqExtractWorker(db, engine, storage)
 	river.AddWorker(workers, extract)
 	price := jobs.NewRfqPriceWorker(db, time.Now)
+	// Phase B's PTAX warm-up writes the platform-global fx_rates table,
+	// so it runs on the plain qp_app pool — outside every tenant tx and
+	// decoupled from the job's 5s budget (rfqprice_fx.go).
+	price.FX = fx.NewSyncer(db.Pool(), fx.NewFetcher())
 	river.AddWorker(workers, price)
 	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{

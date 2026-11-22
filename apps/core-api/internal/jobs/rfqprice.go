@@ -12,6 +12,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/shopspring/decimal"
 
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/fx"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/pricing"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
@@ -24,8 +25,9 @@ import (
 // not a stray job.
 const rfqPricing = "PRICING"
 
-// priceJobTimeout pins the spec-§3 stage table: S3b is rows-and-CPU only —
-// no network call — so five seconds is headroom, not a target.
+// priceJobTimeout pins the spec-§3 stage table: S3b is rows-and-CPU plus
+// one bounded PTAX fetch — phase B caps at fxEnsureBudget, so five
+// seconds still buys the whole DB path plus the warm-up.
 const priceJobTimeout = 5 * time.Second
 
 // Fallback provenance vocabulary persisted in pricing_result_json
@@ -56,6 +58,10 @@ type RfqPriceWorker struct {
 	// Inserter is the River client; set before client.Start because the
 	// registry must exist before the client can be built.
 	Inserter JobInserter
+	// FX is the phase-B rate synchronizer (*fx.Syncer in production);
+	// nil skips the warm-up — the engine then parks MISSING_FX exactly
+	// as it did before the fx_rates table existed.
+	FX FXSyncer
 	// clock is injected so tests pin QuoteDate/PricedAt (rule 5: the
 	// engine never reads time itself, and neither should the worker's
 	// output be clock-dependent in tests).
@@ -91,21 +97,24 @@ func (w *RfqPriceWorker) Work(ctx context.Context, job *river.Job[PriceArgs]) er
 	return nil
 }
 
-// run is the InTenantTx boundary (same shape as QuoteSendWorker.run): the
-// tenant tx commits whatever price decided — a park or the whole quote —
-// and the returned cancelCause becomes the JobCancel Work wraps.
+// run sequences the worker's three phases: peek (read tx) → PTAX warm-up
+// (no tx) → price (tenant write tx, same shape as QuoteSendWorker.run).
+// The tenant tx commits whatever price decided — a park or the whole
+// quote — and the returned cancelCause becomes the JobCancel Work wraps.
 func (w *RfqPriceWorker) run(ctx context.Context, args PriceArgs) (cancelCause error, err error) {
+	fxCurrencies := w.peekFXCurrencies(ctx, args)
+	w.warmFXRates(ctx, fxCurrencies)
 	err = w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
-		cancelCause, err = w.price(ctx, tx, args)
+		cancelCause, err = w.price(ctx, tx, args, fxCurrencies)
 		return err
 	})
 	return cancelCause, err
 }
 
 // price is the full S3b sequence inside the tenant transaction:
-// lock → decode → assemble Input → load candidates → engine → park or
-// quote-and-chain.
-func (w *RfqPriceWorker) price(ctx context.Context, tx pgx.Tx, args PriceArgs) (cancelCause error, err error) {
+// lock → decode → assemble Input → load candidates → pin FX rates →
+// engine → park or quote-and-chain.
+func (w *RfqPriceWorker) price(ctx context.Context, tx pgx.Tx, args PriceArgs, fxCurrencies []string) (cancelCause error, err error) {
 	rfq, found, err := lockPriceRfq(ctx, tx, args.RfqID)
 	if err != nil {
 		return nil, fmt.Errorf("jobs: rfq_price: lock rfq %s: %w", args.RfqID, err)
@@ -160,6 +169,18 @@ func (w *RfqPriceWorker) price(ctx context.Context, tx pgx.Tx, args PriceArgs) (
 		return nil, fmt.Errorf("jobs: rfq_price: carrier_offers: %w", err)
 	}
 	in.CarrierOffer = offer
+	// Phase C: pin the window phase B fetched plus whatever other feeds
+	// already stored (CARRIER/CUSTOMS land through their own paths).
+	// The resolver takes newest-at-or-before, so a window that reaches
+	// back only adds staler candidates — never a wrong pick. An empty
+	// set means phase A saw nothing to price; FXRates stays empty and
+	// the engine parks MISSING_FX as before this table existed.
+	if len(fxCurrencies) > 0 {
+		in.FXRates, err = fx.LoadRates(ctx, tx, fxCurrencies, loadFXWindow(in))
+		if err != nil {
+			return nil, fmt.Errorf("jobs: rfq_price: fx_rates: %w", err)
+		}
+	}
 	out, err := pricing.Price(in, w.clock)
 	if err != nil {
 		// validate() failures are programmer/config errors (spec §2).
@@ -283,9 +304,10 @@ func (w *RfqPriceWorker) commitQuote(ctx context.Context, tx pgx.Tx, args PriceA
 }
 
 // insertQuote writes the DRAFT header and returns its id. cargo_cif_brl
-// stays NULL: the engine does not expose the CIF base (flagged — the
-// column is nullable and the bands' basis is already inside
-// pricing_result_json's lines).
+// carries the declared CIF base (goods + declared freight + declared
+// insurance at the pinned CUSTOMS rate — cargoCIFBRL); NULL when any
+// component or rate is missing, which is the only honest "not
+// computable" (never a partial sum).
 func (w *RfqPriceWorker) insertQuote(ctx context.Context, tx pgx.Tx, args PriceArgs, rfq priceRfq, in pricing.Input, out pricing.Output, number string, version int, pricingJSON []byte) (uuid.UUID, error) {
 	fxJSON, err := marshalSlice(out.FXApplied)
 	if err != nil {
@@ -295,6 +317,10 @@ func (w *RfqPriceWorker) insertQuote(ctx context.Context, tx pgx.Tx, args PriceA
 	if in.CarrierOffer != nil {
 		offerID = &in.CarrierOffer.ID
 	}
+	var cif decimal.NullDecimal
+	if v, ok := cargoCIFBRL(in); ok {
+		cif = decimal.NullDecimal{Decimal: v, Valid: true}
+	}
 	var id uuid.UUID
 	err = tx.QueryRow(ctx, `
 		INSERT INTO app.quotes
@@ -302,10 +328,10 @@ func (w *RfqPriceWorker) insertQuote(ctx context.Context, tx pgx.Tx, args PriceA
 			 quote_date, priced_at, inputs_hash, carrier_offer_id, cargo_cif_brl,
 			 total_cost_brl, target_margin, final_price_brl, fx_rates_applied_json,
 			 overall_confidence, pricing_result_json)
-		VALUES ($1,$2,$3,$4,'DRAFT',$5,$6,$7,$8,NULL,$9,$10,$11,$12,$13,$14)
+		VALUES ($1,$2,$3,$4,'DRAFT',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		RETURNING id`,
 		args.OrganizationID, rfq.ID, number, version,
-		in.QuoteDate, in.PricedAt, out.InputsHash, offerID,
+		in.QuoteDate, in.PricedAt, out.InputsHash, offerID, cif,
 		out.TotalCostBRL, in.MarkupRate, out.FinalPriceBRL, fxJSON,
 		rfq.Confidence.Decimal, pricingJSON).Scan(&id)
 	if err != nil {

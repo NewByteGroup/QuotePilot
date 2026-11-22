@@ -226,7 +226,7 @@ type quoteRow struct {
 	PricedAt      time.Time
 	InputsHash    string
 	CarrierOffer  *uuid.UUID
-	CargoCIF      *float64
+	CargoCIF      *string
 	TotalCost     string
 	TargetMargin  string
 	FinalPrice    string
@@ -241,7 +241,7 @@ func loadQuotes(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID) []quoteRow {
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, quote_number, version, status::text, quote_date, priced_at,
-			       coalesce(inputs_hash,''), carrier_offer_id, cargo_cif_brl,
+			       coalesce(inputs_hash,''), carrier_offer_id, cargo_cif_brl::text,
 			       total_cost_brl::text, target_margin::text, final_price_brl::text,
 			       overall_confidence::text, coalesce(pricing_result_json::text,'')
 			FROM app.quotes WHERE rfq_id = $1 ORDER BY version`, rfq)
