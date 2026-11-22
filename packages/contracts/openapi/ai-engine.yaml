@@ -142,6 +142,56 @@ paths:
                   parsed_markdown: { type: string }
         default:
           $ref: "#/components/responses/Error"
+  /v1/carrier-offers/search:
+    post:
+      summary: Stage 3a carrier offer search (S3a rfq_fetch_rates)
+      description: PROVISIONAL route — pending engine-owner alignment, the
+        same process classify/extract/parse went through. Core calls it
+        only for FCL imports whose Incoterm puts ocean freight on the
+        requesting customer; a null offer is the no-offer answer (never a
+        404). The response is untrusted — core re-validates the payload
+        against the sanity bounds before persisting it as the S3a
+        checkpoint.
+      operationId: searchCarrierOffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, origin_locode, dest_locode, equipment_or_unit, quantity, ready_date]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                origin_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                dest_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                equipment_or_unit: { type: string, minLength: 1, description: "Equipment or unit code as extracted ('40HC', ...)" }
+                quantity: { type: integer, minimum: 1 }
+                ready_date: { type: string, format: date, description: "Cargo ready date (IsoDate) — the effective quote date" }
+      responses:
+        "200":
+          description: "Carrier offer or the no-offer answer: offer is null when the carrier has nothing usable for the request."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [offer, offer_reference]
+                additionalProperties: false
+                properties:
+                  offer:
+                    description: "The offer payload — pricing.CarrierOffer minus id; null means NO_OFFER"
+                    type: object
+                    nullable: true
+                    allOf:
+                      - $ref: "#/components/schemas/CarrierOffer"
+                  offer_reference:
+                    type: string
+                    nullable: true
+                    description: "Carrier-side offer id when one was issued"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     serviceKey:
@@ -166,6 +216,34 @@ components:
             TARIFF_UPDATE: { type: number, minimum: 0, maximum: 1 }
             OTHER: { type: number, minimum: 0, maximum: 1 }
         model: { type: string, description: "Pinned classifier model id" }
+    CarrierOffer:
+      type: object
+      description: "The offer payload persisted as the S3a checkpoint — pricing.CarrierOffer minus id (the row id is supplied at read time)."
+      required: [carrier, charges, expires_at]
+      additionalProperties: false
+      properties:
+        carrier: { type: string, minLength: 1, description: "Source carrier name (e.g. CMA_CGM)" }
+        charges:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: "#/components/schemas/OfferCharge" }
+        expires_at:
+          type: string
+          format: date-time
+          description: "Offer validity end — required; the engine treats a missing expiry as expired"
+    OfferCharge:
+      type: object
+      required: [category, code, amount, currency, equipment_or_unit]
+      additionalProperties: false
+      properties:
+        category:
+          type: string
+          enum: [OCEAN_FREIGHT, AIR_FREIGHT, SURCHARGE, ORIGIN_CHARGE, DESTINATION_CHARGE, TERMINAL, CUSTOMS, OTHER]
+        code: { type: string, minLength: 1, maxLength: 64 }
+        amount: { type: number, exclusiveMinimum: true, minimum: 0, description: "Decimal amount > 0" }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        equipment_or_unit: { type: string, minLength: 1, description: "Equipment/unit the charge applies to — matched verbatim to the request" }
   responses:
     Error:
       description: Failure — core-api classifies by status code
