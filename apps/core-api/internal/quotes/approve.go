@@ -59,7 +59,7 @@ func (e *Endpoints) ApproveQuote(
 	if !ok || !ok2 {
 		return approveUnauthenticated(), nil
 	}
-	out, err := e.approve(ctx, orgID, userID, requestCorrelation(ctx), uuid.UUID(req.ID))
+	out, err := e.approve(ctx, orgID, userID, platform.CorrelationUUID(ctx), uuid.UUID(req.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -242,16 +242,6 @@ func audit(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, actor *uuid.UUID, ac
 		return fmt.Errorf("quotes: approve: audit %q on %s: %w", action, quoteID, err)
 	}
 	return nil
-}
-
-// requestCorrelation carries the request's X-Request-Id into the job when
-// it is a uuid — tracing one line end to end — and mints a fresh one
-// otherwise (the ingest chain roots a fresh id the same way).
-func requestCorrelation(ctx context.Context) uuid.UUID {
-	if id, err := uuid.Parse(platform.CorrelationID(ctx)); err == nil {
-		return id
-	}
-	return uuid.New()
 }
 
 // response maps the decision onto the contract's status codes; each

@@ -58,6 +58,10 @@ tags:
     description: |
       Quote lifecycle endpoints of the staged pipeline (spec
       2026-11-11-staged-quote-pipeline section 4).
+  - name: rfqs
+    description: |
+      RFQ lifecycle endpoints of the staged pipeline (spec
+      2026-11-11-staged-quote-pipeline section 4 "Reprocess").
   - name: web
     description: |
       The web v1 read surface (web-api.yaml folded in per its header
@@ -572,6 +576,106 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/rfqs/{id}/reprocess:
+    post:
+      operationId: reprocessRfq
+      tags: [rfqs]
+      summary: Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint.
+      description: |
+        `Authenticate` + `ResolveTenant` +
+        `RequireRole(OWNER, ADMIN, PRICING_ANALYST)` — the review queue's
+        release action (spec 2026-11-11 section 4 "Reprocess"). For an
+        RFQ parked in `NEEDS_REVIEW` or `FAILED`, one tenant transaction
+        row-locks the RFQ, clears `review_reason`/`failure_reason`,
+        moves `status` back to the resumed stage's active status, writes
+        the `rfq.reprocessed` audit row (actor, cleared reason, resumed
+        stage) and enqueues the stage's job — one commit, nothing
+        enqueued or written outside it.
+
+        The resume point is the earliest missing checkpoint, so the paid
+        extraction and a completed carrier fetch are never repeated:
+        (1) a usable extraction — `extracted_payload_json` and
+        `extraction_confidence` are the pair S2 commits together — else
+        `rfq_extract` re-runs (`NO_USABLE_TEXT`, `INVALID_EXTRACTION`,
+        `TARIFF_UPDATE` parks and dead-lettered `FAILED` shells land
+        here); (2) the S3a owed gate recomputed from the stored
+        extraction — FCL + derived IMPORT + `OwesImportFreight` — with
+        no `carrier_offers` row for the recomputed `request_hash` means
+        `rfq_fetch_rates` re-runs (any recorded outcome, even
+        `NOT_APPLICABLE`/`FETCH_FAILED`, counts as completed);
+        (3) no `DRAFT` quote means `rfq_price` re-runs; (4) a `DRAFT`
+        quote with NULL `pdf_storage_key` means `rfq_render` re-runs —
+        the RFQ is already `READY` past pricing. The human reprocess IS
+        the review-gate override: `LOW_CONFIDENCE`, `MISSING_TARIFF`,
+        `REQUIRED_FIELD_MISSING` and the other business parks keep their
+        persisted extraction and resume at pricing. Every other
+        `app.rfq_status` — `RECEIVED`, `PARSING`, `PRICING`, `READY`,
+        `APPROVED_SENT`, `IGNORED` — answers 409; `IGNORED` is
+        intentionally terminal.
+
+        `REPROCESS_MIN_INTERVAL` (default 60s) bounds one reprocess per
+        RFQ: a second call inside the interval answers 429 with
+        `Retry-After` and enqueues nothing — a double click or retry
+        loop cannot fan out jobs or carrier calls. The last reprocess
+        time is read off the audit log, so no column is added.
+      security:
+        - qpAccess: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: RFQ UUID (`app.rfq_requests.id`).
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/OrganizationIdHeader'
+      responses:
+        '202':
+          description: |
+            Reprocess accepted — the resumed stage's job is already
+            staged inside the committed transaction. `resumed_stage`
+            names the River job kind the pipeline resumes at.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReprocessRfqResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` —
+            the RFQ is not in a reprocessable state
+            (`NEEDS_REVIEW`/`FAILED`); `status` reports its current
+            `app.rfq_status` value so the client can refresh its row.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReprocessConflict'
+        '429':
+          description: |
+            `{"error":"rate_limited"}` — the newest `rfq.reprocessed`
+            audit row for this RFQ is younger than
+            `REPROCESS_MIN_INTERVAL`; nothing was written or enqueued.
+            `Retry-After` carries the remaining wait in seconds.
+          headers:
+            Retry-After:
+              description: Seconds until the next reprocess of this RFQ is accepted.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     qpAccess:
@@ -626,7 +730,10 @@ components:
         malformed bodies and `rate_limited` the login bucket (spec section
         8.1 leaves the code unpinned — this contract fixes it).
         `quote_superseded` and `negative_margin` are the two conflict
-        refusals of quote approval (spec 2026-11-11 section 4).
+        refusals of quote approval (spec 2026-11-11 section 4);
+        `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
+        RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
+        the 409 body alongside the code).
       enum:
         - bad_request
         - unauthenticated
@@ -637,6 +744,7 @@ components:
         - internal
         - quote_superseded
         - negative_margin
+        - rfq_not_parked
     Error:
       type: object
       additionalProperties: false
@@ -806,6 +914,41 @@ components:
         approved_by_user_id:
           type: string
           description: User UUID of the approving analyst.
+    ReprocessStage:
+      type: string
+      description: |
+        River job kind of the pipeline stage a reprocess resumed — the
+        `resumed_stage` vocabulary of POST /v1/rfqs/{id}/reprocess.
+      enum: [rfq_extract, rfq_fetch_rates, rfq_price, rfq_render]
+    ReprocessRfqResponse:
+      type: object
+      additionalProperties: false
+      required: [status, resumed_stage]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+          description: |
+            Always `accepted` — the stage job is staged inside the
+            transaction, not completed (the pipeline runs async).
+        resumed_stage:
+          $ref: '#/components/schemas/ReprocessStage'
+    ReprocessConflict:
+      type: object
+      additionalProperties: false
+      required: [error, status]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorCode'
+        status:
+          type: string
+          description: |
+            The RFQ's current `app.rfq_status` — `RECEIVED`, `PARSING`,
+            `PRICING`, `READY`, `APPROVED_SENT` or `IGNORED`
+            (`NEEDS_REVIEW`/`FAILED` are reprocessable and never appear
+            here). Plain string, not an enum: the vocabulary lives in
+            the database, and a drifted value must reach the client
+            verbatim instead of failing decode.
     OrganizationResponse:
       type: object
       additionalProperties: false

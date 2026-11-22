@@ -73,6 +73,7 @@ const (
 	ErrorCodeNotFound            ErrorCode = "not_found"
 	ErrorCodeQuoteSuperseded     ErrorCode = "quote_superseded"
 	ErrorCodeRateLimited         ErrorCode = "rate_limited"
+	ErrorCodeRfqNotParked        ErrorCode = "rfq_not_parked"
 	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
 )
 
@@ -94,6 +95,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeQuoteSuperseded:
 		return true
 	case ErrorCodeRateLimited:
+		return true
+	case ErrorCodeRfqNotParked:
 		return true
 	case ErrorCodeUnauthenticated:
 		return true
@@ -195,6 +198,45 @@ func (e QuoteStatus) Valid() bool {
 	case DRAFT:
 		return true
 	case SUPERSEDED:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReprocessRfqResponseStatus.
+const (
+	Accepted ReprocessRfqResponseStatus = "accepted"
+)
+
+// Valid indicates whether the value is a known member of the ReprocessRfqResponseStatus enum.
+func (e ReprocessRfqResponseStatus) Valid() bool {
+	switch e {
+	case Accepted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReprocessStage.
+const (
+	RfqExtract    ReprocessStage = "rfq_extract"
+	RfqFetchRates ReprocessStage = "rfq_fetch_rates"
+	RfqPrice      ReprocessStage = "rfq_price"
+	RfqRender     ReprocessStage = "rfq_render"
+)
+
+// Valid indicates whether the value is a known member of the ReprocessStage enum.
+func (e ReprocessStage) Valid() bool {
+	switch e {
+	case RfqExtract:
+		return true
+	case RfqFetchRates:
+		return true
+	case RfqPrice:
+		return true
+	case RfqRender:
 		return true
 	default:
 		return false
@@ -312,7 +354,10 @@ type Error struct {
 	// malformed bodies and `rate_limited` the login bucket (spec section
 	// 8.1 leaves the code unpinned — this contract fixes it).
 	// `quote_superseded` and `negative_margin` are the two conflict
-	// refusals of quote approval (spec 2026-11-11 section 4).
+	// refusals of quote approval (spec 2026-11-11 section 4);
+	// `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
+	// RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
+	// the 409 body alongside the code).
 	Error ErrorCode `json:"error"`
 }
 
@@ -322,7 +367,10 @@ type Error struct {
 // malformed bodies and `rate_limited` the login bucket (spec section
 // 8.1 leaves the code unpinned — this contract fixes it).
 // `quote_superseded` and `negative_margin` are the two conflict
-// refusals of quote approval (spec 2026-11-11 section 4).
+// refusals of quote approval (spec 2026-11-11 section 4);
+// `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
+// RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
+// the 409 body alongside the code).
 type ErrorCode string
 
 // ExtractedField defines model for ExtractedField.
@@ -568,6 +616,48 @@ type QuoteEmail struct {
 // leaves the version `DRAFT` — the send worker flips it to
 // `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
 type QuoteStatus string
+
+// ReprocessConflict defines model for ReprocessConflict.
+type ReprocessConflict struct {
+	// Error Machine-readable failure code. `unauthenticated`,
+	// `missing_organization`, `not_found`, `forbidden` and `internal` are
+	// the middleware contract of spec section 7; `bad_request` covers
+	// malformed bodies and `rate_limited` the login bucket (spec section
+	// 8.1 leaves the code unpinned — this contract fixes it).
+	// `quote_superseded` and `negative_margin` are the two conflict
+	// refusals of quote approval (spec 2026-11-11 section 4);
+	// `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
+	// RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
+	// the 409 body alongside the code).
+	Error ErrorCode `json:"error"`
+
+	// Status The RFQ's current `app.rfq_status` — `RECEIVED`, `PARSING`,
+	// `PRICING`, `READY`, `APPROVED_SENT` or `IGNORED`
+	// (`NEEDS_REVIEW`/`FAILED` are reprocessable and never appear
+	// here). Plain string, not an enum: the vocabulary lives in
+	// the database, and a drifted value must reach the client
+	// verbatim instead of failing decode.
+	Status string `json:"status"`
+}
+
+// ReprocessRfqResponse defines model for ReprocessRfqResponse.
+type ReprocessRfqResponse struct {
+	// ResumedStage River job kind of the pipeline stage a reprocess resumed — the
+	// `resumed_stage` vocabulary of POST /v1/rfqs/{id}/reprocess.
+	ResumedStage ReprocessStage `json:"resumed_stage"`
+
+	// Status Always `accepted` — the stage job is staged inside the
+	// transaction, not completed (the pipeline runs async).
+	Status ReprocessRfqResponseStatus `json:"status"`
+}
+
+// ReprocessRfqResponseStatus Always `accepted` — the stage job is staged inside the
+// transaction, not completed (the pipeline runs async).
+type ReprocessRfqResponseStatus string
+
+// ReprocessStage River job kind of the pipeline stage a reprocess resumed — the
+// `resumed_stage` vocabulary of POST /v1/rfqs/{id}/reprocess.
+type ReprocessStage string
 
 // ResendAttachment defines model for ResendAttachment.
 type ResendAttachment struct {
@@ -823,6 +913,16 @@ type GetQuoteDetailParams struct {
 	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
 }
 
+// ReprocessRfqParams defines parameters for ReprocessRfq.
+type ReprocessRfqParams struct {
+	// XOrganizationID Organization the request scopes to — required by the middleware, not
+	// the binding layer (an absent value reaches ResolveTenant as empty and
+	// gets the 400 {"error":"missing_organization"} only after
+	// authentication). Also part of the CSRF posture, since a cross-site
+	// form cannot set headers (ADR-005 section 4).
+	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
+}
+
 // PostAuthLoginJSONRequestBody defines body for PostAuthLogin for application/json ContentType.
 type PostAuthLoginJSONRequestBody = LoginRequest
 
@@ -935,6 +1035,9 @@ type ServerInterface interface {
 	// GetQuoteDetail Everything needed to audit one quote (split-screen audit).
 	// (GET /v1/quotes/{quoteId})
 	GetQuoteDetail(w http.ResponseWriter, r *http.Request, quoteID openapi_types.UUID, params GetQuoteDetailParams)
+	// ReprocessRfq Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint.
+	// (POST /v1/rfqs/{id}/reprocess)
+	ReprocessRfq(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params ReprocessRfqParams)
 	// GetSession Current user and active organization.
 	// (GET /v1/session)
 	GetSession(w http.ResponseWriter, r *http.Request)
@@ -1258,6 +1361,56 @@ func (siw *ServerInterfaceWrapper) GetQuoteDetail(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// ReprocessRfq operation middleware
+func (siw *ServerInterfaceWrapper) ReprocessRfq(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", r.PathValue("id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ReprocessRfqParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "X-Organization-Id" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("X-Organization-Id")]; found {
+		var XOrganizationID OrganizationIDHeader
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "X-Organization-Id", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "X-Organization-Id", valueList[0], &XOrganizationID, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "X-Organization-Id", Err: err})
+			return
+		}
+
+		params.XOrganizationID = &XOrganizationID
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReprocessRfq(w, r, id, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetSession operation middleware
 func (siw *ServerInterfaceWrapper) GetSession(w http.ResponseWriter, r *http.Request) {
 
@@ -1419,6 +1572,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/session/organization", wrapper.SwitchOrganization)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/inbox/quotes", wrapper.ListInboxQuotes)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/quotes/{quoteId}", wrapper.GetQuoteDetail)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/rfqs/{id}/reprocess", wrapper.ReprocessRfq)
 
 	return m
 }
@@ -2170,6 +2324,137 @@ func (response GetQuoteDetail500JSONResponse) VisitGetQuoteDetailResponse(w http
 	return err
 }
 
+type ReprocessRfqRequestObject struct {
+	ID     openapi_types.UUID `json:"id"`
+	Params ReprocessRfqParams
+}
+
+type ReprocessRfqResponseObject interface {
+	VisitReprocessRfqResponse(w http.ResponseWriter) error
+}
+
+type ReprocessRfq202JSONResponse ReprocessRfqResponse
+
+func (response ReprocessRfq202JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq400JSONResponse struct{ BadRequestJSONResponse }
+
+func (response ReprocessRfq400JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ReprocessRfq401JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ReprocessRfq403JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response ReprocessRfq404JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq409JSONResponse ReprocessConflict
+
+func (response ReprocessRfq409JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq429ResponseHeaders struct {
+	RetryAfter *int
+}
+
+type ReprocessRfq429JSONResponse struct {
+	Body    Error
+	Headers ReprocessRfq429ResponseHeaders
+}
+
+func (response ReprocessRfq429JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response.Body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if response.Headers.RetryAfter != nil {
+		w.Header().Set("Retry-After", fmt.Sprint(*response.Headers.RetryAfter))
+	}
+	w.WriteHeader(429)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ReprocessRfq500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ReprocessRfq500JSONResponse) VisitReprocessRfqResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetSessionRequestObject struct {
 }
 
@@ -2360,6 +2645,9 @@ type StrictServerInterface interface {
 	// GetQuoteDetail Everything needed to audit one quote (split-screen audit).
 	// (GET /v1/quotes/{quoteId})
 	GetQuoteDetail(ctx context.Context, request GetQuoteDetailRequestObject) (GetQuoteDetailResponseObject, error)
+	// ReprocessRfq Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint.
+	// (POST /v1/rfqs/{id}/reprocess)
+	ReprocessRfq(ctx context.Context, request ReprocessRfqRequestObject) (ReprocessRfqResponseObject, error)
 	// GetSession Current user and active organization.
 	// (GET /v1/session)
 	GetSession(ctx context.Context, request GetSessionRequestObject) (GetSessionResponseObject, error)
@@ -2702,6 +2990,33 @@ func (sh *strictHandler) GetQuoteDetail(w http.ResponseWriter, r *http.Request, 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetQuoteDetailResponseObject); ok {
 		if err := validResponse.VisitGetQuoteDetailResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ReprocessRfq operation middleware
+func (sh *strictHandler) ReprocessRfq(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params ReprocessRfqParams) {
+	var request ReprocessRfqRequestObject
+
+	request.ID = id
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ReprocessRfq(ctx, request.(ReprocessRfqRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ReprocessRfq")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ReprocessRfqResponseObject); ok {
+		if err := validResponse.VisitReprocessRfqResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

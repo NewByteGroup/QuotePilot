@@ -235,6 +235,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/rfqs/{id}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint
+         * @description The review queue's release action. For an RFQ parked in
+         *     `NEEDS_REVIEW` or `FAILED`, the server clears the parked reason,
+         *     moves the RFQ back to the resumed stage's active status and
+         *     enqueues that stage's job in one transaction. `resumed_stage`
+         *     names the River job kind the pipeline resumes at. A second call
+         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`.
+         */
+        post: operations["reprocessRfq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -585,6 +610,26 @@ export interface components {
             current: components["schemas"]["RepairTimeline"] | null;
             queue: components["schemas"]["RepairQueueItem"][];
             history: components["schemas"]["RepairSession"][];
+        };
+        /**
+         * @description River job kind of the pipeline stage a reprocess resumed.
+         * @enum {string}
+         */
+        ReprocessStage: "rfq_extract" | "rfq_fetch_rates" | "rfq_price" | "rfq_render";
+        ReprocessRfqResponse: {
+            /** @enum {string} */
+            status: "accepted";
+            resumed_stage: components["schemas"]["ReprocessStage"];
+        };
+        ReprocessError: {
+            /** @description Core error code (e.g. `rate_limited`). */
+            error: string;
+        };
+        ReprocessConflict: {
+            /** @description Always `rfq_not_parked`. */
+            error: string;
+            /** @description The RFQ's current `app.rfq_status` (verbatim, not an enum). */
+            status: string;
         };
     };
     responses: {
@@ -980,6 +1025,50 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    reprocessRfq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reprocess accepted — the resumed stage's job is staged. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessRfqResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description The RFQ is not in `NEEDS_REVIEW`/`FAILED`; `status` carries its current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessConflict"];
+                };
+            };
+            /** @description A previous reprocess is still inside the minimum interval. */
+            429: {
+                headers: {
+                    /** @description Seconds until the next reprocess of this RFQ is accepted. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
         };
     };
 }
