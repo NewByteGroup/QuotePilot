@@ -157,11 +157,8 @@ func (r reprocessRfq) clearedReason() *string {
 // clear+status → audit → enqueue. The interval gate runs BEFORE the
 // status gate (Devin Review round 3): a repeat reprocess inside
 // REPROCESS_MIN_INTERVAL answers 429 + Retry-After unconditionally,
-// whatever the status — the READY carveout's DraftAwaitingRender FOR
-// UPDATE blocks on a mid-flight render's quote lock, and a render
-// completing during that wait would answer a stale 409 for a request
-// that is, spec-wise, simply too soon. Bonus: the 429 now answers
-// without waiting on the render's quote lock at all. A first-ever
+// whatever the status — and it never even reaches the READY carveout's
+// DraftAwaitingRender NOWAIT read of the DRAFT quote. A first-ever
 // reprocess still reaches the status gate — no audit row means the
 // interval passes — so a non-parked RFQ keeps its 409.
 func (e *Endpoints) reprocess(
@@ -191,10 +188,14 @@ func (e *Endpoints) reprocess(
 			// S4's terminal failure strands the RFQ at READY with an
 			// unrendered DRAFT — exactly the shape a reprocess recovers.
 			// Any other READY shape (no DRAFT, or a rendered one) 409s.
-			reprocessable, err = jobs.DraftAwaitingRender(ctx, tx, r.ID)
+			// busy is a contended DRAFT: a live worker's tx owns the
+			// quote row (NOWAIT never waits — see draftRenderState), so
+			// the honest answer is the same 409, not a block.
+			awaiting, busy, err := jobs.DraftAwaitingRender(ctx, tx, r.ID)
 			if err != nil {
 				return err
 			}
+			reprocessable = awaiting && !busy
 		}
 		if !reprocessable {
 			out = reprocessOutcome{kind: kindNotParked, status: r.Status}
@@ -264,6 +265,13 @@ func (e *Endpoints) resume(
 	out *reprocessOutcome,
 ) error {
 	d, err := jobs.DecideResume(ctx, tx, r.ID, r.shellFacts(), r.Payload, r.ConfidenceSet, r.ReceivedAt)
+	if errors.Is(err, jobs.ErrQuoteBusy) {
+		// A contended DRAFT means a live worker owns downstream state —
+		// the same refusal a not-parked RFQ gets, not a fault worth a
+		// 500. Nothing was written yet, so the refusal rolls back clean.
+		*out = reprocessOutcome{kind: kindNotParked, status: r.Status}
+		return nil
+	}
 	if err != nil {
 		return err
 	}

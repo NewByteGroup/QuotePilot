@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 )
@@ -61,6 +63,14 @@ type ShellFacts struct {
 	NoAttachments   bool
 }
 
+// ErrQuoteBusy is DecideResume's answer when the DRAFT quote's row lock
+// is already held — draftRenderState's NOWAIT refusal (55P03). A live
+// worker (rfq_render's lockRenderQuote, quote_send's lockSendQuote) owns
+// downstream state, so the park claim a reprocess would act on is wrong
+// for now. The endpoint maps it to the same 409 a not-parked RFQ gets:
+// a refusal, never a fault.
+var ErrQuoteBusy = errors.New("jobs: reprocess: draft quote is locked by a live worker")
+
 // DecideResume walks the checkpoint chain for one already-locked RFQ row
 // inside the caller's tenant transaction:
 //
@@ -87,7 +97,9 @@ type ShellFacts struct {
 //  2. DRAFT quote — its existence PROVES the S3a checkpoint committed
 //     (S3a always writes its outcome row before enqueueing S3b — every
 //     outcome releases pricing), so a priced RFQ never even reaches the
-//     request_hash recompute. NULL pdf_storage_key ⇒
+//     request_hash recompute. A row lock already held ⇒ ErrQuoteBusy:
+//     a live worker owns the quote and the park claim is wrong while it
+//     runs (the endpoint answers the not-parked 409). NULL pdf_storage_key ⇒
 //     rfq_render (READY — the RFQ is already past pricing; render
 //     re-runs for that version). A rendered DRAFT means every
 //     checkpoint exists ⇒ rfq_price (PRICING): the park questions the
@@ -124,9 +136,12 @@ func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFa
 	if len(payload) == 0 || !confidenceSet {
 		return ResumeDecision{Stage: ResumeExtract, Status: "PARSING"}, nil
 	}
-	quoteID, rendered, found, err := draftRenderState(ctx, tx, rfqID)
+	quoteID, rendered, found, busy, err := draftRenderState(ctx, tx, rfqID)
 	if err != nil {
 		return ResumeDecision{}, err
+	}
+	if busy {
+		return ResumeDecision{}, ErrQuoteBusy
 	}
 	if found {
 		if !rendered {
@@ -198,41 +213,74 @@ func inboundMessageID(ctx context.Context, tx pgx.Tx, resendID string) (uuid.UUI
 // DraftAwaitingRender reports whether the RFQ's DRAFT quote still waits on
 // its first render — the READY-status carveout of the reprocess gate (S4's
 // terminal failure leaves the RFQ READY with an unrendered DRAFT; every
-// other READY shape stays a 409). The row is locked FOR UPDATE — the same
-// lock the render worker's lockRenderQuote takes — so the check can never
-// observe a mid-flight render (Devin Review: without it, a `running`
+// other READY shape stays a 409). busy reports draftRenderState's NOWAIT
+// refusal: a live worker's tx owns the quote row (the same lock the render
+// worker's lockRenderQuote takes), which is honest "not reprocessable"
+// signal — a mid-flight render can never be observed as a stale row and
+// never has to be waited out (Devin Review: without the lock, a `running`
 // rfq_render dedupe-hit at enqueue time was not provably about-to-complete,
 // because the worker locks the QUOTE row, not the RFQ the endpoint holds).
-func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (bool, error) {
-	_, rendered, found, err := draftRenderState(ctx, tx, rfqID)
+func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (awaiting, busy bool, err error) {
+	_, rendered, found, busy, err := draftRenderState(ctx, tx, rfqID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return found && !rendered, nil
+	return found && !rendered, busy, nil
 }
 
-// draftRenderState reads the RFQ's DRAFT quote FOR UPDATE — at most one
-// exists (commitQuote supersedes every prior DRAFT in the same tx); the
-// version-DESC pick keeps the lookup honest if data ever drifts.
-// rendered means pdf_storage_key carries a key. FOR UPDATE is the lock
-// invariant behind the endpoint's running-dedupe-hit reasoning: the
-// rfq_render worker takes this same lock on the quote row inside
-// lockRenderQuote, so a mid-flight render blocks this read until its tx
-// ends — after which the row either shows the pinned pdf_storage_key or
-// no in-flight render can exist. A `running` dedupe hit at enqueue time
-// is then provably about-to-complete (Devin Review).
-func draftRenderState(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteID uuid.UUID, rendered, found bool, err error) {
+// draftRenderState reads the RFQ's DRAFT quote FOR UPDATE NOWAIT — at most
+// one exists (commitQuote supersedes every prior DRAFT in the same tx); the
+// version-DESC pick keeps the lookup honest if data ever drifts. rendered
+// means pdf_storage_key carries a key.
+//
+// NOWAIT is a lock-ordering rule, not impatience: this endpoint already
+// holds FOR UPDATE on the RFQ row (RFQ → quote), while quote_send holds
+// the same quote lock across the provider delivery call — seconds — before
+// recordSent locks the RFQ (quote → RFQ). A blocking wait here inverts
+// their order and deadlocks, and the send tx dying as the victim after the
+// provider accepted the mail parks a delivered quote's RFQ FAILED. A
+// contended row is honest "not reprocessable" signal instead — a live
+// worker owns downstream state — so lock_not_available (55P03) reports
+// busy rather than waiting. The lock attempt still matters: acquiring it
+// proves no render is mid-flight, which is what makes a `running` dedupe
+// hit at enqueue time provably about-to-complete (Devin Review).
+//
+// The SAVEPOINT is not optional: 55P03 aborts the whole transaction like
+// any statement error, so the probe must fail into a savepoint and roll
+// back to it — otherwise the refusal path's own commit dies with
+// "commands ignored until end of transaction block". A lingering
+// savepoint is harmless (released at commit); on the READY-accepted
+// path a second call (gate probe, then DecideResume's) redefines the
+// same name — also harmless, since our own tx already holds the row
+// lock and the probe can never contend against itself.
+func draftRenderState(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteID uuid.UUID, rendered, found, busy bool, err error) {
+	if _, err = tx.Exec(ctx, `SAVEPOINT reprocess_quote_probe`); err != nil {
+		return uuid.Nil, false, false, false, fmt.Errorf("jobs: reprocess: quote probe savepoint on %s: %w", rfqID, err)
+	}
 	var pdfKey *string
 	err = tx.QueryRow(ctx, `
 		SELECT id, pdf_storage_key FROM app.quotes
 		WHERE rfq_id = $1 AND status = 'DRAFT'
 		ORDER BY version DESC LIMIT 1
-		FOR UPDATE`, rfqID).Scan(&quoteID, &pdfKey)
+		FOR UPDATE NOWAIT`, rfqID).Scan(&quoteID, &pdfKey)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, false, false, nil
+		return uuid.Nil, false, false, false, nil
+	}
+	if isLockNotAvailable(err) {
+		if _, rbErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT reprocess_quote_probe`); rbErr != nil {
+			return uuid.Nil, false, false, false, fmt.Errorf("jobs: reprocess: quote probe rollback on %s: %w", rfqID, rbErr)
+		}
+		return uuid.Nil, false, false, true, nil
 	}
 	if err != nil {
-		return uuid.Nil, false, false, fmt.Errorf("jobs: reprocess: draft quote on %s: %w", rfqID, err)
+		return uuid.Nil, false, false, false, fmt.Errorf("jobs: reprocess: draft quote on %s: %w", rfqID, err)
 	}
-	return quoteID, pdfKey != nil && *pdfKey != "", true, nil
+	return quoteID, pdfKey != nil && *pdfKey != "", true, false, nil
+}
+
+// isLockNotAvailable reports whether err is Postgres 55P03 — the NOWAIT
+// refusal a contended row lock raises.
+func isLockNotAvailable(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.LockNotAvailable
 }
