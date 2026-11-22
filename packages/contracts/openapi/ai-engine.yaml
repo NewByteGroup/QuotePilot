@@ -192,6 +192,113 @@ paths:
           $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
+  /v1/render/quote:
+    post:
+      summary: Stage 4 quote document render (S4 rfq_render)
+      description: |
+        PROVISIONAL route — pending engine-owner alignment, the
+        same process classify/extract/parse went through. Renders one
+        quote version (Jinja2 + WeasyPrint) to PDF plus the optional email
+        HTML. The request carries tenant content and the org's
+        branding_json verbatim — never organization_id (rule 2). The
+        response is untrusted: core-api re-validates (pdf_b64 decodes to
+        %PDF bytes under the size bound) before persisting anything.
+      operationId: renderQuote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, quote, branding, org]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                quote:
+                  type: object
+                  required: [quote_number, version, modal, direction, incoterm,
+                             origin_locode, dest_locode, lines, total_brl,
+                             overall_confidence, warnings, assumptions]
+                  additionalProperties: false
+                  properties:
+                    quote_number: { type: string, minLength: 1 }
+                    version: { type: integer, minimum: 1 }
+                    quote_date:
+                      type: string
+                      format: date
+                      description: "IsoDate; omitted when the quote row carries none"
+                    valid_until:
+                      type: string
+                      format: date
+                      description: "Reserved — core-api has no quote-validity column yet"
+                    modal: { type: string, enum: [FCL, LCL, AIR] }
+                    direction: { type: string, enum: [IMPORT, EXPORT] }
+                    incoterm:
+                      type: string
+                      enum: [EXW, FCA, FAS, FOB, CFR, CIF, CPT, CIP, DAP, DPU, DDP]
+                    origin_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                    dest_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                    equipment_or_unit: { type: string, description: "Omitted for modal without equipment (e.g. LCL)" }
+                    lines:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: object
+                        required: [category, description, original_currency, original_amount,
+                                   fx_rate_used, sell_amount_brl, flags]
+                        additionalProperties: false
+                        properties:
+                          category:
+                            type: string
+                            enum: [INTL_FREIGHT, ORIGIN_CHARGES, TERMINAL_STORAGE_THC, CUSTOMS_DISPATCH, SURCHARGE]
+                          description: { type: string }
+                          original_currency: { type: string, pattern: "^[A-Z]{3}$" }
+                          original_amount: { type: number, description: "Decimal amount in the original currency" }
+                          fx_rate_used: { type: number, description: "Decimal rate applied to BRL" }
+                          sell_amount_brl: { type: number, description: "Decimal sell amount, BRL" }
+                          flags:
+                            type: array
+                            items: { type: string }
+                    total_brl: { type: number, description: "Decimal final_price_brl — the internal BRL total" }
+                    overall_confidence: { type: number, minimum: 0, maximum: 1 }
+                    warnings:
+                      type: array
+                      items: { type: string }
+                    assumptions:
+                      type: array
+                      items: { type: string }
+                branding:
+                  type: object
+                  description: "organizations.branding_json verbatim — arbitrary tenant-supplied JSON"
+                org:
+                  type: object
+                  required: [name, from_name, reply_to]
+                  additionalProperties: false
+                  properties:
+                    name: { type: string }
+                    from_name: { type: string, description: "organizations.outbound_from_name — display name" }
+                    reply_to: { type: string, description: "organizations.outbound_reply_to" }
+      responses:
+        "200":
+          description: The rendered artifacts — PDF as base64, email HTML as text.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pdf_b64]
+                additionalProperties: false
+                properties:
+                  pdf_b64:
+                    type: string
+                    format: byte
+                    description: "base64-encoded PDF — core-api requires %PDF magic and ≤ 16 MiB decoded"
+                  email_html:
+                    type: string
+                    description: "Optional; may be empty — the send worker owns the mail body for now, but a rendered body is stored beside the PDF when present"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     serviceKey:

@@ -37,13 +37,17 @@ type fakeAIEngine struct {
 	extractErr  error
 	parses      map[string]string // filename -> markdown
 	parseErr    error
+	render      *aiengine.RenderResult
+	renderErr   error
 
 	classifyCalls int
 	extractCalls  int
 	parseCalls    int
+	renderCalls   int
 	lastClassify  aiengine.ClassifyRequest
 	lastExtract   aiengine.ExtractRequest
 	lastParse     aiengine.ParseAttachmentRequest
+	lastRender    aiengine.RenderRequest
 }
 
 func (f *fakeAIEngine) Classify(_ context.Context, req aiengine.ClassifyRequest) (*aiengine.ClassifyResult, error) {
@@ -74,6 +78,15 @@ func (f *fakeAIEngine) ParseAttachment(_ context.Context, req aiengine.ParseAtta
 		return md, nil
 	}
 	return "", errors.New("fakeAIEngine: no parse fixture for " + req.Filename)
+}
+
+func (f *fakeAIEngine) RenderQuote(_ context.Context, req aiengine.RenderRequest) (*aiengine.RenderResult, error) {
+	f.renderCalls++
+	f.lastRender = req
+	if f.renderErr != nil {
+		return nil, f.renderErr
+	}
+	return f.render, nil
 }
 
 // newExtractRig builds the worker on the real tenant runner plus an

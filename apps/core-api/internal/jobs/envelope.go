@@ -141,8 +141,18 @@ type RenderArgs struct {
 // Kind returns the River job kind.
 func (RenderArgs) Kind() string { return "rfq_render" }
 
-// InsertOpts routes the job to the render queue with entity uniqueness.
-func (RenderArgs) InsertOpts() river.InsertOpts { return entityUnique(QueueRender) }
+// renderMaxAttempts pins the spec-§3 row: S4 gets three attempts,
+// transient errors only — deterministic faults (contract violations,
+// stored-payload drift) cancel inside the worker long before that.
+const renderMaxAttempts = 3
+
+// InsertOpts routes the job to the render queue with entity uniqueness
+// and the stage's three-attempt budget.
+func (RenderArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueueRender)
+	opts.MaxAttempts = renderMaxAttempts
+	return opts
+}
 
 // SendArgs is S5 quote_send: deliver one approved quote version.
 type SendArgs struct {

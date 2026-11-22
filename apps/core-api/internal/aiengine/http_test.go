@@ -290,3 +290,87 @@ func TestUnconfiguredClient(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, aiengine.IsTransient(err))
 }
+
+// TestHTTPRenderQuote: the S4 wire shape — correlation_id plus the
+// quote/branding/org blocks, auth header, no organization_id (rule 2) —
+// and the response decoded to bytes only after the %PDF check passes.
+func TestHTTPRenderQuote(t *testing.T) {
+	srv := newFakeEngine(t, 200, nil)
+	srv.rawResp = `{"pdf_b64":"JVBERi0xLjcK","email_html":"<p>hi</p>"}`
+	c := newClient(srv)
+	res, err := c.RenderQuote(context.Background(), aiengine.RenderRequest{
+		CorrelationID: uuid.New(),
+		Quote: aiengine.RenderQuoteData{
+			QuoteNumber: "ACME-2026-0042", Version: 1, QuoteDate: "2026-03-15",
+			Modal: "FCL", Direction: "IMPORT", Incoterm: "FOB",
+			OriginLOCODE: "CNSHA", DestLOCODE: "BRSSZ", EquipmentOrUnit: "40HC",
+			Lines:       []aiengine.RenderLine{{Category: "INTL_FREIGHT"}},
+			Warnings:    []string{},
+			Assumptions: []string{},
+		},
+		Branding: json.RawMessage(`{"primary_color":"#0047FF"}`),
+		Org:      aiengine.RenderOrg{Name: "Acme", FromName: "Acme Ops", ReplyTo: "ops@acme.test"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/render/quote", srv.lastPath)
+	assert.Equal(t, "test-token", srv.lastServiceKey)
+	assert.Equal(t, []byte("%PDF-1.7\n"), res.PDF, "pdf_b64 is decoded for the caller")
+	assert.Equal(t, "<p>hi</p>", res.EmailHTML)
+	_, hasOrg := srv.lastBody["organization_id"]
+	assert.False(t, hasOrg, "organization_id never crosses the wire (rule 2)")
+	quote, _ := srv.lastBody["quote"].(map[string]any)
+	require.NotNil(t, quote)
+	assert.Equal(t, "ACME-2026-0042", quote["quote_number"])
+	assert.Equal(t, "IMPORT", quote["direction"])
+	assert.Equal(t, map[string]any{"primary_color": "#0047FF"}, srv.lastBody["branding"],
+		"branding_json travels verbatim")
+	org, _ := srv.lastBody["org"].(map[string]any)
+	assert.Equal(t, "ops@acme.test", org["reply_to"])
+}
+
+// TestHTTPRenderQuotePayloadValidated: the adapter's rule-6 check —
+// pdf_b64 that fails base64, magic or the size bound is a contract
+// violation, never a stored artifact.
+func TestHTTPRenderQuotePayloadValidated(t *testing.T) {
+	oversize := base64.StdEncoding.EncodeToString(
+		append([]byte("%PDF"), make([]byte, 16<<20)...))
+	cases := map[string]string{
+		"bad_base64":  `{"pdf_b64":"!!!","email_html":""}`,
+		"not_pdf":     `{"pdf_b64":"aGVsbG8=","email_html":""}`,
+		"empty_pdf":   `{"pdf_b64":"","email_html":""}`,
+		"oversize":    `{"pdf_b64":"` + oversize + `"}`,
+		"missing_key": `{"email_html":"<p>x</p>"}`,
+	}
+	for name, raw := range cases {
+		srv := newFakeEngine(t, 200, nil)
+		srv.rawResp = raw
+		c := newClient(srv)
+		_, err := c.RenderQuote(context.Background(), aiengine.RenderRequest{})
+		require.Error(t, err, name)
+		assert.True(t, aiengine.IsContractViolation(err), "%s must be a contract violation", name)
+		assert.False(t, aiengine.IsTransient(err), "%s must not be retried", name)
+	}
+}
+
+// TestHTTPRenderQuoteErrors: the shared taxonomy applies — transient
+// statuses retry, a schema-invalid body violates the contract, and the
+// unconfigured stub fails loudly.
+func TestHTTPRenderQuoteErrors(t *testing.T) {
+	srv := newFakeEngine(t, 503, map[string]any{"error": "x"})
+	c := newClient(srv)
+	_, err := c.RenderQuote(context.Background(), aiengine.RenderRequest{})
+	require.Error(t, err)
+	assert.True(t, aiengine.IsTransient(err))
+
+	srv = newFakeEngine(t, 200, nil)
+	srv.rawResp = `not json`
+	c = newClient(srv)
+	_, err = c.RenderQuote(context.Background(), aiengine.RenderRequest{})
+	require.Error(t, err)
+	assert.True(t, aiengine.IsContractViolation(err))
+
+	_, err = aiengine.UnconfiguredClient{}.RenderQuote(context.Background(), aiengine.RenderRequest{})
+	require.Error(t, err)
+	assert.True(t, aiengine.IsContractViolation(err),
+		"the unconfigured binding fails loudly, never transient")
+}

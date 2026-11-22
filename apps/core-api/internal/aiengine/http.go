@@ -148,6 +148,56 @@ func (c *HTTPClient) SearchCarrierOffer(ctx context.Context, req CarrierOfferSea
 	return &out, nil
 }
 
+// maxRenderPDFBytes bounds the decoded PDF core accepts from the render
+// endpoint (spec S4 contract: ≤ 16 MiB) — a one-page quote document sits
+// far under this, so an oversize body is a contract violation, never a
+// stored artifact.
+const maxRenderPDFBytes = 16 << 20
+
+// renderResponse mirrors POST /v1/render/quote's body: the PDF travels
+// base64 inside JSON (same provisional transport as attachments).
+type renderResponse struct {
+	PDFB64    string `json:"pdf_b64"`
+	EmailHTML string `json:"email_html"`
+}
+
+// RenderQuote calls POST /v1/render/quote (PROVISIONAL route — pending
+// engine-owner alignment). Unlike Extract the adapter validates before
+// returning: the untrusted payload becomes RenderResult only after pdf_b64
+// decodes to bounded %PDF bytes (rule 6); anything else is a contract
+// violation, never persisted.
+func (c *HTTPClient) RenderQuote(ctx context.Context, req RenderRequest) (*RenderResult, error) {
+	var out renderResponse
+	if err := c.post(ctx, "render_quote", "/v1/render/quote", req, &out); err != nil {
+		return nil, err
+	}
+	pdf, err := decodeRenderPDF(out.PDFB64)
+	if err != nil {
+		return nil, &EngineError{Op: "render_quote", Contract: true, Detail: err.Error()}
+	}
+	return &RenderResult{PDF: pdf, EmailHTML: out.EmailHTML}, nil
+}
+
+// decodeRenderPDF is the rule-6 check on the render payload: base64 must
+// decode to non-empty bytes starting with the %PDF magic, under the size
+// bound.
+func decodeRenderPDF(b64 string) ([]byte, error) {
+	pdf, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, fmt.Errorf("pdf_b64 does not decode: %w", err)
+	}
+	if len(pdf) == 0 {
+		return nil, errors.New("pdf_b64 is empty")
+	}
+	if len(pdf) > maxRenderPDFBytes {
+		return nil, fmt.Errorf("pdf is %d bytes, over the %d-byte bound", len(pdf), maxRenderPDFBytes)
+	}
+	if !bytes.HasPrefix(pdf, []byte("%PDF")) {
+		return nil, errors.New("pdf_b64 does not start with the %PDF magic")
+	}
+	return pdf, nil
+}
+
 // post issues an authenticated JSON POST and decodes the body into out.
 // Non-2xx statuses become EngineError with the HTTP status so Transient()
 // can classify them; transport failures stay transient EngineErrors.
