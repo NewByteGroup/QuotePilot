@@ -103,6 +103,55 @@ func TestRfqIngestResurrectsShell(t *testing.T) {
 	}
 }
 
+// TestRfqIngestAttachmentRowIsNotShell: a successfully-ingested
+// attachment-only email leaves both bodies NULL too — but its
+// rfq_attachments rows keep the row out of the shell signature, so a
+// replayed or resumed rfq_ingest treats it as a live row: no fetch, no
+// promoteShell overwrite, no duplicated attachment rows or storage puts
+// (Devin Review: bodies-NULL alone misdetected the shape).
+func TestRfqIngestAttachmentRowIsNotShell(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "ingest-att-row")
+	receipt := seedReceipt(t, db, org, "resend-msg-attonly", "RFQ: attachments only")
+	var rfqID uuid.UUID
+	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO app.rfq_requests
+				(organization_id, rfq_number, resend_message_id, customer_email, subject,
+				 received_at, status)
+			VALUES ($1, 11, 'resend-msg-attonly', 'ada@buyer.test', 'RFQ: attachments only',
+			        now(), 'PARSING')
+			RETURNING id`, org).Scan(&rfqID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO app.rfq_attachments (organization_id, rfq_id, storage_key, filename, mime_type, size_bytes)
+			VALUES ($1, $2, 'tenants/x/a1-rates.pdf', 'rates.pdf', 'application/pdf', 4)`, org, rfqID)
+		return err
+	}))
+
+	recv := &fakeReceiver{email: fixtureEmail(), downloads: map[string][]byte{
+		"https://cdn.test/a1": []byte("PDF1"), "https://cdn.test/a2": []byte("CSV"),
+	}}
+	rig := newIngestRig(t, db, recv, platform.NewFakeStorage())
+	require.NoError(t, rig.worker.Work(context.Background(), ingestJob(org, uuid.New(), receipt)))
+
+	assert.Equal(t, 0, recv.getCalls, "an attachment-carrying row is not a shell — no fetch")
+	assert.Equal(t, 0, recv.dlCalls, "attachments are never re-stored")
+	assert.Empty(t, rig.storage.Keys())
+	r, ok := loadRfq(t, db, org, "resend-msg-attonly")
+	require.True(t, ok)
+	assert.Equal(t, rfqID, r.ID)
+	assert.Equal(t, "PARSING", r.Status, "promoteShell leaves the live row untouched")
+	assert.Equal(t, 1, countRows(t, db, org,
+		`SELECT count(*) FROM app.rfq_attachments WHERE rfq_id = $1`, rfqID),
+		"no duplicate attachment rows")
+	assert.Equal(t, 0, countRows(t, db, org,
+		`SELECT count(*) FROM river.river_job WHERE kind = 'rfq_extract'
+		 AND args ->> 'organization_id' = $1`, org.String()))
+}
+
 // TestRfqIngestNonShellRowIsNoOp: an existing row with bodies — any
 // status, here a FAILED extract dead-letter — is a replay, not a shell:
 // no fetch, no write, no chained job.

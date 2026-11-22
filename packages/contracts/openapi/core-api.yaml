@@ -594,30 +594,35 @@ paths:
 
         The resume point is the earliest missing checkpoint, so the paid
         extraction and a completed carrier fetch are never repeated:
-        (0) both body columns NULL is the S1 dead-letter shell (permanent
-        Resend fetch failure) — `rfq_ingest` re-runs for the resolved
-        `inbound_messages` receipt and promotes the shell in place, or
-        `rfq_extract` when no receipt exists to resurrect; (1) a usable
-        extraction — `extracted_payload_json` and
+        (0) both body columns NULL, zero `rfq_attachments` rows and no
+        persisted extraction is the S1 dead-letter shell (permanent
+        Resend fetch failure — an attachment-only ingest keeps its
+        bodies NULL too, but always stores attachments) — `rfq_ingest`
+        re-runs for the resolved `inbound_messages` receipt and promotes
+        the shell in place, or `rfq_extract` when no receipt exists to
+        resurrect; (1) a usable extraction — `extracted_payload_json` and
         `extraction_confidence` are the pair S2 commits together — else
         `rfq_extract` re-runs (`NO_USABLE_TEXT`, `INVALID_EXTRACTION`,
         `TARIFF_UPDATE` parks and dead-lettered `FAILED` shells land
-        here); (2) the S3a owed gate recomputed from the stored
-        extraction — FCL + derived IMPORT + `OwesImportFreight` — with
-        no `carrier_offers` row for the recomputed `request_hash` means
-        `rfq_fetch_rates` re-runs (any recorded outcome, even
-        `NOT_APPLICABLE`/`FETCH_FAILED`, counts as completed);
-        (3) no `DRAFT` quote means `rfq_price` re-runs; (4) a `DRAFT`
-        quote with NULL `pdf_storage_key` means `rfq_render` re-runs —
-        the RFQ is already `READY` past pricing. The human reprocess IS
-        the review-gate override: `LOW_CONFIDENCE`, `MISSING_TARIFF`,
-        `REQUIRED_FIELD_MISSING` and the other business parks keep their
-        persisted extraction and resume at pricing. Every other
-        `app.rfq_status` — `RECEIVED`, `PARSING`, `PRICING`, `READY`,
-        `APPROVED_SENT`, `IGNORED` — answers 409, except `READY` while
-        its `DRAFT` quote awaits its first render (a dead-lettered
-        `rfq_render` leaves exactly that shape); `IGNORED` is
-        intentionally terminal.
+        here); (2) a `DRAFT` quote — its existence proves the S3a
+        checkpoint committed, so the time-dependent `request_hash`
+        recompute never runs for a priced RFQ — with NULL
+        `pdf_storage_key` means `rfq_render` re-runs (the RFQ is already
+        `READY` past pricing), and a rendered `DRAFT` means `rfq_price`
+        supersedes it into a new version; (3) only with no `DRAFT` does
+        the S3a owed gate recompute off the stored extraction — FCL +
+        derived IMPORT + `OwesImportFreight` — where no `carrier_offers`
+        row for the recomputed `request_hash` means `rfq_fetch_rates`
+        re-runs (any recorded outcome, even `NOT_APPLICABLE`/
+        `FETCH_FAILED`, counts as completed), else `rfq_price`. The human
+        reprocess IS the review-gate override: `LOW_CONFIDENCE`,
+        `MISSING_TARIFF`, `REQUIRED_FIELD_MISSING` and the other
+        business parks keep their persisted extraction and resume at
+        pricing. Every other `app.rfq_status` — `RECEIVED`, `PARSING`,
+        `PRICING`, `READY`, `APPROVED_SENT`, `IGNORED` — answers 409,
+        except `READY` while its `DRAFT` quote awaits its first render
+        (a dead-lettered `rfq_render` leaves exactly that shape);
+        `IGNORED` is intentionally terminal.
 
         `REPROCESS_MIN_INTERVAL` (default 60s) bounds one reprocess per
         RFQ: a second call inside the interval answers 429 with
@@ -660,12 +665,17 @@ paths:
         '409':
           description: |
             `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` —
-            the RFQ is not in a reprocessable state
-            (`NEEDS_REVIEW`/`FAILED`, or `READY` while its `DRAFT`
-            quote awaits its first render); `status` reports its
+            the RFQ is not in a reprocessable state (only
+            `NEEDS_REVIEW`/`FAILED`, or `READY` with a `DRAFT` quote
+            still awaiting its first render, are); `status` reports its
             current `app.rfq_status` value so the client can refresh
             its row — including the active status an accepted resume
-            is still running under.
+            is still running under. A reprocess inside
+            `REPROCESS_MIN_INTERVAL` of an accepted one answers 429,
+            not 409 — even while the resumed render is in-flight,
+            because the RFQ still reports the reprocessable READY +
+            unrendered-DRAFT shape, so the rate-limit gate answers
+            first.
           content:
             application/json:
               schema:

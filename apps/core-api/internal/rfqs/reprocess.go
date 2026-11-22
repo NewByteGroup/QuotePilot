@@ -107,7 +107,10 @@ type reprocessOutcome struct {
 // reprocessRfq is the locked slice of app.rfq_requests the decision
 // reads — including the reasons it clears (the audit row needs them) and
 // the ingest-shell columns the step-0 signature needs: resend_message_id
-// resolves the receipt, the body pair detects the dead-letter shell.
+// resolves the receipt, the body pair plus the rfq_attachments count
+// detect the dead-letter shell (the shell never stores attachments, so
+// zero rows is what keeps an attachment-only ingest out of step 0 —
+// Devin Review).
 type reprocessRfq struct {
 	ID              uuid.UUID
 	Status          string
@@ -118,15 +121,19 @@ type reprocessRfq struct {
 	RawHTML         *string
 	Payload         []byte
 	ConfidenceSet   bool
+	AttachmentCount int
 }
 
 // shellFacts projects the row onto DecideResume's step-0 input: both body
-// columns NULL is the dead-letter-shell signature (every later stage
-// failure keeps at least one stored body).
+// columns NULL and zero attachment rows is the dead-letter-shell
+// signature — insertFailedShell never reaches storeAttachments, while a
+// successfully-ingested attachment-only email always leaves rows (Devin
+// Review).
 func (r reprocessRfq) shellFacts() jobs.ShellFacts {
 	return jobs.ShellFacts{
 		ResendMessageID: r.ResendMessageID,
 		BodiesMissing:   r.RawText == nil && r.RawHTML == nil,
+		NoAttachments:   r.AttachmentCount == 0,
 	}
 }
 
@@ -193,10 +200,12 @@ func lockRfq(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (reprocessRfq, boo
 	err := tx.QueryRow(ctx, `
 		SELECT id, status::text, review_reason, failure_reason,
 		       resend_message_id, raw_text_body, raw_html_body,
-		       coalesce(extracted_payload_json::text,''), extraction_confidence
+		       coalesce(extracted_payload_json::text,''), extraction_confidence,
+		       (SELECT count(*) FROM app.rfq_attachments a WHERE a.rfq_id = rfq_requests.id)
 		FROM app.rfq_requests WHERE id = $1 FOR UPDATE`, rfqID).
 		Scan(&r.ID, &r.Status, &r.ReviewReason, &r.FailureReason,
-			&r.ResendMessageID, &r.RawText, &r.RawHTML, &r.Payload, &confidence)
+			&r.ResendMessageID, &r.RawText, &r.RawHTML, &r.Payload, &confidence,
+			&r.AttachmentCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return reprocessRfq{}, false, nil
 	}

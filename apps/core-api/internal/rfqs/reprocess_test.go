@@ -61,6 +61,19 @@ var extractionNotOwed = []byte(`{"fields":{
 	"ready_date":    {"value":"2026-12-01"}
 }}`)
 
+// extractionOwedNoReady is extractionOwed minus the ready_date field —
+// the shape whose S3a run pins request_hash with the run-day fallback
+// (quoteDateField's `now`), which is exactly the day-drift a next-day
+// render reprocess must not recompute (Devin Review).
+var extractionOwedNoReady = []byte(`{"fields":{
+	"modal":             {"value":"FCL"},
+	"incoterm":          {"value":"FOB"},
+	"origin_locode":     {"value":"DEHAM"},
+	"dest_locode":       {"value":"BRSSZ"},
+	"equipment_or_unit": {"value":"40HC"},
+	"quantity":          {"value":"2"}
+}}`)
+
 // owedHash is the carrier_offers.request_hash DecideResume recomputes for
 // extractionOwed — built through the same carrier.RequestHash the worker
 // pins, with the fields rateRequest normalizes (upper-cased equipment,
@@ -72,6 +85,19 @@ func owedHash() string {
 		EquipmentOrUnit: "40HC",
 		Quantity:        2,
 		ReadyDate:       time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC),
+	})
+}
+
+// owedHashOn is owedHash for a run-day ready_date — the hash an S3a worker
+// running on `day` pins for extractionOwedNoReady (quoteDateField falls
+// back to the injected clock truncated to the day).
+func owedHashOn(day time.Time) string {
+	return carrier.RequestHash(carrier.Request{
+		OriginLOCODE:    "DEHAM",
+		DestLOCODE:      "BRSSZ",
+		EquipmentOrUnit: "40HC",
+		Quantity:        2,
+		ReadyDate:       time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC),
 	})
 }
 
@@ -235,16 +261,39 @@ func seedDraftQuote(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID, pdfKey *s
 	return id
 }
 
+// seedAttachment writes one rfq_attachments row — the marker that keeps an
+// attachment-only ingest out of the dead-letter-shell signature (the shell
+// never reaches storeAttachments).
+func seedAttachment(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID) {
+	t.Helper()
+	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO app.rfq_attachments (organization_id, rfq_id, storage_key, filename, mime_type, size_bytes)
+			VALUES ($1, $2, $3, 'rates.pdf', 'application/pdf', 4)`,
+			org, rfq, "tenants/"+org.String()+"/rfqs/"+rfq.String()+"/a1-rates.pdf")
+		return err
+	}))
+}
+
 // seedCarrierCheckpoint writes the S3a outcome row — NO_OFFER with NULL
 // payload and carrier is a legal completed-fetch row (the CHECK only
 // forces payload on OFFER_FOUND).
 func seedCarrierCheckpoint(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID, hash string) {
 	t.Helper()
+	seedCarrierOutcome(t, db, org, rfq, "NO_OFFER", nil, hash)
+}
+
+// seedCarrierOutcome generalizes the checkpoint seed to any outcome —
+// OFFER_FOUND must carry offer_payload_json (the CHECK's biconditional),
+// every other outcome must not.
+func seedCarrierOutcome(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID, outcome string, payload []byte, hash string) {
+	t.Helper()
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO app.carrier_offers
-				(organization_id, rfq_id, carrier, outcome, source, request_hash, fetched_at)
-			VALUES ($1, $2, 'CMA_CGM', 'NO_OFFER', 'LIVE', $3, now())`, org, rfq, hash)
+				(organization_id, rfq_id, carrier, outcome, source, request_hash, offer_payload_json, fetched_at)
+			VALUES ($1, $2, 'CMA_CGM', $3, 'LIVE', $4, $5::jsonb, now())`,
+			org, rfq, outcome, hash, payload)
 		return err
 	}))
 }

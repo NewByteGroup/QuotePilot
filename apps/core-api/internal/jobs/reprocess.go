@@ -49,25 +49,33 @@ type ResumeDecision struct {
 
 // ShellFacts is the ingest-shell input the endpoint read off its
 // already-locked RFQ row: the resend_message_id the shell stored (the
-// receipt lookup key) and whether both body columns are NULL — the exact
-// signature of the S1 dead-letter shell insertFailedShell writes (every
-// later stage failure has at least one body stored, so bodies-NULL alone
-// identifies the shell; reprocess also only sees parked/READY rows).
+// receipt lookup key), whether both body columns are NULL, and whether
+// zero rfq_attachments rows exist — together the exact signature of the
+// S1 dead-letter shell insertFailedShell writes. A successfully-ingested
+// attachment-only email also leaves the bodies NULL, but it always
+// stores rfq_attachments rows; the shell never does, so the attachment
+// count is the distinguisher (Devin Review).
 type ShellFacts struct {
 	ResendMessageID string
 	BodiesMissing   bool
+	NoAttachments   bool
 }
 
 // DecideResume walks the checkpoint chain for one already-locked RFQ row
 // inside the caller's tenant transaction:
 //
-//  0. Ingest shell — both body columns NULL is the signature of the S1
-//     dead-letter shell (permanent Resend fetch failure): re-running
-//     extraction with nothing to extract is hopeless, so rfq_ingest
-//     re-runs for the receipt instead (RECEIVED) and the worker promotes
-//     the shell in place. A missing inbound_messages receipt can't
-//     resurrect the message — the walk falls through to rfq_extract,
-//     which parks NO_USABLE_TEXT and stays visible.
+//  0. Ingest shell — both body columns NULL, zero rfq_attachments rows
+//     and no persisted extraction is the signature of the S1 dead-letter
+//     shell (permanent Resend fetch failure): re-running extraction with
+//     nothing to extract is hopeless, so rfq_ingest re-runs for the
+//     receipt instead (RECEIVED) and the worker promotes the shell in
+//     place. The attachment and payload guards keep a successfully-
+//     ingested attachment-only email — bodies NULL, attachments stored,
+//     possibly an extraction committed — out of step 0: insertFailedShell
+//     never reaches storeAttachments, so zero attachment rows is the
+//     distinguisher (Devin Review). A missing inbound_messages receipt
+//     can't resurrect the message — the walk falls through to
+//     rfq_extract, which parks NO_USABLE_TEXT and stays visible.
 //  1. Usable extraction — extracted_payload_json and
 //     extraction_confidence are the pair S2 commits together; either
 //     absent ⇒ rfq_extract (PARSING). NO_USABLE_TEXT, INVALID_EXTRACTION,
@@ -76,27 +84,31 @@ type ShellFacts struct {
 //     resume. (Spec's "re-extraction is a separate explicit request"
 //     means a future dedicated endpoint, not a refusal here — flagged on
 //     the PR.)
-//  2. Carrier checkpoint owed-but-missing — the S3a owed gate recomputed
-//     off the stored extraction (freightOwed: FCL + derived IMPORT +
-//     OwesImportFreight); no carrier_offers row for the recomputed
-//     request_hash ⇒ rfq_fetch_rates (PRICING). Any recorded outcome —
-//     OFFER_FOUND, NO_OFFER, FETCH_FAILED, NOT_APPLICABLE — counts as
-//     completed: the fetch is never repeated (spec Reprocess).
-//  3. No DRAFT quote ⇒ rfq_price (PRICING). LOW_CONFIDENCE,
-//     MISSING_TARIFF, REQUIRED_FIELD_MISSING and the other business
-//     parks land here or at step 2 — the human reprocess IS the gate
-//     override; fields stay persisted and the quote keeps the pinned
-//     confidence.
-//  4. DRAFT quote with NULL pdf_storage_key ⇒ rfq_render (READY — the
-//     RFQ is already past pricing; render re-runs for that version).
-//
-// A DRAFT quote whose pdf_storage_key is set means every checkpoint
-// exists: the park then questions the quote itself (NEGATIVE_MARGIN at
-// send, a dead-lettered delivery), so the honest resume is rfq_price —
-// S3b supersedes the stale DRAFT into a new version (rule 9) instead of
-// re-rendering the questioned one.
+//  2. DRAFT quote — its existence PROVES the S3a checkpoint committed
+//     (S3a always writes its outcome row before enqueueing S3b — every
+//     outcome releases pricing), so the walk never reaches the
+//     time-dependent request_hash recompute for a priced RFQ: a next-day
+//     reprocess would recompute ready_date off `now`, drift the hash and
+//     mistake the completed fetch for a missing one — a paid re-fetch
+//     the spec forbids (Devin Review). NULL pdf_storage_key ⇒
+//     rfq_render (READY — the RFQ is already past pricing; render
+//     re-runs for that version). A rendered DRAFT means every
+//     checkpoint exists ⇒ rfq_price (PRICING): the park questions the
+//     quote itself (NEGATIVE_MARGIN at send, a dead-lettered delivery),
+//     so S3b supersedes the stale DRAFT into a new version (rule 9)
+//     instead of re-rendering the questioned one.
+//  3. No DRAFT — only now is the carrier checkpoint recomputed: the S3a
+//     owed gate off the stored extraction (freightOwed: FCL + derived
+//     IMPORT + OwesImportFreight); no carrier_offers row for the
+//     recomputed request_hash ⇒ rfq_fetch_rates (PRICING), else
+//     rfq_price. Any recorded outcome — OFFER_FOUND, NO_OFFER,
+//     FETCH_FAILED, NOT_APPLICABLE — counts as completed: the fetch is
+//     never repeated (spec Reprocess). LOW_CONFIDENCE, MISSING_TARIFF,
+//     REQUIRED_FIELD_MISSING and the other business parks land here —
+//     the human reprocess IS the gate override; fields stay persisted
+//     and the quote keeps the pinned confidence.
 func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFacts, payload []byte, confidenceSet bool, now time.Time) (ResumeDecision, error) {
-	if shell.BodiesMissing {
+	if shell.BodiesMissing && shell.NoAttachments && len(payload) == 0 {
 		id, found, err := inboundMessageID(ctx, tx, shell.ResendMessageID)
 		if err != nil {
 			return ResumeDecision{}, err
@@ -107,6 +119,16 @@ func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFa
 	}
 	if len(payload) == 0 || !confidenceSet {
 		return ResumeDecision{Stage: ResumeExtract, Status: "PARSING"}, nil
+	}
+	quoteID, rendered, found, err := draftRenderState(ctx, tx, rfqID)
+	if err != nil {
+		return ResumeDecision{}, err
+	}
+	if found {
+		if !rendered {
+			return ResumeDecision{Stage: ResumeRender, Status: "READY", QuoteID: quoteID}, nil
+		}
+		return ResumeDecision{Stage: ResumePrice, Status: rfqPricing}, nil
 	}
 	fields, err := decodePriceExtraction(payload)
 	if err != nil {
@@ -123,18 +145,7 @@ func DecideResume(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID, shell ShellFa
 	if missing {
 		return ResumeDecision{Stage: ResumeRates, Status: rfqPricing}, nil
 	}
-	quoteID, rendered, found, err := draftRenderState(ctx, tx, rfqID)
-	if err != nil {
-		return ResumeDecision{}, err
-	}
-	switch {
-	case !found:
-		return ResumeDecision{Stage: ResumePrice, Status: rfqPricing}, nil
-	case !rendered:
-		return ResumeDecision{Stage: ResumeRender, Status: "READY", QuoteID: quoteID}, nil
-	default:
-		return ResumeDecision{Stage: ResumePrice, Status: rfqPricing}, nil
-	}
+	return ResumeDecision{Stage: ResumePrice, Status: rfqPricing}, nil
 }
 
 // carrierCheckpointMissing recomputes the S3a owed gate off the stored
@@ -182,7 +193,11 @@ func inboundMessageID(ctx context.Context, tx pgx.Tx, resendID string) (uuid.UUI
 // DraftAwaitingRender reports whether the RFQ's DRAFT quote still waits on
 // its first render — the READY-status carveout of the reprocess gate (S4's
 // terminal failure leaves the RFQ READY with an unrendered DRAFT; every
-// other READY shape stays a 409).
+// other READY shape stays a 409). The row is locked FOR UPDATE — the same
+// lock the render worker's lockRenderQuote takes — so the check can never
+// observe a mid-flight render (Devin Review: without it, a `running`
+// rfq_render dedupe-hit at enqueue time was not provably about-to-complete,
+// because the worker locks the QUOTE row, not the RFQ the endpoint holds).
 func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (bool, error) {
 	_, rendered, found, err := draftRenderState(ctx, tx, rfqID)
 	if err != nil {
@@ -191,16 +206,23 @@ func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (bool,
 	return found && !rendered, nil
 }
 
-// draftRenderState reads the RFQ's DRAFT quote — at most one exists
-// (commitQuote supersedes every prior DRAFT in the same tx); the
+// draftRenderState reads the RFQ's DRAFT quote FOR UPDATE — at most one
+// exists (commitQuote supersedes every prior DRAFT in the same tx); the
 // version-DESC pick keeps the lookup honest if data ever drifts.
-// rendered means pdf_storage_key carries a key.
+// rendered means pdf_storage_key carries a key. FOR UPDATE is the lock
+// invariant behind the endpoint's running-dedupe-hit reasoning: the
+// rfq_render worker takes this same lock on the quote row inside
+// lockRenderQuote, so a mid-flight render blocks this read until its tx
+// ends — after which the row either shows the pinned pdf_storage_key or
+// no in-flight render can exist. A `running` dedupe hit at enqueue time
+// is then provably about-to-complete (Devin Review).
 func draftRenderState(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteID uuid.UUID, rendered, found bool, err error) {
 	var pdfKey *string
 	err = tx.QueryRow(ctx, `
 		SELECT id, pdf_storage_key FROM app.quotes
 		WHERE rfq_id = $1 AND status = 'DRAFT'
-		ORDER BY version DESC LIMIT 1`, rfqID).Scan(&quoteID, &pdfKey)
+		ORDER BY version DESC LIMIT 1
+		FOR UPDATE`, rfqID).Scan(&quoteID, &pdfKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, false, nil
 	}

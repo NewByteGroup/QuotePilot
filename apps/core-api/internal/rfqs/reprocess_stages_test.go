@@ -328,6 +328,122 @@ func TestReprocessResumeRenderReadyGate(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Devin Review round 2 — the shell signature and the walk order
+// ---------------------------------------------------------------------------
+
+// TestReprocessAttachmentOnlyRfqIsNotShell: an attachment-only ingest
+// leaves both bodies NULL too — but its rfq_attachments rows take it out
+// of the dead-letter-shell signature, so a reprocess never re-runs
+// rfq_ingest (which would promote in place and re-store duplicate
+// attachment rows). With no persisted extraction the walk lands on
+// rfq_extract, even with the receipt still present to resurrect.
+func TestReprocessAttachmentOnlyRfqIsNotShell(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "reproc-att-only")
+	user := seedUser(t)
+	seedMembership(t, org, user, platform.RolePricingAnalyst)
+	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
+	resendID := "resend-att-" + uuid.NewString()
+	receipt := seedReceipt(t, db, org, resendID)
+	rfq := seedRfq(t, db, org, rfqSeed{
+		status:       "NEEDS_REVIEW",
+		reviewReason: strptr("NO_USABLE_TEXT"),
+		resendID:     resendID,
+		// no bodies — the attachment-only shape — but the attachment row
+		// below is the distinguisher the shell signature reads.
+	})
+	seedAttachment(t, db, org, rfq)
+
+	rec := rig.postReprocess(t, user, org, rfq)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var body authapi.ReprocessRfqResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, authapi.RfqExtract, body.ResumedStage,
+		"attachments prove the ingest committed — never re-run S1")
+
+	r := loadRfq(t, db, org, rfq)
+	assert.Equal(t, "PARSING", r.Status)
+	assert.Equal(t, []string{"rfq_extract"}, stagedJobs(t, db, rfq))
+	assert.Empty(t, stagedJobsBy(t, db, "inbound_message_id", receipt.String()),
+		"no rfq_ingest job is staged for the receipt")
+}
+
+// TestReprocessNextDayRenderResumesRender: the next-day render recovery —
+// S3a ran yesterday with no extracted ready_date, so its checkpoint hash
+// carries the run-day fallback; a DRAFT was priced and is still awaiting
+// its first render. Reprocessing today must resume rfq_render — the
+// DRAFT's existence proves the fetch checkpoint committed, so the
+// time-dependent request_hash recompute never runs and the completed
+// (paid) fetch is never repeated.
+func TestReprocessNextDayRenderResumesRender(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "reproc-next-day")
+	user := seedUser(t)
+	seedMembership(t, org, user, platform.RolePricingAnalyst)
+	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
+	rfq := seedRfq(t, db, org, rfqSeed{
+		status:     "READY",
+		textBody:   strptr("please quote"),
+		payload:    extractionOwedNoReady,
+		confidence: strptr("0.8800"),
+	})
+	// Yesterday's S3a run pinned the OFFER_FOUND checkpoint under the
+	// run-day ready_date — today's recompute would hash a different
+	// request and call the checkpoint missing.
+	seedCarrierOutcome(t, db, org, rfq, "OFFER_FOUND",
+		[]byte(`{"carrier":"CMA_CGM","charges":[],"expires_at":"2026-11-19T00:00:00Z"}`),
+		owedHashOn(rigNow.AddDate(0, 0, -1)))
+	quote := seedDraftQuote(t, db, org, rfq, nil)
+
+	rec := rig.postReprocess(t, user, org, rfq)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var body authapi.ReprocessRfqResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, authapi.RfqRender, body.ResumedStage,
+		"the DRAFT proves the S3a checkpoint — never rates, never reprice")
+
+	r := loadRfq(t, db, org, rfq)
+	assert.Equal(t, "READY", r.Status)
+	assert.Equal(t, []string{"rfq_render"}, stagedJobs(t, db, rfq),
+		"no rfq_fetch_rates re-fetch and no rfq_price supersede")
+	assert.Equal(t, quote.String(), stagedJobArg(t, db, "rfq_render", rfq, "quote_id"))
+}
+
+// TestReprocessDraftShortCircuitsCarrierWalk: a priced RFQ parked for
+// review carries NO carrier_offers row at all — under the old walk the
+// recomputed hash-miss resumed rfq_fetch_rates, but a DRAFT quote's
+// existence already proves the S3a checkpoint committed at pricing time
+// (S3a writes its outcome row before enqueueing S3b). The unrendered
+// DRAFT resumes at rfq_render.
+func TestReprocessDraftShortCircuitsCarrierWalk(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "reproc-draft-first")
+	user := seedUser(t)
+	seedMembership(t, org, user, platform.RolePricingAnalyst)
+	rig := newReprocessRig(t, db, 60*time.Second, func() time.Time { return rigNow })
+	rfq := seedRfq(t, db, org, rfqSeed{
+		status:       "NEEDS_REVIEW",
+		reviewReason: strptr("LOW_CONFIDENCE"),
+		textBody:     strptr("please quote"),
+		payload:      extractionOwed,
+		confidence:   strptr("0.6200"),
+	})
+	quote := seedDraftQuote(t, db, org, rfq, nil)
+
+	rec := rig.postReprocess(t, user, org, rfq)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var body authapi.ReprocessRfqResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, authapi.RfqRender, body.ResumedStage,
+		"no outcome row + a DRAFT still means render — the checkpoint provably existed")
+	assert.Equal(t, []string{"rfq_render"}, stagedJobs(t, db, rfq))
+	assert.Equal(t, quote.String(), stagedJobArg(t, db, "rfq_render", rfq, "quote_id"))
+}
+
+// ---------------------------------------------------------------------------
 // Enqueue race — the dedupe window (spec Reprocess)
 // ---------------------------------------------------------------------------
 
