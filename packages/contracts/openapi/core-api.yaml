@@ -1270,6 +1270,14 @@ components:
           type: string
           format: uuid
           description: The RFQ's id (`app.rfq_requests.id`), stable across quote versions.
+        quoteVersionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The latest quote version's id (`app.quotes.id`) — the path
+            parameter of `POST /quotes/{id}/approve`. Null while no quote
+            version exists.
         rfqNumber:
           type: integer
           minimum: 1

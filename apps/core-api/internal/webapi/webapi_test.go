@@ -178,21 +178,25 @@ func seedRfq(t *testing.T, db *tenantdb.DB, org uuid.UUID, o rfqSeed) uuid.UUID 
 	return id
 }
 
-// seedQuote inserts one quote version against the RFQ — the detail's
-// margin triplet rides the columns while the section/fx payload rides
+// seedQuote inserts one quote version against the RFQ and returns its id
+// — the value InboxQuote.quoteVersionId must carry. The detail's margin
+// triplet rides the columns while the section/fx payload rides
 // pricing_result_json, exactly as the engine persists it.
-func seedQuote(t *testing.T, db *tenantdb.DB, org, rfqID uuid.UUID, margin, cost, price, conf string, pricingJSON []byte, approvedAt *time.Time) {
+func seedQuote(t *testing.T, db *tenantdb.DB, org, rfqID uuid.UUID, margin, cost, price, conf string, pricingJSON []byte, approvedAt *time.Time) uuid.UUID {
 	t.Helper()
+	var id uuid.UUID
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
+		return tx.QueryRow(ctx, `
 			INSERT INTO app.quotes
 				(organization_id, rfq_id, quote_number, version, status,
 				 total_cost_brl, target_margin, final_price_brl, overall_confidence,
 				 pricing_result_json, approved_at)
-			VALUES ($1, $2, $3, 1, 'DRAFT', $4, $5, $6, $7, $8, $9)`,
-			org, rfqID, "T-"+uuid.NewString()[:8], cost, margin, price, conf, pricingJSON, approvedAt)
-		return err
+			VALUES ($1, $2, $3, 1, 'DRAFT', $4, $5, $6, $7, $8, $9)
+			RETURNING id`,
+			org, rfqID, "T-"+uuid.NewString()[:8], cost, margin, price, conf, pricingJSON, approvedAt).
+			Scan(&id)
 	}))
+	return id
 }
 
 // pricingFixture is the pinned pricing.Output the detail test audits:
