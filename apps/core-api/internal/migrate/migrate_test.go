@@ -103,23 +103,81 @@ func TestSearchPathPinRoundTrip(t *testing.T) {
 	defer func() { _ = migDB.Close() }()
 
 	// The 0006/0007 family ships pinned (9 functions: its 8 plus
-	// get_user_auth_by_email); 0012 owns the 17 `= app` survivors.
+	// get_user_auth_by_email); 0012 owns the 17 `= app` survivors. The
+	// goose calls pin to 11/12 exactly — a later migration must not move
+	// this test's assertions.
 	pre := map[string]int{"search_path=app": 17, "search_path=pg_catalog, pg_temp": 9}
 	post := map[string]int{"search_path=pg_catalog, pg_temp": 26}
 
 	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 11))
 	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
+	assertDefinerPaths(t, ctx, migDB, revertedSignatures, "search_path=app")
 
-	require.NoError(t, goose.UpContext(ctx, migDB, "."))
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 12))
 	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
+	assertDefinerPaths(t, ctx, migDB, hardenedSignatures, "search_path=pg_catalog, pg_temp")
 
 	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 11))
 	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
+	// Per-signature too: counts alone cannot see a rollback that swaps
+	// paths between two functions. The convergence pin stays pinned —
+	// its canonical pre-0012 state is the hardened path.
+	assertDefinerPaths(t, ctx, migDB, revertedSignatures, "search_path=app")
+	assertDefinerPaths(t, ctx, migDB, []string{"app.get_user_auth_by_email(text)"}, "search_path=pg_catalog, pg_temp")
 	assert.True(t, qpAppCanExecute(t, ctx, migDB, "app.resolve_inbound_org(text)"),
 		"the Down must keep qp_app's EXECUTE grant")
 
-	require.NoError(t, goose.UpContext(ctx, migDB, "."))
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 12))
 	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
+}
+
+// hardenedSignatures is 0012's whole ALTER list — 17 reverts plus the
+// get_user_auth_by_email convergence pin.
+var hardenedSignatures = []string{
+	"app.resolve_inbound_org(text)",
+	"app.get_current_organization()",
+	"app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamp with time zone)",
+	"app.platform_update_connector_status(text, app.connector_status, numeric)",
+	"app.platform_insert_healing_session(text, uuid, text, text, text, text)",
+	"app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)",
+	"app.platform_delete_organization(uuid)",
+	"app.find_user_by_email(text)",
+	"app.create_login_token(uuid, text, timestamp with time zone)",
+	"app.create_session(uuid, text, timestamp with time zone)",
+	"app.revoke_session(uuid)",
+	"app.revoke_session_family_by_hash(text)",
+	"app.get_membership(uuid, uuid)",
+	"app.get_user_profile(uuid)",
+	"app.create_mail_outbox(uuid, text)",
+	"app.delete_mail_outbox(uuid)",
+	"app.list_memberships_for_email(text)",
+	"app.get_user_auth_by_email(text)",
+}
+
+// revertedSignatures is hardenedSignatures minus the convergence pin —
+// the Down restores `= app` on exactly these.
+var revertedSignatures = hardenedSignatures[:17]
+
+// assertDefinerPaths checks each signature's proconfig carries want —
+// the per-function complement to the catalog counts.
+func assertDefinerPaths(t *testing.T, ctx context.Context, db *sql.DB, sigs []string, want string) {
+	t.Helper()
+	for _, sig := range sigs {
+		assert.Equal(t, want, definerSearchPath(t, ctx, db, sig), sig)
+	}
+}
+
+// definerSearchPath reports the search_path entry of the named function's
+// proconfig — the only state 0012 changes.
+func definerSearchPath(t *testing.T, ctx context.Context, db *sql.DB, sig string) string {
+	t.Helper()
+	var path string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT c
+		FROM pg_proc p, unnest(p.proconfig) AS c
+		WHERE p.oid = $1::regprocedure
+		  AND c LIKE 'search_path=%'`, sig).Scan(&path))
+	return path
 }
 
 // definerPathCounts tallies search_path pins across the app-schema
