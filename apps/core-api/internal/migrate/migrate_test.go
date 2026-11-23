@@ -112,6 +112,13 @@ func TestSearchPathPinRoundTrip(t *testing.T) {
 	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 11))
 	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
 	assertDefinerPaths(t, ctx, migDB, revertedSignatures, "search_path=app")
+	// Recreate the legacy drift 0012 exists to repair: a database that
+	// applied 0006's pre-amendment `= app` text (d1b5fa6 landed after
+	// those databases migrated, so goose never re-ran it). Without this
+	// the convergence ALTER is a no-op the test cannot distinguish from
+	// an omitted statement.
+	execDB(t, ctx, migDB,
+		`ALTER FUNCTION app.get_user_auth_by_email(text) SET search_path = app`)
 
 	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 12))
 	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
