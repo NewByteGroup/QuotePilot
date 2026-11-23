@@ -42,15 +42,7 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	superDSN, migratorDSN, appDSN := requireUpgradeEnv(t)
 	ctx := context.Background()
 
-	dbName := "qp_v1guard_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	super := openDB(t, superDSN)
-	// Runs last: cleanups are LIFO, so every handle opened below closes
-	// before the drop; WITH (FORCE) covers any straggler anyway.
-	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
-	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
-	defer func() { _ = super.Close() }()
-
-	provisionV1Database(t, ctx, superDSN, dbName)
+	dbName := scratchDB(t, ctx, superDSN, "qp_v1guard_")
 	setupGoose(t)
 
 	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
@@ -95,52 +87,80 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 }
 
 // TestSearchPathPinRoundTrip proves 0012 both ways on a throwaway database:
-// version 11 leaves the target definer on the pre-hardening `= app` path,
-// 12 pins it, Down restores `= app` without touching the qp_app EXECUTE
-// grant (ALTER FUNCTION leaves grants alone — a drop/recreate sequence
-// would not), and re-Up pins again.
+// version 11 leaves the 17 survivor definers on `= app`, 12 pins the whole
+// surface, Down restores `= app` without touching the qp_app EXECUTE grant
+// (ALTER FUNCTION leaves grants alone — a drop/recreate sequence would
+// not), and re-Up pins again. Assertions are whole-catalog counts, not a
+// single probe function, so a missed ALTER fails the test.
 func TestSearchPathPinRoundTrip(t *testing.T) {
 	superDSN, migratorDSN, _ := requireUpgradeEnv(t)
 	ctx := context.Background()
 
-	dbName := "qp_roundtrip_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	super := openDB(t, superDSN)
-	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
-	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
-	defer func() { _ = super.Close() }()
-
-	provisionV1Database(t, ctx, superDSN, dbName)
+	dbName := scratchDB(t, ctx, superDSN, "qp_roundtrip_")
 	setupGoose(t)
 
 	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
 	defer func() { _ = migDB.Close() }()
-	const sig = "app.resolve_inbound_org(text)"
+
+	// The 0006/0007 family ships pinned (9 functions: its 8 plus
+	// get_user_auth_by_email); 0012 owns the 17 `= app` survivors.
+	pre := map[string]int{"search_path=app": 17, "search_path=pg_catalog, pg_temp": 9}
+	post := map[string]int{"search_path=pg_catalog, pg_temp": 26}
 
 	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 11))
-	assert.Equal(t, "search_path=app", definerSearchPath(t, ctx, migDB, sig))
+	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
 
 	require.NoError(t, goose.UpContext(ctx, migDB, "."))
-	assert.Equal(t, "search_path=pg_catalog, pg_temp", definerSearchPath(t, ctx, migDB, sig))
+	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
 
 	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 11))
-	assert.Equal(t, "search_path=app", definerSearchPath(t, ctx, migDB, sig))
-	assert.True(t, qpAppCanExecute(t, ctx, migDB, sig), "the Down must keep qp_app's EXECUTE grant")
+	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
+	assert.True(t, qpAppCanExecute(t, ctx, migDB, "app.resolve_inbound_org(text)"),
+		"the Down must keep qp_app's EXECUTE grant")
 
 	require.NoError(t, goose.UpContext(ctx, migDB, "."))
-	assert.Equal(t, "search_path=pg_catalog, pg_temp", definerSearchPath(t, ctx, migDB, sig))
+	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
 }
 
-// definerSearchPath reports the search_path entry of the named function's
-// proconfig — the only state 0012 changes.
-func definerSearchPath(t *testing.T, ctx context.Context, db *sql.DB, sig string) string {
+// definerPathCounts tallies search_path pins across the app-schema
+// SECURITY DEFINER surface — the whole-catalog check that catches a
+// missing ALTER anywhere, not just at one probe signature.
+func definerPathCounts(t *testing.T, ctx context.Context, db *sql.DB) map[string]int {
 	t.Helper()
-	var path string
-	require.NoError(t, db.QueryRowContext(ctx, `
-		SELECT c
-		FROM pg_proc p, unnest(p.proconfig) AS c
-		WHERE p.oid = $1::regprocedure
-		  AND c LIKE 'search_path=%'`, sig).Scan(&path))
-	return path
+	rows, err := db.QueryContext(ctx, `
+		SELECT c, count(*)
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace,
+		unnest(p.proconfig) AS c
+		WHERE n.nspname = 'app' AND p.prosecdef AND c LIKE 'search_path=%'
+		GROUP BY c`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var path string
+		var n int
+		require.NoError(t, rows.Scan(&path, &n))
+		counts[path] = n
+	}
+	require.NoError(t, rows.Err())
+	return counts
+}
+
+// scratchDB provisions a throwaway database for goose — created, seeded
+// with the init prerequisites, and registered for drop on cleanup.
+func scratchDB(t *testing.T, ctx context.Context, superDSN, prefix string) string {
+	t.Helper()
+	dbName := prefix + strings.ReplaceAll(uuid.NewString(), "-", "")
+	super := openDB(t, superDSN)
+	defer func() { _ = super.Close() }()
+	// Runs last: cleanups are LIFO, so every handle opened below closes
+	// before the drop; WITH (FORCE) covers any straggler anyway.
+	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
+	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
+	provisionV1Database(t, ctx, superDSN, dbName)
+	return dbName
 }
 
 // qpAppCanExecute checks the grant ALTER FUNCTION must not disturb.
