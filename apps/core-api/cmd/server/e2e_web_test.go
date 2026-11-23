@@ -137,7 +137,7 @@ func (r *e2eRig) jarHas(t *testing.T, c *http.Client, name string) bool {
 // shape the web client consumes.
 func readJSON[T any](t *testing.T, resp *http.Response, want int) T {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, want, resp.StatusCode, "body: %s", raw)
