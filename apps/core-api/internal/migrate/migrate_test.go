@@ -79,11 +79,69 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands. 0014 adds
-	// app.sweep_auth_mail_outbox; 0013 is the branding_json CHECK on
-	// feat/branding-json-check, so head moves 12 -> 14 here.
+	// Head version: bump when a migration lands (0014 adds
+	// app.sweep_auth_mail_outbox, the outbox dead-row sweeper).
 	assert.Equal(t, int64(14), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
+}
+
+// TestBrandingJsonObjectCheck proves 0013 both ways: a non-object
+// branding_json (array here; the read path decodes an object) is refused
+// at write time under 13, allowed again after Down to 12, refused on
+// re-Up. The column is NOT NULL so a scalar probe covers the shape.
+func TestBrandingJsonObjectCheck(t *testing.T) {
+	superDSN, migratorDSN, _ := requireUpgradeEnv(t)
+	ctx := context.Background()
+
+	dbName := scratchDB(t, ctx, superDSN, "qp_branding_")
+	setupGoose(t)
+
+	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
+	defer func() { _ = migDB.Close() }()
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 13))
+	orgID := seedOrganization(t, ctx, migDB)
+
+	write := `UPDATE app.organizations SET branding_json = '[]'::jsonb WHERE id = $1`
+	assertCheckViolation(t, ctx, migDB, write, orgID)
+
+	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 12))
+	_, err := migDB.ExecContext(ctx, write, orgID)
+	require.NoError(t, err, "the Down must restore the unconstrained column")
+
+	// The Up validates existing rows: a database carrying a non-object
+	// value refuses the upgrade loudly (SQLSTATE 23514) until an operator
+	// reconciles it — same posture as the 0002 orphan-receipt guard.
+	err = goose.UpToContext(ctx, migDB, ".", 13)
+	require.Error(t, err, "re-Up over a violating row must refuse")
+	assert.Contains(t, err.Error(), "organizations_branding_json_object")
+	execDB(t, ctx, migDB,
+		`UPDATE app.organizations SET branding_json = '{}'::jsonb WHERE id = '`+orgID+`'`)
+
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 13))
+	assertCheckViolation(t, ctx, migDB, write, orgID)
+}
+
+// assertCheckViolation requires stmt to fail under the 0013 CHECK —
+// pgx surfaces the constraint name in the error, so the assertion names
+// it rather than matching on SQLSTATE alone.
+func assertCheckViolation(t *testing.T, ctx context.Context, db *sql.DB, stmt string, orgID string) {
+	t.Helper()
+	_, err := db.ExecContext(ctx, stmt, orgID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "organizations_branding_json_object")
+}
+
+// seedOrganization inserts the minimal organization row the check test
+// updates — qp_migrator owns the table so no tenant GUC is needed.
+func seedOrganization(t *testing.T, ctx context.Context, db *sql.DB) string {
+	t.Helper()
+	var id string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		INSERT INTO app.organizations
+			(name, slug, inbound_email_alias, outbound_from_name, outbound_reply_to)
+		VALUES ('Check Test', 'check-test', 'check-test', 'T', 't@example.com')
+		RETURNING id`).Scan(&id))
+	return id
 }
 
 // TestSearchPathPinRoundTrip proves 0012 both ways on a throwaway database:
