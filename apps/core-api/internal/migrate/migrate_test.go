@@ -135,7 +135,7 @@ func definerPathCounts(t *testing.T, ctx context.Context, db *sql.DB) map[string
 		WHERE n.nspname = 'app' AND p.prosecdef AND c LIKE 'search_path=%'
 		GROUP BY c`)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	counts := map[string]int{}
 	for rows.Next() {
