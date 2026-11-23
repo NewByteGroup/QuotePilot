@@ -119,6 +119,17 @@ func (r *e2eRig) do(t *testing.T, c *http.Client, method, path, body string) *ht
 	return resp
 }
 
+// doBare fires a headerless request — the non-browser caller CheckOrigin
+// explicitly lets through (its same-origin POSTs carry no Origin).
+func (r *e2eRig) doBare(t *testing.T, c *http.Client, method, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, r.url+path, nil)
+	require.NoError(t, err)
+	resp, err := c.Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
 // jarHas reports whether the client's jar holds a named cookie for the rig
 // origin — the proof a Set-Cookie survived onto the follow-up requests.
 func (r *e2eRig) jarHas(t *testing.T, c *http.Client, name string) bool {
@@ -133,9 +144,9 @@ func (r *e2eRig) jarHas(t *testing.T, c *http.Client, name string) bool {
 // shape the web client consumes.
 func readJSON[T any](t *testing.T, resp *http.Response, want int) T {
 	t.Helper()
-	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
 	require.Equal(t, want, resp.StatusCode, "body: %s", raw)
 	var out T
 	require.NoError(t, json.Unmarshal(raw, &out))
@@ -440,5 +451,7 @@ func TestE2EWebUnauthenticated(t *testing.T) {
 	}
 	// CheckOrigin lets the Origin-less non-browser POST through —
 	// Authenticate stops it at the same uniform 401 as the reads.
-	r.e2eAssertUnauthenticated(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")
+	resp := r.doBare(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")
+	body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
+	assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error)
 }
