@@ -454,4 +454,7 @@ func TestE2EWebUnauthenticated(t *testing.T) {
 	resp := r.doBare(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")
 	body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
 	assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error)
+	// And the signed-out browser — trusted Origin, no cookies — meets the
+	// same 401 through the CheckOrigin-guarded mount.
+	r.e2eAssertUnauthenticated(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")
 }
