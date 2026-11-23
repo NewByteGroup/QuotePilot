@@ -13,10 +13,7 @@ package auth_test
 // records).
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,28 +21,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/argon2"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/testenv"
 )
-
-// encodeTestPHC is the tests' own argon2id encoder — deliberately NOT the
-// production helper: the password path must verify any well-formed PHC, so
-// seeding through an independent encode keeps the round-trip honest (the
-// parameters live inside the string; verifyPassword honors them, so a test
-// hash built with the same RFC 9106 profile is a faithful stored row).
-func encodeTestPHC(t *testing.T, password string) string {
-	t.Helper()
-	salt := make([]byte, 16)
-	_, err := rand.Read(salt)
-	require.NoError(t, err)
-	key := argon2.IDKey([]byte(password), salt, 2, 19*1024, 1, 32)
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, 19*1024, 2, 1,
-		base64.RawStdEncoding.EncodeToString(salt),
-		base64.RawStdEncoding.EncodeToString(key))
-}
 
 // TestLoginPasswordIssuesSession is the password path's happy path: the
 // verify succeeds and the answer is the session endpoint's exact shape —
@@ -56,7 +36,7 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
 	orgID := uuid.New()
-	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
 	r.q.members["ada@test.dev"] = []platform.Membership{
 		{OrgID: orgID, Name: "Acme Freight", Slug: "acme-freight", Role: platform.RoleOwner},
@@ -132,9 +112,9 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 func TestLoginPasswordStaleCredentialAborts(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
-	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
-	r.q.credsShift["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "n3w-pilot-pass")}
+	r.q.credsShift["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "n3w-pilot-pass")}
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 
@@ -156,7 +136,7 @@ func TestLoginPasswordStaleCredentialAborts(t *testing.T) {
 func TestLoginPasswordUniform401(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
-	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.creds["nopw@test.dev"] = credRec{userID: uuid.New()} // NULL hash
 
 	unknown := r.postLogin(t, `{"email":"stranger@test.dev","password":"x"}`)
@@ -188,7 +168,7 @@ func TestLoginPasswordUniform401(t *testing.T) {
 func TestLoginPasswordFieldShapes(t *testing.T) {
 	seed := func(t *testing.T, r *rig, userID uuid.UUID) {
 		r.q.users["ada@test.dev"] = userID
-		r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+		r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 		r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
 		r.q.members["ada@test.dev"] = []platform.Membership{
 			{OrgID: uuid.New(), Name: "Acme Freight", Slug: "acme-freight", Role: platform.RoleOwner},
@@ -264,7 +244,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 // magic-link request — so it answers 401 and stages no send.
 func TestLoginPasswordEmptyStringRoutesToPasswordPath(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
-	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":""}`)
 
@@ -280,7 +260,7 @@ func TestLoginPasswordEmptyStringRoutesToPasswordPath(t *testing.T) {
 // the same order the magic-link path pays.
 func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 	r := newRig(t, 100, 1)
-	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 
 	require.Equal(t, http.StatusUnauthorized,
 		r.postLogin(t, `{"email":"ada@test.dev","password":"wrong"}`).Code,
@@ -295,7 +275,7 @@ func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 	// The IP bucket is spent the same way — at capacity 1 the second caller
 	// from the same address is denied even for a different recipient.
 	r2 := newRig(t, 1, 100)
-	r2.q.creds["grace@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "pw")}
+	r2.q.creds["grace@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "pw")}
 	require.Equal(t, http.StatusUnauthorized,
 		r2.postLogin(t, `{"email":"grace@test.dev","password":"wrong"}`).Code)
 	assert.Equal(t, http.StatusTooManyRequests,
@@ -309,7 +289,7 @@ func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 // server fault is not an enumeration signal, and no cookie may leak.
 func TestLoginPasswordFailuresAreUniform500(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
-	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.fail["get_user_auth_by_email"] = errBoom
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)

@@ -12,10 +12,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -31,7 +28,6 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/argon2"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
@@ -137,7 +133,7 @@ func (r *e2eRig) jarHas(t *testing.T, c *http.Client, name string) bool {
 // shape the web client consumes.
 func readJSON[T any](t *testing.T, resp *http.Response, want int) T {
 	t.Helper()
-	defer func() { _ = resp.Body.Close() }()
+	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, want, resp.StatusCode, "body: %s", raw)
@@ -157,23 +153,6 @@ func cookieNamed(cookies []*http.Cookie, name string) *http.Cookie {
 	return nil
 }
 
-// e2ePHC is this suite's own argon2id PHC encoder — deliberately
-// independent of internal/auth's hashPassword, the same stance the auth
-// package's encodeTestPHC takes: the RFC 9106 memory-constrained profile
-// seeds a stored row verifyPassword must honor, so a broken production
-// verify cannot seed-verify itself green.
-func e2ePHC(t *testing.T, password string) string {
-	t.Helper()
-	salt := make([]byte, 16)
-	_, err := rand.Read(salt)
-	require.NoError(t, err)
-	key := argon2.IDKey([]byte(password), salt, 2, 19*1024, 1, 32)
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, 19*1024, 2, 1,
-		base64.RawStdEncoding.EncodeToString(salt),
-		base64.RawStdEncoding.EncodeToString(key))
-}
-
 // seedE2EUser inserts the Layer A triple — user row, password credential,
 // membership — through qp_migrator, the only role that may write Layer A.
 // The hash lands via the same UPDATE the password suite uses.
@@ -186,7 +165,8 @@ func seedE2EUser(t *testing.T, pool *pgxpool.Pool, org uuid.UUID, role, prefix, 
 		`INSERT INTO app.users (email, full_name) VALUES ($1, $2) RETURNING id`,
 		email, "E2E "+prefix).Scan(&id))
 	_, err := pool.Exec(ctx,
-		`UPDATE app.users SET password_hash = $1 WHERE id = $2`, e2ePHC(t, password), id)
+		`UPDATE app.users SET password_hash = $1 WHERE id = $2`,
+		testenv.PasswordHashPHC(t, password), id)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx, `
 		INSERT INTO app.organization_memberships (organization_id, user_id, role)
@@ -238,12 +218,165 @@ func seedE2EQuote(t *testing.T, db *tenantdb.DB, org, rfq uuid.UUID) uuid.UUID {
 	return id
 }
 
+// e2eLogin posts the credential login: asserts the switcher body's
+// identity, the cookie pair's pinned attributes and the jar carrying
+// qp_access onward, then returns the body for membership asserts.
+func (r *e2eRig) e2eLogin(t *testing.T, c *http.Client, email, password string) authapi.SessionResponse {
+	t.Helper()
+	resp := r.do(t, c, http.MethodPost, "/auth/login",
+		`{"email":"`+email+`","password":"`+password+`"}`)
+	body := readJSON[authapi.SessionResponse](t, resp, http.StatusOK)
+	access := cookieNamed(resp.Cookies(), "qp_access")
+	require.NotNil(t, access, "login must set qp_access")
+	assert.True(t, access.HttpOnly)
+	assert.Equal(t, "/", access.Path)
+	assert.Equal(t, http.SameSiteLaxMode, access.SameSite)
+	assert.True(t, access.Secure)
+	refresh := cookieNamed(resp.Cookies(), "qp_refresh")
+	require.NotNil(t, refresh, "login must set qp_refresh")
+	assert.Equal(t, "/auth", refresh.Path)
+	assert.Equal(t, http.SameSiteStrictMode, refresh.SameSite)
+	require.True(t, r.jarHas(t, c, "qp_access"), "the jar must carry qp_access onward")
+	return body
+}
+
+// e2eAssertBootstrap runs the two bootstrap reads the web app fires after
+// login — /me (flattened profile + switcher list) and /v1/session (active
+// org + user block) — asserting the fields the client renders.
+func (r *e2eRig) e2eAssertBootstrap(t *testing.T, c *http.Client, userID uuid.UUID, email string, org uuid.UUID) {
+	t.Helper()
+	me := readJSON[authapi.MeResponse](t,
+		r.do(t, c, http.MethodGet, "/me", ""), http.StatusOK)
+	assert.Equal(t, userID.String(), me.ID)
+	assert.Equal(t, email, me.Email)
+	require.Len(t, me.Memberships, 1)
+	assert.Equal(t, org.String(), me.Memberships[0].OrganizationID)
+	assert.Equal(t, authapi.PRICINGANALYST, me.Memberships[0].Role)
+	sess := readJSON[authapi.Session](t,
+		r.do(t, c, http.MethodGet, "/v1/session", ""), http.StatusOK)
+	assert.Equal(t, org, uuid.UUID(sess.Organization.ID))
+	require.Len(t, sess.Organizations, 1)
+	assert.Equal(t, authapi.Operator, sess.User.Role,
+		"PRICING_ANALYST rolls onto the web's two-value role as operator")
+	assert.Equal(t, 1, sess.User.OrganizationCount)
+}
+
+// e2eStampOrgCookie runs the session bootstrap so the jar receives qp_org
+// — the bootstrap's own org-stamp — for callers that only need the tenant
+// transport, not the payload asserts.
+func (r *e2eRig) e2eStampOrgCookie(t *testing.T, c *http.Client) {
+	t.Helper()
+	readJSON[authapi.Session](t,
+		r.do(t, c, http.MethodGet, "/v1/session", ""), http.StatusOK)
+	require.True(t, r.jarHas(t, c, "qp_org"), "the bootstrap must stamp qp_org")
+}
+
+// e2eSwitchOrg posts the org switch and asserts the Session answer plus
+// the qp_org write — the transport the org-scoped reads then resolve on.
+func (r *e2eRig) e2eSwitchOrg(t *testing.T, c *http.Client, org uuid.UUID) {
+	t.Helper()
+	resp := r.do(t, c, http.MethodPost, "/v1/session/organization",
+		`{"organizationId":"`+org.String()+`"}`)
+	switched := readJSON[authapi.Session](t, resp, http.StatusOK)
+	assert.Equal(t, org, uuid.UUID(switched.Organization.ID))
+	orgCookie := cookieNamed(resp.Cookies(), "qp_org")
+	require.NotNil(t, orgCookie, "the switch must write qp_org")
+	assert.Equal(t, org.String(), orgCookie.Value)
+	assert.True(t, orgCookie.HttpOnly)
+	assert.Equal(t, http.SameSiteLaxMode, orgCookie.SameSite)
+	require.True(t, r.jarHas(t, c, "qp_org"), "the jar must carry qp_org onward")
+}
+
+// e2eAssertInbox reads the inbox and asserts the seeded RFQ is the single
+// ready_to_send row — the fields the web client's list renders.
+func (r *e2eRig) e2eAssertInbox(t *testing.T, c *http.Client, rfq uuid.UUID, number int) {
+	t.Helper()
+	page := readJSON[authapi.InboxQuotePage](t,
+		r.do(t, c, http.MethodGet, "/v1/inbox/quotes", ""), http.StatusOK)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, rfq, uuid.UUID(page.Items[0].ID))
+	assert.Equal(t, number, page.Items[0].RfqNumber)
+	assert.Equal(t, authapi.ReadyToSend, page.Items[0].Status)
+	assert.Equal(t, "E2E Customer", page.Items[0].CustomerName)
+	assert.Equal(t, 1, page.StatusCounts.ReadyToSend)
+}
+
+// e2eAssertInboxEmpty reads the inbox and asserts nothing surfaced — the
+// cross-tenant leak check for a tenant with no rows of its own.
+func (r *e2eRig) e2eAssertInboxEmpty(t *testing.T, c *http.Client) {
+	t.Helper()
+	page := readJSON[authapi.InboxQuotePage](t,
+		r.do(t, c, http.MethodGet, "/v1/inbox/quotes", ""), http.StatusOK)
+	assert.Empty(t, page.Items, "another tenant's RFQ must not leak into the inbox")
+	assert.Zero(t, page.StatusCounts.All)
+}
+
+// e2eAssertDetail reads the audit page and asserts the quote member and
+// the pricing block the web client's split-screen decodes.
+func (r *e2eRig) e2eAssertDetail(t *testing.T, c *http.Client, rfq uuid.UUID) {
+	t.Helper()
+	detail := readJSON[authapi.QuoteDetail](t,
+		r.do(t, c, http.MethodGet, "/v1/quotes/"+rfq.String(), ""), http.StatusOK)
+	assert.Equal(t, rfq, uuid.UUID(detail.Quote.ID))
+	assert.Equal(t, "E2E Customer", detail.Quote.CustomerName)
+	assert.Equal(t, "e2e-cust@test.dev", string(detail.Email.From))
+	require.NotNil(t, detail.Pricing, "a priced quote must carry its composition")
+	assert.Equal(t, authapi.Money{Amount: "100", Currency: "BRL"}, detail.Pricing.TotalCost)
+	assert.Equal(t, "15.00", detail.Pricing.MarginPercent)
+}
+
+// e2eAssertDetail404 asserts the audit route answers a foreign RFQ id
+// with the uniform not_found — indistinguishable from an unknown one.
+func (r *e2eRig) e2eAssertDetail404(t *testing.T, c *http.Client, rfq uuid.UUID) {
+	t.Helper()
+	resp := r.do(t, c, http.MethodGet, "/v1/quotes/"+rfq.String(), "")
+	body := readJSON[authapi.Error](t, resp, http.StatusNotFound)
+	assert.Equal(t, authapi.ErrorCodeNotFound, body.Error,
+		"a cross-tenant RFQ id is indistinguishable from an unknown one")
+}
+
+// e2eApproveQuote posts the approval and asserts the stored-stamp body
+// plus the S5 job the one-tx enqueue leaves queued in river_job — then
+// registers the cleanup that removes that row, the convention
+// enqueue_test.go's insert proof keeps (the queue ends as it began).
+func (r *e2eRig) e2eApproveQuote(t *testing.T, c *http.Client, quote, user uuid.UUID) {
+	t.Helper()
+	resp := r.do(t, c, http.MethodPost, "/quotes/"+quote.String()+"/approve", "")
+	approval := readJSON[authapi.ApproveQuoteResponse](t, resp, http.StatusOK)
+	assert.Equal(t, quote.String(), approval.ID)
+	assert.Equal(t, authapi.DRAFT, approval.Status,
+		"approval leaves the version DRAFT — the send worker owns the flip")
+	assert.Equal(t, user.String(), approval.ApprovedByUserID)
+	assert.False(t, approval.ApprovedAt.IsZero())
+	var staged int
+	require.NoError(t, r.db.Pool().QueryRow(context.Background(), `
+		SELECT count(*) FROM river.river_job
+		WHERE kind = 'quote_send' AND args->>'quote_id' = $1`, quote.String()).Scan(&staged))
+	assert.Equal(t, 1, staged, "the approve tx must land the S5 job in river_job")
+	t.Cleanup(func() {
+		_, err := r.db.Pool().Exec(context.Background(),
+			`DELETE FROM river.river_job WHERE kind = 'quote_send' AND args->>'quote_id' = $1`,
+			quote.String())
+		assert.NoError(t, err, "the staged river_job row must be removable as qp_app")
+	})
+}
+
+// e2eAssertUnauthenticated fires one cookieless request and asserts the
+// middleware's uniform {"error":"unauthenticated"} — the fail-closed
+// contract the browser's login redirect depends on.
+func (r *e2eRig) e2eAssertUnauthenticated(t *testing.T, c *http.Client, method, path string) {
+	t.Helper()
+	resp := r.do(t, c, method, path, "")
+	body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
+	assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error, "%s %s", method, path)
+}
+
 // TestE2EWebHappyPath walks the web app's bootstrap-to-approval sequence
 // against the real wiring, in order: password login → /me → session
-// bootstrap → org switch → inbox → audit detail → approve. Each step
-// asserts the status plus the fields the web client actually consumes —
-// the point is the wire contract the browser decodes, not handler-level
-// shortcuts. The jar carries qp_access after (a) and qp_org after (d), so
+// bootstrap → org switch → inbox → audit detail → approve. Each helper
+// asserts the status plus the fields the web client consumes — the point
+// is the wire contract the browser decodes, not handler-level shortcuts.
+// The jar carries qp_access after login and qp_org after the switch, so
 // the org-scoped steps run on cookie transport alone, exactly as the
 // browser does.
 func TestE2EWebHappyPath(t *testing.T) {
@@ -256,94 +389,17 @@ func TestE2EWebHappyPath(t *testing.T) {
 	quoteID := seedE2EQuote(t, r.db, org, rfqID)
 	client := newE2EClient(t)
 
-	// a. Credential login: the SessionResponse switcher body plus the
-	// qp_access/qp_refresh pair with their pinned attributes.
-	resp := r.do(t, client, http.MethodPost, "/auth/login",
-		`{"email":"`+email+`","password":"s3cret-pilot"}`)
-	login := readJSON[authapi.SessionResponse](t, resp, http.StatusOK)
+	login := r.e2eLogin(t, client, email, "s3cret-pilot")
 	assert.Equal(t, userID.String(), login.Profile.ID)
 	assert.Equal(t, email, login.Profile.Email)
 	require.Len(t, login.Memberships, 1)
 	assert.Equal(t, org.String(), login.Memberships[0].OrganizationID)
-	access := cookieNamed(resp.Cookies(), "qp_access")
-	require.NotNil(t, access, "login must set qp_access")
-	assert.True(t, access.HttpOnly)
-	assert.Equal(t, "/", access.Path)
-	assert.Equal(t, http.SameSiteLaxMode, access.SameSite)
-	assert.True(t, access.Secure)
-	refresh := cookieNamed(resp.Cookies(), "qp_refresh")
-	require.NotNil(t, refresh, "login must set qp_refresh")
-	assert.Equal(t, "/auth", refresh.Path)
-	assert.Equal(t, http.SameSiteStrictMode, refresh.SameSite)
-	require.True(t, r.jarHas(t, client, "qp_access"), "the jar must carry qp_access onward")
 
-	// b. /me — the flattened profile plus the switcher membership list.
-	me := readJSON[authapi.MeResponse](t,
-		r.do(t, client, http.MethodGet, "/me", ""), http.StatusOK)
-	assert.Equal(t, userID.String(), me.ID)
-	assert.Equal(t, email, me.Email)
-	require.Len(t, me.Memberships, 1)
-	assert.Equal(t, org.String(), me.Memberships[0].OrganizationID)
-	assert.Equal(t, authapi.PRICINGANALYST, me.Memberships[0].Role)
-
-	// c. /v1/session — the bootstrap's active org plus the user block.
-	sess := readJSON[authapi.Session](t,
-		r.do(t, client, http.MethodGet, "/v1/session", ""), http.StatusOK)
-	assert.Equal(t, org, uuid.UUID(sess.Organization.ID))
-	require.Len(t, sess.Organizations, 1)
-	assert.Equal(t, authapi.Operator, sess.User.Role,
-		"PRICING_ANALYST rolls onto the web's two-value role as operator")
-	assert.Equal(t, 1, sess.User.OrganizationCount)
-
-	// d. Org switch — writes qp_org, the browser's tenant transport for
-	// every org-scoped read and the approve POST below.
-	resp = r.do(t, client, http.MethodPost, "/v1/session/organization",
-		`{"organizationId":"`+org.String()+`"}`)
-	switched := readJSON[authapi.Session](t, resp, http.StatusOK)
-	assert.Equal(t, org, uuid.UUID(switched.Organization.ID))
-	orgCookie := cookieNamed(resp.Cookies(), "qp_org")
-	require.NotNil(t, orgCookie, "the switch must write qp_org")
-	assert.Equal(t, org.String(), orgCookie.Value)
-	assert.True(t, orgCookie.HttpOnly)
-	assert.Equal(t, http.SameSiteLaxMode, orgCookie.SameSite)
-	require.True(t, r.jarHas(t, client, "qp_org"), "the jar must carry qp_org onward")
-
-	// e. Inbox — the seeded READY RFQ surfaces as ready_to_send.
-	page := readJSON[authapi.InboxQuotePage](t,
-		r.do(t, client, http.MethodGet, "/v1/inbox/quotes", ""), http.StatusOK)
-	require.Len(t, page.Items, 1)
-	assert.Equal(t, rfqID, uuid.UUID(page.Items[0].ID))
-	assert.Equal(t, 7001, page.Items[0].RfqNumber)
-	assert.Equal(t, authapi.ReadyToSend, page.Items[0].Status)
-	assert.Equal(t, "E2E Customer", page.Items[0].CustomerName)
-	assert.Equal(t, 1, page.StatusCounts.ReadyToSend)
-
-	// f. Audit detail — the quote member is the inbox row's own id (the
-	// RFQ id), and the pricing block decodes the pinned engine output.
-	detail := readJSON[authapi.QuoteDetail](t,
-		r.do(t, client, http.MethodGet, "/v1/quotes/"+rfqID.String(), ""), http.StatusOK)
-	assert.Equal(t, rfqID, uuid.UUID(detail.Quote.ID))
-	assert.Equal(t, "E2E Customer", detail.Quote.CustomerName)
-	assert.Equal(t, "e2e-cust@test.dev", string(detail.Email.From))
-	require.NotNil(t, detail.Pricing, "a priced quote must carry its composition")
-	assert.Equal(t, authapi.Money{Amount: "100", Currency: "BRL"}, detail.Pricing.TotalCost)
-	assert.Equal(t, "15.00", detail.Pricing.MarginPercent)
-
-	// g. Approve — qp_org alone resolves the tenant; the stamp, audit row
-	// and quote_send job commit in the one tenant tx.
-	resp = r.do(t, client, http.MethodPost, "/quotes/"+quoteID.String()+"/approve", "")
-	approval := readJSON[authapi.ApproveQuoteResponse](t, resp, http.StatusOK)
-	assert.Equal(t, quoteID.String(), approval.ID)
-	assert.Equal(t, authapi.DRAFT, approval.Status,
-		"approval leaves the version DRAFT — the send worker owns the flip")
-	assert.Equal(t, userID.String(), approval.ApprovedByUserID)
-	assert.False(t, approval.ApprovedAt.IsZero())
-
-	var staged int
-	require.NoError(t, r.db.Pool().QueryRow(context.Background(), `
-		SELECT count(*) FROM river.river_job
-		WHERE kind = 'quote_send' AND args->>'quote_id' = $1`, quoteID.String()).Scan(&staged))
-	assert.Equal(t, 1, staged, "the approve tx must land the S5 job in river_job")
+	r.e2eAssertBootstrap(t, client, userID, email, org)
+	r.e2eSwitchOrg(t, client, org)
+	r.e2eAssertInbox(t, client, rfqID, 7001)
+	r.e2eAssertDetail(t, client, rfqID)
+	r.e2eApproveQuote(t, client, quoteID, userID)
 }
 
 // TestE2EWebTenantIsolation drives the same browser flow for a second
@@ -362,28 +418,15 @@ func TestE2EWebTenantIsolation(t *testing.T) {
 	seedE2EQuote(t, r.db, orgA, rfqA)
 
 	client := newE2EClient(t)
-	resp := r.do(t, client, http.MethodPost, "/auth/login",
-		`{"email":"`+emailB+`","password":"pw-b"}`)
-	readJSON[authapi.SessionResponse](t, resp, http.StatusOK)
-	// The bootstrap stamps qp_org=B, so the reads resolve B's tenant.
-	readJSON[authapi.Session](t,
-		r.do(t, client, http.MethodGet, "/v1/session", ""), http.StatusOK)
-
-	page := readJSON[authapi.InboxQuotePage](t,
-		r.do(t, client, http.MethodGet, "/v1/inbox/quotes", ""), http.StatusOK)
-	assert.Empty(t, page.Items, "org A's RFQ must not leak into B's inbox")
-	assert.Zero(t, page.StatusCounts.All)
-
-	resp = r.do(t, client, http.MethodGet, "/v1/quotes/"+rfqA.String(), "")
-	errBody := readJSON[authapi.Error](t, resp, http.StatusNotFound)
-	assert.Equal(t, authapi.ErrorCodeNotFound, errBody.Error,
-		"a cross-tenant RFQ id is indistinguishable from an unknown one")
+	r.e2eLogin(t, client, emailB, "pw-b")
+	r.e2eStampOrgCookie(t, client)
+	r.e2eAssertInboxEmpty(t, client)
+	r.e2eAssertDetail404(t, client, rfqA)
 }
 
 // TestE2EWebUnauthenticated pins the uniform 401 on every protected route:
 // a cookieless client gets the middleware's {"error":"unauthenticated"}
-// before any handler runs — the fail-closed contract the browser's
-// login-redirect depends on.
+// before any handler runs — reads and the approve write alike.
 func TestE2EWebUnauthenticated(t *testing.T) {
 	r := newE2ERig(t)
 	bare := &http.Client{} // no jar: nothing can be carried
@@ -393,15 +436,9 @@ func TestE2EWebUnauthenticated(t *testing.T) {
 		"/v1/inbox/quotes",
 		"/v1/quotes/" + uuid.NewString(),
 	} {
-		resp, err := bare.Get(r.url + path)
-		require.NoError(t, err)
-		body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
-		assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error, path)
+		r.e2eAssertUnauthenticated(t, bare, http.MethodGet, path)
 	}
-
-	// The approve POST denies identically — CheckOrigin lets the
-	// headerless non-browser shape through, Authenticate stops it.
-	resp := r.do(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve", "")
-	body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
-	assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error)
+	// CheckOrigin lets the Origin-less non-browser POST through —
+	// Authenticate stops it at the same uniform 401 as the reads.
+	r.e2eAssertUnauthenticated(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")
 }
