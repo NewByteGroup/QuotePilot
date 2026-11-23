@@ -73,6 +73,7 @@ const (
 	ErrorCodeNotFound            ErrorCode = "not_found"
 	ErrorCodeQuoteSuperseded     ErrorCode = "quote_superseded"
 	ErrorCodeRateLimited         ErrorCode = "rate_limited"
+	ErrorCodeRfqBusy             ErrorCode = "rfq_busy"
 	ErrorCodeRfqNotParked        ErrorCode = "rfq_not_parked"
 	ErrorCodeUnauthenticated     ErrorCode = "unauthenticated"
 )
@@ -95,6 +96,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeQuoteSuperseded:
 		return true
 	case ErrorCodeRateLimited:
+		return true
+	case ErrorCodeRfqBusy:
 		return true
 	case ErrorCodeRfqNotParked:
 		return true
@@ -358,9 +361,12 @@ type Error struct {
 	// 8.1 leaves the code unpinned — this contract fixes it).
 	// `quote_superseded` and `negative_margin` are the two conflict
 	// refusals of quote approval (spec 2026-11-11 section 4);
-	// `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
-	// RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
-	// the 409 body alongside the code).
+	// `rfq_not_parked` is the permanent conflict refusal of RFQ
+	// reprocess — the RFQ is not in a reprocessable state (its
+	// current status rides the 409 body alongside the code).
+	// `rfq_busy` is the transient one — a live worker holds the
+	// DRAFT quote's row lock, so retry shortly even when `status`
+	// still reads parked.
 	Error ErrorCode `json:"error"`
 }
 
@@ -371,9 +377,12 @@ type Error struct {
 // 8.1 leaves the code unpinned — this contract fixes it).
 // `quote_superseded` and `negative_margin` are the two conflict
 // refusals of quote approval (spec 2026-11-11 section 4);
-// `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
-// RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
-// the 409 body alongside the code).
+// `rfq_not_parked` is the permanent conflict refusal of RFQ
+// reprocess — the RFQ is not in a reprocessable state (its
+// current status rides the 409 body alongside the code).
+// `rfq_busy` is the transient one — a live worker holds the
+// DRAFT quote's row lock, so retry shortly even when `status`
+// still reads parked.
 type ErrorCode string
 
 // ExtractedField defines model for ExtractedField.
@@ -629,9 +638,12 @@ type ReprocessConflict struct {
 	// 8.1 leaves the code unpinned — this contract fixes it).
 	// `quote_superseded` and `negative_margin` are the two conflict
 	// refusals of quote approval (spec 2026-11-11 section 4);
-	// `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
-	// RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
-	// the 409 body alongside the code).
+	// `rfq_not_parked` is the permanent conflict refusal of RFQ
+	// reprocess — the RFQ is not in a reprocessable state (its
+	// current status rides the 409 body alongside the code).
+	// `rfq_busy` is the transient one — a live worker holds the
+	// DRAFT quote's row lock, so retry shortly even when `status`
+	// still reads parked.
 	Error ErrorCode `json:"error"`
 
 	// Status The RFQ's current `app.rfq_status` — `RECEIVED`, `PARSING`,

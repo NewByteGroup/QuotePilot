@@ -143,16 +143,18 @@ func pdfFor(org uuid.UUID, rendered bool) *string {
 	return strptr("tenants/" + org.String() + "/quotes/x_v1.pdf")
 }
 
-// assertBusy409 posts the reprocess and pins the shared refusal shape:
-// 409 with rfq_not_parked and the RFQ's current status riding the body,
-// nothing staged (the refusal writes nothing and never enqueues).
+// assertBusy409 posts the reprocess and pins the transient refusal
+// shape: 409 with rfq_busy — the code that tells a contended quote
+// apart from the permanent rfq_not_parked — and the RFQ's current
+// status riding the body; nothing staged (the refusal writes nothing
+// and never enqueues).
 func (f busyFixture) assertBusy409(t *testing.T, wantStatus string) {
 	t.Helper()
 	rec := f.rig.postReprocess(t, f.user, f.org, f.rfq)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	var body authapi.ReprocessConflict
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, authapi.ErrorCodeRfqNotParked, body.Error)
+	assert.Equal(t, authapi.ErrorCodeRfqBusy, body.Error)
 	assert.Equal(t, wantStatus, body.Status)
 	assert.Empty(t, stagedJobs(t, f.db, f.rfq), "a busy refusal enqueues nothing")
 }

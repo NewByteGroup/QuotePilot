@@ -667,23 +667,24 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           description: |
-            `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` —
-            two refusals share this code. The permanent one: the RFQ is
-            not in a reprocessable state (only
-            `NEEDS_REVIEW`/`FAILED`, or `READY` with a `DRAFT` quote
-            still awaiting its first render, are); `status` reports its
-            current `app.rfq_status` value so the client can refresh
-            its row — including the active status an accepted resume
-            is still running under. The transient one: a live worker
-            holds the `DRAFT` quote's row lock (the NOWAIT probe found
-            it), so a worker owns downstream state for now — retry
-            shortly. That refusal can carry a parked-looking `status`
-            (`NEEDS_REVIEW`/`FAILED` still on the row), which is what
-            distinguishes it from the permanent not-parked refusal
-            above. A reprocess inside `REPROCESS_MIN_INTERVAL` of an
-            accepted one answers 429, not 409 — the interval check runs
-            before the status gate and answers unconditionally,
-            whatever the RFQ's current status.
+            Two refusals share this status, distinguished by `error`.
+            `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` is
+            the permanent one: the RFQ is not in a reprocessable state
+            (only `NEEDS_REVIEW`/`FAILED`, or `READY` with a `DRAFT`
+            quote still awaiting its first render, are); `status`
+            reports its current `app.rfq_status` value so the client
+            can refresh its row — including the active status an
+            accepted resume is still running under.
+            `{"error":"rfq_busy","status":"<app.rfq_status>"}` is the
+            transient one: a live worker holds the `DRAFT` quote's row
+            lock (the NOWAIT probe found it), so a worker owns
+            downstream state for now — retry shortly. It can carry a
+            parked-looking `status` (`NEEDS_REVIEW`/`FAILED` still on
+            the row), which is why the code, not the status, says which
+            refusal it is. A reprocess inside `REPROCESS_MIN_INTERVAL`
+            of an accepted one answers 429, not 409 — the interval
+            check runs before the status gate and answers
+            unconditionally, whatever the RFQ's current status.
           content:
             application/json:
               schema:
@@ -767,9 +768,12 @@ components:
         8.1 leaves the code unpinned — this contract fixes it).
         `quote_superseded` and `negative_margin` are the two conflict
         refusals of quote approval (spec 2026-11-11 section 4);
-        `rfq_not_parked` is the conflict refusal of RFQ reprocess — the
-        RFQ is not in `NEEDS_REVIEW`/`FAILED` (its current status rides
-        the 409 body alongside the code).
+        `rfq_not_parked` is the permanent conflict refusal of RFQ
+        reprocess — the RFQ is not in a reprocessable state (its
+        current status rides the 409 body alongside the code).
+        `rfq_busy` is the transient one — a live worker holds the
+        DRAFT quote's row lock, so retry shortly even when `status`
+        still reads parked.
       enum:
         - bad_request
         - unauthenticated
@@ -781,6 +785,7 @@ components:
         - quote_superseded
         - negative_margin
         - rfq_not_parked
+        - rfq_busy
     Error:
       type: object
       additionalProperties: false

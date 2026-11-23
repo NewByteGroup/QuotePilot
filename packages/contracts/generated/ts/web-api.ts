@@ -631,7 +631,7 @@ export interface components {
             error: string;
         };
         ReprocessConflict: {
-            /** @description Always `rfq_not_parked`. */
+            /** @description `rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly). */
             error: string;
             /** @description The RFQ's current `app.rfq_status` (verbatim, not an enum). */
             status: string;
@@ -1070,7 +1070,7 @@ export interface operations {
                     "application/json": components["schemas"]["ReprocessError"];
                 };
             };
-            /** @description The RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. The same `rfq_not_parked` also answers a contended `DRAFT` quote (a live worker holds its row lock) — "a worker owns downstream state, retry shortly" — possibly with a parked-looking `status`, which distinguishes it from the permanent not-parked refusal. */
+            /** @description Two refusals, distinguished by `error`. `rfq_not_parked` is the permanent one — the RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. `rfq_busy` is the transient one — a live worker holds the `DRAFT` quote's row lock, so a worker owns downstream state for now and the client should retry shortly; it can carry a parked-looking `status`, which is why the code, not the status, says which refusal it is. */
             409: {
                 headers: {
                     [name: string]: unknown;

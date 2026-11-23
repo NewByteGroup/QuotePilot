@@ -92,6 +92,7 @@ const (
 	kindAccepted reprocessKind = iota
 	kindNotFound
 	kindNotParked
+	kindBusy
 	kindRateLimited
 )
 
@@ -184,20 +185,27 @@ func (e *Endpoints) reprocess(
 			return nil
 		}
 		reprocessable := r.Status == statusNeedsReview || r.Status == statusFailed
+		busy := false
 		if !reprocessable && r.Status == statusReady {
 			// S4's terminal failure strands the RFQ at READY with an
 			// unrendered DRAFT — exactly the shape a reprocess recovers.
 			// Any other READY shape (no DRAFT, or a rendered one) 409s.
 			// busy is a contended DRAFT: a live worker's tx owns the
 			// quote row (NOWAIT never waits — see draftRenderState), so
-			// the honest answer is the same 409, not a block.
-			awaiting, busy, err := jobs.DraftAwaitingRender(ctx, tx, r.ID)
+			// the honest answer is the transient 409 rfq_busy, not a
+			// block and not the permanent rfq_not_parked.
+			var awaiting bool
+			awaiting, busy, err = jobs.DraftAwaitingRender(ctx, tx, r.ID)
 			if err != nil {
 				return err
 			}
 			reprocessable = awaiting && !busy
 		}
-		if !reprocessable {
+		switch {
+		case busy:
+			out = reprocessOutcome{kind: kindBusy, status: r.Status}
+			return nil
+		case !reprocessable:
 			out = reprocessOutcome{kind: kindNotParked, status: r.Status}
 			return nil
 		}
@@ -267,9 +275,9 @@ func (e *Endpoints) resume(
 	d, err := jobs.DecideResume(ctx, tx, r.ID, r.shellFacts(), r.Payload, r.ConfidenceSet, r.ReceivedAt)
 	if errors.Is(err, jobs.ErrQuoteBusy) {
 		// A contended DRAFT means a live worker owns downstream state —
-		// the same refusal a not-parked RFQ gets, not a fault worth a
-		// 500. Nothing was written yet, so the refusal rolls back clean.
-		*out = reprocessOutcome{kind: kindNotParked, status: r.Status}
+		// the transient rfq_busy refusal, not a fault worth a 500.
+		// Nothing was written yet, so the refusal rolls back clean.
+		*out = reprocessOutcome{kind: kindBusy, status: r.Status}
 		return nil
 	}
 	if err != nil {
@@ -383,6 +391,11 @@ func (o reprocessOutcome) response() authapi.ReprocessRfqResponseObject {
 	case kindNotParked:
 		return authapi.ReprocessRfq409JSONResponse{
 			Error:  authapi.ErrorCodeRfqNotParked,
+			Status: o.status,
+		}
+	case kindBusy:
+		return authapi.ReprocessRfq409JSONResponse{
+			Error:  authapi.ErrorCodeRfqBusy,
 			Status: o.status,
 		}
 	case kindRateLimited:
