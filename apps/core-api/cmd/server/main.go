@@ -378,14 +378,16 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 // startJobs builds the River client over the qp_app pool — the driver
 // shares the request path's connections — with the worker registry: the
 // spike's echo_tenant plus auth_mail_send, the durable magic-link delivery
-// whose outbox the login transaction stages (migration 0004), and
-// rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
-// is disabled (its fast schedule was a spike affordance; production never
-// owns it).
+// whose outbox the login transaction stages (migration 0004),
+// auth_mail_sweep, the periodic pass that deletes the outbox rows the
+// per-job path leaves dead (migration 0014), and rfq_ingest, stage S1 of
+// the quote pipeline (spec section 4). The reindexer is disabled (its
+// fast schedule was a spike affordance; production never owns it).
 func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string, engine aiengine.Client, fetcher carrier.Fetcher) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
+	river.AddWorker(workers, jobs.NewAuthMailSweepWorker(store))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
 	extract := jobs.NewRfqExtractWorker(db, engine, storage)
@@ -414,6 +416,16 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 			jobs.QueuePrice:    {MaxWorkers: 4},
 			jobs.QueueRender:   {MaxWorkers: 4},
 			jobs.QueueSend:     {MaxWorkers: 4},
+		},
+		// The dead-outbox sweeper: platform maintenance, not tenant work,
+		// so it rides the default queue (migration 0014). PeriodicInterval,
+		// not a cron string — NewPeriodicJob takes a PeriodicSchedule, and
+		// pinning the phase with a robfig dependency buys nothing for rows
+		// that are already dead.
+		PeriodicJobs: []*river.PeriodicJob{
+			river.NewPeriodicJob(river.PeriodicInterval(time.Hour), func() (river.JobArgs, *river.InsertOpts) {
+				return jobs.AuthMailSweepArgs{}, nil
+			}, nil),
 		},
 		Workers:           workers,
 		Schema:            "river",

@@ -435,6 +435,65 @@ func TestStoreMailOutboxConsumedToken(t *testing.T) {
 	assert.False(t, ok, "a consumed token's pending send must read as done")
 }
 
+// TestStoreMailOutboxSweepDeadRows proves the migration-0014 sweeper takes
+// both dead-row shapes — a consumed token's row (the spent link
+// read_mail_outbox already filters, so the per-job path never deletes it)
+// and an expired token's row (the link can never work) — while a live
+// token's pending send survives. Everything rides one rolled-back
+// transaction under a pg advisory lock: uncommitted seeds are invisible to
+// the suite's parallel binaries, the lock serializes this test against the
+// jobs package's sweeper test (the two hold the same key), and rollback
+// leaves other tests' dead weight exactly as it found it. The count is a
+// bound, not an equality — committed dead rows from neighboring tests ride
+// the same table-wide DELETE.
+func TestStoreMailOutboxSweepDeadRows(t *testing.T) {
+	db := testenv.Open(t)
+	ctx := context.Background()
+	tx, err := db.Pool().Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	_, err = tx.Exec(ctx,
+		`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('auth_mail_sweep_test', 0))`)
+	require.NoError(t, err)
+
+	store := platform.NewStore(tx)
+	userID := seedUser(t, uniqueEmail("store-sweep"), "Sweep User")
+	seedOutbox := func(hash string, expiresAt time.Time) uuid.UUID {
+		t.Helper()
+		tokenID, err := store.CreateLoginToken(ctx, userID, hash, expiresAt)
+		require.NoError(t, err)
+		row, err := store.CreateMailOutbox(ctx, tokenID, "https://app.quotepilot.test/"+uuid.NewString())
+		require.NoError(t, err)
+		return row
+	}
+
+	consumedHash := freshHash(t)
+	consumedRow := seedOutbox(consumedHash, time.Now().Add(15*time.Minute))
+	_, ok, err := store.ConsumeLoginToken(ctx, consumedHash)
+	require.NoError(t, err)
+	require.True(t, ok)
+	// create_login_token takes the timestamp verbatim, so a past one lands
+	// an already-dead token with no direct Layer A write.
+	expiredRow := seedOutbox(freshHash(t), time.Now().Add(-time.Minute))
+	liveRow := seedOutbox(freshHash(t), time.Now().Add(15*time.Minute))
+
+	deleted, err := store.SweepAuthMailOutbox(ctx)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, deleted, int64(2),
+		"my two dead rows die; committed dead weight from neighboring tests rides along")
+
+	_, ok = readOutbox(t, store, liveRow)
+	assert.True(t, ok, "a live token's pending send is not the sweeper's")
+	// delete_mail_outbox doubles as the physical-existence probe Layer A
+	// leaves qp_app (the table itself is function-gated): false means no
+	// row was left to receipt — gone, not merely filtered from reads.
+	for _, row := range []uuid.UUID{consumedRow, expiredRow} {
+		gone, err := store.DeleteMailOutbox(ctx, row)
+		require.NoError(t, err)
+		assert.False(t, gone, "the sweep physically deleted outbox row %s", row)
+	}
+}
+
 // readOutbox runs one ReadMailOutbox and asserts the error leg away, so the
 // lifecycle test reads as (row, ok) pairs only.
 func readOutbox(t *testing.T, store *platform.Store, id uuid.UUID) (platform.MailOutbox, bool) {

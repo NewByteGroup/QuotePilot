@@ -79,10 +79,10 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands (0012 moved every
-	// still-live SECURITY DEFINER function to the ADR-005 section 36
-	// pinned search_path).
-	assert.Equal(t, int64(12), version)
+	// Head version: bump when a migration lands. 0014 adds
+	// app.sweep_auth_mail_outbox; 0013 is the branding_json CHECK on
+	// feat/branding-json-check, so head moves 12 -> 14 here.
+	assert.Equal(t, int64(14), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
 }
 

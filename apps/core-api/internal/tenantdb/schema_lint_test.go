@@ -83,6 +83,7 @@ var tenantFunctions = []string{
 	"app.create_mail_outbox(uuid, text)",
 	"app.read_mail_outbox(uuid)",
 	"app.delete_mail_outbox(uuid)",
+	"app.sweep_auth_mail_outbox()",
 	"app.get_user_auth_by_email(text)",
 	"app.create_password_reset_token(uuid, text, timestamptz)",
 	"app.consume_password_reset_token(text)",
