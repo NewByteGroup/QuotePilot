@@ -87,10 +87,69 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands (0011 added the
-	// platform-global fx_rates pin table for S3b).
-	assert.Equal(t, int64(11), version)
+	// Head version: bump when a migration lands (0012 moved every
+	// still-live SECURITY DEFINER function to the ADR-005 section 36
+	// pinned search_path).
+	assert.Equal(t, int64(12), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
+}
+
+// TestSearchPathPinRoundTrip proves 0012 both ways on a throwaway database:
+// version 11 leaves the target definer on the pre-hardening `= app` path,
+// 12 pins it, Down restores `= app` without touching the qp_app EXECUTE
+// grant (ALTER FUNCTION leaves grants alone — a drop/recreate sequence
+// would not), and re-Up pins again.
+func TestSearchPathPinRoundTrip(t *testing.T) {
+	superDSN, migratorDSN, _ := requireUpgradeEnv(t)
+	ctx := context.Background()
+
+	dbName := "qp_roundtrip_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	super := openDB(t, superDSN)
+	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
+	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
+	defer func() { _ = super.Close() }()
+
+	provisionV1Database(t, ctx, superDSN, dbName)
+	setupGoose(t)
+
+	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
+	defer func() { _ = migDB.Close() }()
+	const sig = "app.resolve_inbound_org(text)"
+
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 11))
+	assert.Equal(t, "search_path=app", definerSearchPath(t, ctx, migDB, sig))
+
+	require.NoError(t, goose.UpContext(ctx, migDB, "."))
+	assert.Equal(t, "search_path=pg_catalog, pg_temp", definerSearchPath(t, ctx, migDB, sig))
+
+	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 11))
+	assert.Equal(t, "search_path=app", definerSearchPath(t, ctx, migDB, sig))
+	assert.True(t, qpAppCanExecute(t, ctx, migDB, sig), "the Down must keep qp_app's EXECUTE grant")
+
+	require.NoError(t, goose.UpContext(ctx, migDB, "."))
+	assert.Equal(t, "search_path=pg_catalog, pg_temp", definerSearchPath(t, ctx, migDB, sig))
+}
+
+// definerSearchPath reports the search_path entry of the named function's
+// proconfig — the only state 0012 changes.
+func definerSearchPath(t *testing.T, ctx context.Context, db *sql.DB, sig string) string {
+	t.Helper()
+	var path string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT c
+		FROM pg_proc p, unnest(p.proconfig) AS c
+		WHERE p.oid = $1::regprocedure
+		  AND c LIKE 'search_path=%'`, sig).Scan(&path))
+	return path
+}
+
+// qpAppCanExecute checks the grant ALTER FUNCTION must not disturb.
+func qpAppCanExecute(t *testing.T, ctx context.Context, db *sql.DB, sig string) bool {
+	t.Helper()
+	var ok bool
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT has_function_privilege('qp_app', $1::regprocedure, 'EXECUTE')`, sig).Scan(&ok))
+	return ok
 }
 
 // requireUpgradeEnv skips under -short or without the three DSNs this test

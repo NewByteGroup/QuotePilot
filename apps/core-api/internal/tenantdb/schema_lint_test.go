@@ -14,6 +14,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -391,4 +392,45 @@ func TestSchemaLintGrants(t *testing.T) {
 	sort.Strings(wantDefiners)
 	assert.Equal(t, wantDefiners, definers,
 		"SECURITY DEFINER functions in app must equal the tenant + platform allowlists")
+}
+
+// TestSchemaLintDefinerSearchPath pins the ADR-005 section 36 posture on the
+// whole SECURITY DEFINER surface: every definer function in app must carry
+// SET search_path = pg_catalog, pg_temp in proconfig (0012 hardened the
+// 0002/0003/0004-era `= app` survivors; 0006/0007 already shipped pinned). A
+// definer function resolves unqualified names through its search_path as the
+// owner — a caller-influenced path is a hijack vector, so a missing or
+// different pin fails CI. `= ANY(NULL proconfig)` is NULL, not false, so the
+// no-proconfig case is asserted explicitly alongside the wrong-pin case.
+func TestSchemaLintDefinerSearchPath(t *testing.T) {
+	testenv.RequirePostgres(t)
+	offenders := unpinnedDefinerFunctions(t, context.Background(), testenv.MigratorPool(t))
+	assert.Empty(t, offenders,
+		"SECURITY DEFINER functions without pinned search_path=pg_catalog, pg_temp (ADR-005 section 36)")
+}
+
+// unpinnedDefinerFunctions lists every app-schema SECURITY DEFINER routine
+// whose proconfig lacks the section 36 pin — the no-proconfig case included
+// ('= ANY(NULL)' is NULL, not false, so it needs its own disjunct).
+func unpinnedDefinerFunctions(t *testing.T, ctx context.Context, db *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := db.Query(ctx, `
+		SELECT p.oid::regprocedure::text
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'app' AND p.prosecdef
+		  AND (p.proconfig IS NULL
+		       OR NOT ('search_path=pg_catalog, pg_temp' = ANY(p.proconfig)))
+		ORDER BY p.oid::regprocedure::text COLLATE "C"`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		require.NoError(t, rows.Scan(&name))
+		names = append(names, name)
+	}
+	require.NoError(t, rows.Err())
+	return names
 }
