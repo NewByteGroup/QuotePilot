@@ -1212,6 +1212,7 @@ components:
       properties:
         error:
           type: string
+          enum: [rfq_not_parked, rfq_busy]
           description: '`rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly).'
         status:
           type: string

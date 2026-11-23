@@ -631,8 +631,11 @@ export interface components {
             error: string;
         };
         ReprocessConflict: {
-            /** @description `rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly). */
-            error: string;
+            /**
+             * @description `rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly).
+             * @enum {string}
+             */
+            error: "rfq_not_parked" | "rfq_busy";
             /** @description The RFQ's current `app.rfq_status` (verbatim, not an enum). */
             status: string;
         };
