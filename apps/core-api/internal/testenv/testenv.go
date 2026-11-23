@@ -8,6 +8,9 @@ package testenv
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -16,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/argon2"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/migrate"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
@@ -124,6 +128,29 @@ func MigratorPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// PasswordHashPHC encodes a password as the argon2id PHC string
+// app.users.password_hash stores (migration 0006), using the RFC 9106
+// memory-constrained profile internal/auth/password.go declares
+// (m=19 MiB, t=2, p=1). It is deliberately a test-local encoder, not an
+// export of the production helper: the verify path must honor any
+// well-formed PHC, so seeding through an independent encode keeps the
+// round-trip honest — a broken production hash cannot seed-verify itself
+// green. qp_migrator writes the column; suites seed credentials through
+// this helper (it replaces the auth suite's old private copy).
+//
+//	hash := testenv.PasswordHashPHC(t, "s3cret-pilot")
+func PasswordHashPHC(t *testing.T, password string) string {
+	t.Helper()
+	salt := make([]byte, 16)
+	_, err := rand.Read(salt)
+	require.NoError(t, err)
+	key := argon2.IDKey([]byte(password), salt, 2, 19*1024, 1, 32)
+	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version, 19*1024, 2, 1,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key))
 }
 
 // SeedOrganization inserts the Layer A registry row as qp_migrator and returns

@@ -32,7 +32,7 @@ func TestLoginPasswordEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	email := "pw-login-" + uuid.NewString() + "@test.dev"
 	userID := seedSessionUser(t, migrator, email)
-	hash := encodeTestPHC(t, "s3cret-pilot")
+	hash := testenv.PasswordHashPHC(t, "s3cret-pilot")
 	_, err := migrator.Exec(ctx,
 		`UPDATE app.users SET password_hash = $1 WHERE id = $2`, hash, userID)
 	require.NoError(t, err)
