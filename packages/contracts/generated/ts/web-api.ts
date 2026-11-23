@@ -251,11 +251,12 @@ export interface paths {
          *     awaits its first render — the server clears the parked reason,
          *     moves the RFQ back to the resumed stage's active status and
          *     enqueues that stage's job in one transaction. `resumed_stage`
-         *     names the River job kind the pipeline resumes at. A second call
-         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`;
-         *     while an accepted resume is still running the RFQ sits in the
-         *     stage's active status and a call answers 409 with that current
-         *     status — the 429 applies only between parked reprocesses.
+         *     names the River job kind the pipeline resumes at. A repeat call
+         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`:
+         *     the interval check runs before the status gate, so it applies
+         *     to any repeat inside the interval regardless of the RFQ's
+         *     current status — a mid-resume RFQ gets 429, not the 409 its
+         *     active status would otherwise mean.
          */
         post: operations["reprocessRfq"];
         delete?: never;
@@ -1069,7 +1070,7 @@ export interface operations {
                     "application/json": components["schemas"]["ReprocessError"];
                 };
             };
-            /** @description The RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. */
+            /** @description The RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. The same `rfq_not_parked` also answers a contended `DRAFT` quote (a live worker holds its row lock) — "a worker owns downstream state, retry shortly" — possibly with a parked-looking `status`, which distinguishes it from the permanent not-parked refusal. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -1078,7 +1079,7 @@ export interface operations {
                     "application/json": components["schemas"]["ReprocessConflict"];
                 };
             };
-            /** @description A previous reprocess is still inside the minimum interval. */
+            /** @description Any repeat of the same RFQ inside `REPROCESS_MIN_INTERVAL` — the interval check runs before the status gate, so it answers regardless of the RFQ's current status (a mid-resume RFQ still gets 429 + `Retry-After`, not 409). */
             429: {
                 headers: {
                     /** @description Seconds until the next reprocess of this RFQ is accepted. */

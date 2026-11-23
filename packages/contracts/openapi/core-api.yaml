@@ -625,14 +625,17 @@ paths:
         `IGNORED` is intentionally terminal.
 
         `REPROCESS_MIN_INTERVAL` (default 60s) bounds one reprocess per
-        RFQ: a second call inside the interval answers 429 with
+        RFQ: a repeat call inside the interval answers 429 with
         `Retry-After` and enqueues nothing — a double click or retry
         loop cannot fan out jobs or carrier calls. The last reprocess
-        time is read off the audit log, so no column is added. The 429
-        applies only between parked reprocesses: while an accepted
-        resume is still running, the RFQ sits in the resumed stage's
-        active status (`RECEIVED`/`PARSING`/`PRICING`/`READY`) and a
-        reprocess call answers 409 with that current status.
+        time is read off the audit log, so no column is added. The
+        interval check runs BEFORE the status gate, so the 429 answers
+        for any repeat of the same RFQ inside the interval regardless
+        of its current `app.rfq_status` — an RFQ mid-resume still gets
+        429 + `Retry-After`, not 409. Only a call past the interval (or
+        the first ever) reaches the status gate: a resume still running
+        then answers 409 with the stage's active status
+        (`RECEIVED`/`PARSING`/`PRICING`/`READY`).
       security:
         - qpAccess: []
       parameters:
@@ -665,17 +668,22 @@ paths:
         '409':
           description: |
             `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` —
-            the RFQ is not in a reprocessable state (only
+            two refusals share this code. The permanent one: the RFQ is
+            not in a reprocessable state (only
             `NEEDS_REVIEW`/`FAILED`, or `READY` with a `DRAFT` quote
             still awaiting its first render, are); `status` reports its
             current `app.rfq_status` value so the client can refresh
             its row — including the active status an accepted resume
-            is still running under. A reprocess inside
-            `REPROCESS_MIN_INTERVAL` of an accepted one answers 429,
-            not 409 — even while the resumed render is in-flight,
-            because the RFQ still reports the reprocessable READY +
-            unrendered-DRAFT shape, so the rate-limit gate answers
-            first.
+            is still running under. The transient one: a live worker
+            holds the `DRAFT` quote's row lock (the NOWAIT probe found
+            it), so a worker owns downstream state for now — retry
+            shortly. That refusal can carry a parked-looking `status`
+            (`NEEDS_REVIEW`/`FAILED` still on the row), which is what
+            distinguishes it from the permanent not-parked refusal
+            above. A reprocess inside `REPROCESS_MIN_INTERVAL` of an
+            accepted one answers 429, not 409 — the interval check runs
+            before the status gate and answers unconditionally,
+            whatever the RFQ's current status.
           content:
             application/json:
               schema:
@@ -685,7 +693,12 @@ paths:
             `{"error":"rate_limited"}` — the newest `rfq.reprocessed`
             audit row for this RFQ is younger than
             `REPROCESS_MIN_INTERVAL`; nothing was written or enqueued.
-            `Retry-After` carries the remaining wait in seconds.
+            `Retry-After` carries the remaining wait in seconds. The
+            interval check runs before the status gate, so this answers
+            for ANY repeat of the same RFQ inside the interval,
+            whatever `app.rfq_status` currently reads — an RFQ still
+            mid-resume gets 429 + `Retry-After`, not the 409 its active
+            status would otherwise mean.
           headers:
             Retry-After:
               description: Seconds until the next reprocess of this RFQ is accepted.

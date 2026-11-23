@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -254,33 +253,58 @@ func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (await
 // same name — also harmless, since our own tx already holds the row
 // lock and the probe can never contend against itself.
 func draftRenderState(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteID uuid.UUID, rendered, found, busy bool, err error) {
-	if _, err = tx.Exec(ctx, `SAVEPOINT reprocess_quote_probe`); err != nil {
-		return uuid.Nil, false, false, false, fmt.Errorf("jobs: reprocess: quote probe savepoint on %s: %w", rfqID, err)
+	id, pdfKey, busy, err := probeQuote(ctx, tx, rfqID)
+	if err != nil || busy || id == uuid.Nil {
+		return uuid.Nil, false, false, busy, err
 	}
-	var pdfKey *string
+	return id, pdfKey != nil && *pdfKey != "", true, false, nil
+}
+
+// probeQuote runs the SAVEPOINT + FOR UPDATE NOWAIT + rollback sequence
+// draftRenderState's contract comment documents: busy on the 55P03
+// refusal with the tx already rolled back to the savepoint, uuid.Nil
+// when no DRAFT row exists, the row's id and pdf_storage_key otherwise.
+func probeQuote(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteID uuid.UUID, pdfKey *string, busy bool, err error) {
+	if _, err = tx.Exec(ctx, `SAVEPOINT reprocess_quote_probe`); err != nil {
+		return uuid.Nil, nil, false, fmt.Errorf("jobs: reprocess: quote probe savepoint on %s: %w", rfqID, err)
+	}
 	err = tx.QueryRow(ctx, `
 		SELECT id, pdf_storage_key FROM app.quotes
 		WHERE rfq_id = $1 AND status = 'DRAFT'
 		ORDER BY version DESC LIMIT 1
 		FOR UPDATE NOWAIT`, rfqID).Scan(&quoteID, &pdfKey)
+	if err == nil {
+		return quoteID, pdfKey, false, nil
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		return uuid.Nil, false, false, false, nil
+		return uuid.Nil, nil, false, nil
 	}
 	if isLockNotAvailable(err) {
-		if _, rbErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT reprocess_quote_probe`); rbErr != nil {
-			return uuid.Nil, false, false, false, fmt.Errorf("jobs: reprocess: quote probe rollback on %s: %w", rfqID, rbErr)
-		}
-		return uuid.Nil, false, false, true, nil
+		return uuid.Nil, nil, true, probeRollback(ctx, tx, rfqID)
 	}
-	if err != nil {
-		return uuid.Nil, false, false, false, fmt.Errorf("jobs: reprocess: draft quote on %s: %w", rfqID, err)
-	}
-	return quoteID, pdfKey != nil && *pdfKey != "", true, false, nil
+	return uuid.Nil, nil, false, fmt.Errorf("jobs: reprocess: draft quote on %s: %w", rfqID, err)
 }
+
+// probeRollback frees the tx from its aborted state after the NOWAIT
+// refusal — rolling back to the savepoint is what keeps the refusal
+// path's own commit alive (a bare statement error would otherwise
+// poison every later statement in the tx).
+func probeRollback(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT reprocess_quote_probe`); err != nil {
+		return fmt.Errorf("jobs: reprocess: quote probe rollback on %s: %w", rfqID, err)
+	}
+	return nil
+}
+
+// sqlstateLockNotAvailable is Postgres's 55P03 — SQLSTATE
+// lock_not_available, the NOWAIT refusal a contended row lock raises.
+// The literal avoids a direct dependency (github.com/jackc/pgerrcode)
+// for a single constant.
+const sqlstateLockNotAvailable = "55P03"
 
 // isLockNotAvailable reports whether err is Postgres 55P03 — the NOWAIT
 // refusal a contended row lock raises.
 func isLockNotAvailable(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.LockNotAvailable
+	return errors.As(err, &pgErr) && pgErr.Code == sqlstateLockNotAvailable
 }

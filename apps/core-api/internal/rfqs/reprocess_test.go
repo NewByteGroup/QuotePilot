@@ -11,6 +11,7 @@ package rfqs_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -155,18 +156,40 @@ func newReprocessRig(t *testing.T, db *tenantdb.DB, minInterval time.Duration, n
 	return &reprocessRig{handler: server, cfg: cfg, db: db, inserter: inserter}
 }
 
+// postTimeout bounds one reprocess request — the busy tests' hang
+// guard. Under a plain-FOR-UPDATE regression the endpoint's quote probe
+// would wait on a held row lock forever, so the request ctx deadline
+// turns the hang into a failed response the assert can report.
+const postTimeout = 5 * time.Second
+
 // postReprocess fires the request the review queue sends: cookie +
 // tenant header, no body.
 func (r *reprocessRig) postReprocess(t *testing.T, userID, orgID, rfqID uuid.UUID) *httptest.ResponseRecorder {
 	t.Helper()
-	raw, err := r.cfg.SignAccess(userID, uuid.New(), time.Now())
+	rec, err := r.tryReprocess(userID, orgID, rfqID)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/v1/rfqs/"+rfqID.String()+"/reprocess", nil)
+	return rec
+}
+
+// tryReprocess is postReprocess minus the test-boundary require — the
+// form a require.Eventually poll calls (its condition runs off the test
+// goroutine, where require's FailNow is illegal). The request ctx
+// carries postTimeout so a lock-waiting regression fails instead of
+// hanging the suite.
+func (r *reprocessRig) tryReprocess(userID, orgID, rfqID uuid.UUID) (*httptest.ResponseRecorder, error) {
+	raw, err := r.cfg.SignAccess(userID, uuid.New(), time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("rfqs_test: sign access token: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), postTimeout)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/rfqs/"+rfqID.String()+"/reprocess", nil).
+		WithContext(ctx)
 	req.AddCookie(&http.Cookie{Name: "qp_access", Value: raw})
 	req.Header.Set("X-Organization-Id", orgID.String())
 	rec := httptest.NewRecorder()
 	r.handler.ServeHTTP(rec, req)
-	return rec
+	return rec, nil
 }
 
 // seedUser inserts an app.users row as qp_migrator (Layer A is closed to
