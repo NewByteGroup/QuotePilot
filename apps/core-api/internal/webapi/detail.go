@@ -30,10 +30,11 @@ type detailRow struct {
 	rawHTML       *string
 }
 
-// quoteRow is the latest version's audit slice: the margin triplet the
-// composition reports and the pinned engine output the sections/fx come
-// from.
+// quoteRow is the latest version's audit slice: its id — the approve
+// path's parameter — the margin triplet the composition reports and the
+// pinned engine output the sections/fx come from.
 type quoteRow struct {
+	id           uuid.UUID
 	targetMargin decimal.Decimal
 	totalCost    decimal.Decimal
 	finalPrice   decimal.Decimal
@@ -149,12 +150,12 @@ func loadDetailRfq(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (detailRow, 
 func loadLatestQuote(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteRow, bool, error) {
 	var q quoteRow
 	err := tx.QueryRow(ctx, `
-		SELECT target_margin, total_cost_brl, final_price_brl,
+		SELECT id, target_margin, total_cost_brl, final_price_brl,
 		       overall_confidence, pricing_result_json
 		FROM app.quotes
 		WHERE rfq_id = $1
 		ORDER BY version DESC LIMIT 1`, rfqID).
-		Scan(&q.targetMargin, &q.totalCost, &q.finalPrice, &q.overallConf, &q.pricingJSON)
+		Scan(&q.id, &q.targetMargin, &q.totalCost, &q.finalPrice, &q.overallConf, &q.pricingJSON)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return quoteRow{}, false, nil
 	}
@@ -165,11 +166,15 @@ func loadLatestQuote(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (quoteRow,
 }
 
 // mapDetailQuote reuses the list's InboxQuote mapping with the latest
-// version's pricing blob — the detail's quote member must match the row
-// the inbox emitted.
+// version's id and pricing blob — the detail's quote member must match
+// the row the inbox emitted. quote.id is uuid.Nil when the RFQ has no
+// version yet, leaving the contract's null.
 func mapDetailQuote(rfq detailRow, quote quoteRow, now time.Time) (authapi.InboxQuote, error) {
 	row := rfq.inboxRow
 	row.pricingJSON = quote.pricingJSON
+	if quote.id != uuid.Nil {
+		row.quoteVersionID = &quote.id
+	}
 	return mapInboxQuote(row, now)
 }
 

@@ -79,10 +79,10 @@ func listInboxRows(ctx context.Context, tx pgx.Tx, p authapi.ListInboxQuotesPara
 	rows, err := tx.Query(ctx, `
 		SELECT r.id, r.rfq_number, coalesce(r.customer_name, r.customer_email), r.subject,
 		       r.status::text, r.received_at, r.extracted_payload_json, r.extraction_confidence,
-		       q.pricing_result_json
+		       q.id, q.pricing_result_json
 		FROM app.rfq_requests AS r
 		LEFT JOIN LATERAL (
-			SELECT pricing_result_json FROM app.quotes
+			SELECT id, pricing_result_json FROM app.quotes
 			WHERE rfq_id = r.id ORDER BY version DESC LIMIT 1
 		) AS q ON true
 		WHERE r.kind = 'RFQ' AND r.status <> 'IGNORED'
@@ -100,7 +100,8 @@ func listInboxRows(ctx context.Context, tx pgx.Tx, p authapi.ListInboxQuotesPara
 	for rows.Next() {
 		var r inboxRow
 		if err := rows.Scan(&r.id, &r.rfqNumber, &r.customerName, &r.subject,
-			&r.status, &r.receivedAt, &r.extraction, &r.confidence, &r.pricingJSON); err != nil {
+			&r.status, &r.receivedAt, &r.extraction, &r.confidence,
+			&r.quoteVersionID, &r.pricingJSON); err != nil {
 			return nil, fmt.Errorf("webapi: inbox: scan: %w", err)
 		}
 		item, err := mapInboxQuote(r, now)

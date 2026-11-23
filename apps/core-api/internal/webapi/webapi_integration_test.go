@@ -472,6 +472,60 @@ func TestInboxAvgResponseAndAutoApprove(t *testing.T) {
 	assert.Equal(t, 95, page.Summary.AutoApproveConfidencePercent)
 }
 
+// TestInboxQuoteVersionID: the approve handle rides the list — a priced
+// row exposes its latest version's id (the POST /quotes/{id}/approve
+// path parameter) while a pre-pricing row stays null, so the client
+// never offers approval on a version that does not exist.
+func TestInboxQuoteVersionID(t *testing.T) {
+	r := newRig(t, now)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "qvid-a")
+	uid, _ := seedWebUser(t, "qvid", "Version User")
+	seedWebMembership(t, org, uid, platform.RoleAdmin, now.Add(-72*time.Hour))
+	version := seedVersionPair(t, r, org, now)
+	assertVersionHandle(t, inboxPage(t, r, uid, org), version)
+}
+
+// seedVersionPair plants a priced RFQ plus a pre-pricing one — the
+// with/without-quote pair the approve-handle assertions compare.
+func seedVersionPair(t *testing.T, r *rig, org uuid.UUID, now time.Time) uuid.UUID {
+	t.Helper()
+	priced := seedRfq(t, r.db, org, rfqSeed{
+		number: 61, customerEmail: "priced@cust.dev", subject: "Priced freight",
+		status: "READY", receivedAt: now.Add(-time.Hour),
+	})
+	seedRfq(t, r.db, org, rfqSeed{
+		number: 62, customerEmail: "early@cust.dev", subject: "Early freight",
+		status: "PARSING", receivedAt: now.Add(-2 * time.Hour),
+	})
+	return seedQuote(t, r.db, org, priced, "0.15", "100", "115", "0.9", pricingFixture(t), nil)
+}
+
+// inboxPage fetches and decodes the first inbox page for uid in org.
+func inboxPage(t *testing.T, r *rig, uid, org uuid.UUID) authapi.InboxQuotePage {
+	t.Helper()
+	rec := r.get(t, uid, "/v1/inbox/quotes", org.String())
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var page authapi.InboxQuotePage
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page))
+	return page
+}
+
+// assertVersionHandle checks the priced row carries the version id the
+// approve path takes and the pre-pricing row carries none.
+func assertVersionHandle(t *testing.T, page authapi.InboxQuotePage, version uuid.UUID) {
+	t.Helper()
+	require.Len(t, page.Items, 2)
+	byNum := map[int]authapi.InboxQuote{}
+	for _, it := range page.Items {
+		byNum[it.RfqNumber] = it
+	}
+	require.NotNil(t, byNum[61].QuoteVersionID)
+	assert.Equal(t, version, uuid.UUID(*byNum[61].QuoteVersionID),
+		"app.quotes.id, not the RFQ id — the approve path takes the version")
+	assert.Nil(t, byNum[62].QuoteVersionID, "no version → no approve handle")
+}
+
 // TestQuoteDetail: the audit page end to end — quote member matching the
 // inbox mapper, email with highlighted paragraphs, the sorted extraction
 // list, and the pinned pricing composition.
@@ -505,7 +559,7 @@ func TestQuoteDetail(t *testing.T) {
 			org, rfq, "tenants/"+org.String()+"/rfqs/"+rfq.String()+"/spec.pdf")
 		return err
 	}))
-	seedQuote(t, r.db, org, rfq, "0.15", "9800.00", "11270.00", "0.91", pricingFixture(t), nil)
+	version := seedQuote(t, r.db, org, rfq, "0.15", "9800.00", "11270.00", "0.91", pricingFixture(t), nil)
 
 	rec := r.get(t, uid, "/v1/quotes/"+rfq.String(), org.String())
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -514,6 +568,9 @@ func TestQuoteDetail(t *testing.T) {
 
 	// The quote member is the same InboxQuote the list emits.
 	assert.Equal(t, uuid.UUID(d.Quote.ID), rfq)
+	require.NotNil(t, d.Quote.QuoteVersionID)
+	assert.Equal(t, version, uuid.UUID(*d.Quote.QuoteVersionID),
+		"the approve path's parameter is the version id, not the RFQ id")
 	assert.Equal(t, 17, d.Quote.RfqNumber)
 	assert.Equal(t, "Detail Co", d.Quote.CustomerName)
 	assert.Equal(t, authapi.ReadyToSend, d.Quote.Status)
@@ -601,6 +658,7 @@ func TestQuoteDetailNoPricing(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&d))
 	assert.Nil(t, d.Pricing)
 	assert.Nil(t, d.Quote.EstimatedTotal)
+	assert.Nil(t, d.Quote.QuoteVersionID, "no version → no approve handle")
 	assert.Equal(t, []authapi.ExtractedField{}, d.Extraction, "absent payload is an empty list")
 	assert.Equal(t, [][]authapi.EmailSegment{}, d.Email.Paragraphs)
 }

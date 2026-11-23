@@ -18,18 +18,20 @@ import (
 )
 
 // inboxRow is the slice of app.rfq_requests — plus the latest quote
-// version's pricing blob — that one InboxQuote maps from. pricingJSON is
-// nil while no priced version exists; extraction likewise before stage 3.
+// version's id and pricing blob — that one InboxQuote maps from.
+// pricingJSON and quoteVersionID are nil while no priced version exists;
+// extraction likewise before stage 3.
 type inboxRow struct {
-	id           uuid.UUID
-	rfqNumber    int
-	customerName string
-	subject      string
-	status       string
-	receivedAt   time.Time
-	extraction   []byte
-	confidence   decimal.NullDecimal
-	pricingJSON  []byte
+	id             uuid.UUID
+	rfqNumber      int
+	customerName   string
+	subject        string
+	status         string
+	receivedAt     time.Time
+	extraction     []byte
+	confidence     decimal.NullDecimal
+	pricingJSON    []byte
+	quoteVersionID *uuid.UUID
 }
 
 // mapInboxQuote folds one row into the contract item. now comes from the
@@ -50,8 +52,20 @@ func mapInboxQuote(r inboxRow, now time.Time) (authapi.InboxQuote, error) {
 	if err := itemFromPricing(&item, r); err != nil {
 		return item, err
 	}
+	applyQuoteVersion(&item, r)
 	applySLA(&item, r, now)
 	return item, nil
+}
+
+// applyQuoteVersion stamps the latest version's id — the path parameter
+// POST /quotes/{id}/approve needs. nil leaves the contract's null: a
+// pre-pricing row has no version to approve.
+func applyQuoteVersion(item *authapi.InboxQuote, r inboxRow) {
+	if r.quoteVersionID == nil {
+		return
+	}
+	id := openapi_types.UUID(*r.quoteVersionID)
+	item.QuoteVersionID = &id
 }
 
 // itemFromExtraction fills route, equipment and confidence off the

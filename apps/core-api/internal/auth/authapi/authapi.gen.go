@@ -406,9 +406,14 @@ type InboxQuote struct {
 	EstimatedTotal *Money `json:"estimatedTotal"`
 
 	// ID The RFQ's id (`app.rfq_requests.id`), stable across quote versions.
-	ID         openapi_types.UUID `json:"id"`
-	ReceivedAt time.Time          `json:"receivedAt"`
-	RfqNumber  int                `json:"rfqNumber"`
+	ID openapi_types.UUID `json:"id"`
+
+	// QuoteVersionID The latest quote version's id (`app.quotes.id`) — the path
+	// parameter of `POST /quotes/{id}/approve`. Null while no quote
+	// version exists.
+	QuoteVersionID *openapi_types.UUID `json:"quoteVersionId,omitempty"`
+	ReceivedAt     time.Time           `json:"receivedAt"`
+	RfqNumber      int                 `json:"rfqNumber"`
 
 	// Route Null until the extraction agent resolves the lane.
 	Route     *Route `json:"route"`

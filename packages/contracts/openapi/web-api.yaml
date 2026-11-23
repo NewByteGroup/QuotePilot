@@ -399,6 +399,73 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ReprocessError"
+  # Mirrored verbatim from core-api.yaml (server-side source of truth —
+  # this endpoint is implemented, not mocked) minus the `qpAccess`
+  # security and the `X-Organization-Id` parameter: bearerAuth is global
+  # here and the browser's tenant rides the qp_org cookie. Note its error
+  # bodies use the core `{error}` shape, not this file's mock-era
+  # {code, message} Error schema.
+  /quotes/{id}/approve:
+    post:
+      operationId: approveQuote
+      tags: [quotes]
+      summary: Approve a quote version — releases the send job.
+      description: |
+        The analyst's central act (spec section 4 "Approval"):
+        `Authenticate` + `ResolveTenant` +
+        `RequireRole(OWNER, ADMIN, PRICING_ANALYST)` — the same user may
+        prepare and approve. Inside one tenant transaction the handler
+        row-locks the quote, refuses a `SUPERSEDED` version (409
+        `quote_superseded`) and a negative-margin price (409
+        `negative_margin`, audited as `quote.approve_refused`), stamps
+        `approved_at`/`approved_by_user_id`/`approved_via='api'`, audits
+        `quote.approved` and enqueues the S5 `quote_send` job — one commit.
+        Re-approving an already-approved version is an idempotent no-op
+        returning the stored approval; an unknown or other-tenant quote id
+        gets the same uniform 404.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Quote version UUID (`app.quotes.id`).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: |
+            The version's current `app.quote_status` plus its stored
+            approval stamp — the stamp (`approved_at`,
+            `approved_by_user_id`) is what a re-approve no-op preserves;
+            `status` reports the live value, so a sent quote answers
+            `APPROVED_SENT` on retry rather than the first response's
+            `DRAFT`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveQuoteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >-
+            Two refusals, distinguished by `error`. `quote_superseded` is
+            the permanent one — this version was retired by a
+            recalculation, so reload the quote and approve the latest
+            version's id instead. `negative_margin` is the below-cost
+            block (audited as `quote.approve_refused`) — the price must be
+            repriced above cost before approval can pass.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     bearerAuth:
@@ -420,6 +487,18 @@ components:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: Resource does not exist in the active organization.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Signed-in user lacks the role this action requires.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Unexpected server failure.
       content:
         application/json:
           schema:
@@ -559,6 +638,14 @@ components:
         id:
           type: string
           format: uuid
+        quoteVersionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            The latest quote version's id (`app.quotes.id`) — the path
+            parameter of `POST /quotes/{id}/approve`. Null while no quote
+            version exists.
         rfqNumber:
           type: integer
           minimum: 1
@@ -1217,3 +1304,41 @@ components:
         status:
           type: string
           description: The RFQ's current `app.rfq_status` (verbatim, not an enum).
+    # Approve schemas — mirrored from core-api.yaml (the endpoint is
+    # implemented server-side, so these use the core `{error}` error
+    # body, not the mock-era {code, message} Error). `QuoteStatus` is
+    # already the inbox bucket enum in this file, so the core contract's
+    # `app.quote_status` enum lands here as `QuoteVersionStatus`.
+    QuoteVersionStatus:
+      type: string
+      description: |
+        Mirrors the `app.quote_status` enum (migration 0002). Approval
+        leaves the version `DRAFT` — the send worker flips it to
+        `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
+      enum: [DRAFT, SUPERSEDED, APPROVED_SENT]
+    ApproveQuoteResponse:
+      type: object
+      additionalProperties: false
+      required: [id, status, approved_at, approved_by_user_id]
+      properties:
+        id:
+          type: string
+          description: Quote version UUID.
+        status:
+          $ref: "#/components/schemas/QuoteVersionStatus"
+        approved_at:
+          type: string
+          format: date-time
+          description: Timestamp the first approval stamped.
+        approved_by_user_id:
+          type: string
+          description: User UUID of the approving analyst.
+    ApproveConflict:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [quote_superseded, negative_margin]
+          description: '`quote_superseded` (a recalculation retired this version — approve the latest) or `negative_margin` (the pinned price is below cost).'
