@@ -1,18 +1,28 @@
 # syntax=docker/dockerfile:1
 # ADR-007 §1/§6: the image CI builds once per SHA and staging promotes —
 # never rebuilt per environment. Both binaries ship in one image: the
-# server is the entrypoint, `migrate` runs the deploy step as qp_migrator
-# (`railway run /app/migrate` or the service's pre-deploy command).
+# server is the entrypoint, and `migrate` runs the deploy step as
+# qp_migrator via the service's pre-deploy command — which executes
+# inside this image on Railway's private network. (`railway run` only
+# injects env vars into a local process; it is the operator's manual
+# path, not the deploy mechanism.)
 #
 # Build context is apps/core-api (the self-contained Go module): the CI
 # trivy job and `docker build apps/core-api` both assume it.
+#
+# Storage caveat: the server's default object store is dir-backed under
+# QP_STORAGE_DIR — inside this image that is ephemeral container
+# filesystem, and redeploys orphan keys PostgreSQL still references.
+# Dev-only until the R2 credentials land (ADR-003 §5); prod must wire R2
+# or mount a volume.
 
 # The official golang image sets GOTOOLCHAIN=local, so a builder behind
-# go.mod's directive refuses the module. GOTOOLCHAIN=auto makes go.mod
-# itself the toolchain pin (ADR-002's version record) — the builder tag
-# only has to exist, the exact compiler ships with the module.
+# go.mod's directive refuses the module. The exact version forces the
+# toolchain go.mod declares (ADR-002's version record): bump this with
+# go.mod's `go` directive — a stale pin fails loudly rather than
+# silently compiling with the wrong compiler.
 FROM golang:1.26-alpine AS build
-ENV GOTOOLCHAIN=auto
+ENV GOTOOLCHAIN=go1.26.11
 WORKDIR /src
 # Dependency layer first: go.mod/go.sum rarely change, so `go mod
 # download` stays cached across source-only commits.
