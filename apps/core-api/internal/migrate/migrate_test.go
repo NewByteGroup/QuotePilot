@@ -42,15 +42,7 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	superDSN, migratorDSN, appDSN := requireUpgradeEnv(t)
 	ctx := context.Background()
 
-	dbName := "qp_v1guard_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	super := openDB(t, superDSN)
-	// Runs last: cleanups are LIFO, so every handle opened below closes
-	// before the drop; WITH (FORCE) covers any straggler anyway.
-	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
-	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
-	defer func() { _ = super.Close() }()
-
-	provisionV1Database(t, ctx, superDSN, dbName)
+	dbName := scratchDB(t, ctx, superDSN, "qp_v1guard_")
 	setupGoose(t)
 
 	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
@@ -87,10 +79,162 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands (0011 added the
-	// platform-global fx_rates pin table for S3b).
-	assert.Equal(t, int64(11), version)
+	// Head version: bump when a migration lands (0012 moved every
+	// still-live SECURITY DEFINER function to the ADR-005 section 36
+	// pinned search_path).
+	assert.Equal(t, int64(12), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
+}
+
+// TestSearchPathPinRoundTrip proves 0012 both ways on a throwaway database:
+// version 11 leaves the 17 survivor definers on `= app`, 12 pins the whole
+// surface, Down restores `= app` without touching the qp_app EXECUTE grant
+// (ALTER FUNCTION leaves grants alone — a drop/recreate sequence would
+// not), and re-Up pins again. Assertions are whole-catalog counts, not a
+// single probe function, so a missed ALTER fails the test.
+func TestSearchPathPinRoundTrip(t *testing.T) {
+	superDSN, migratorDSN, _ := requireUpgradeEnv(t)
+	ctx := context.Background()
+
+	dbName := scratchDB(t, ctx, superDSN, "qp_roundtrip_")
+	setupGoose(t)
+
+	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
+	defer func() { _ = migDB.Close() }()
+
+	// The 0006/0007 family ships pinned (9 functions: its 8 plus
+	// get_user_auth_by_email); 0012 owns the 17 `= app` survivors. The
+	// goose calls pin to 11/12 exactly — a later migration must not move
+	// this test's assertions.
+	pre := map[string]int{"search_path=app": 17, "search_path=pg_catalog, pg_temp": 9}
+	post := map[string]int{"search_path=pg_catalog, pg_temp": 26}
+
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 11))
+	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
+	assertDefinerPaths(t, ctx, migDB, revertedSignatures, "search_path=app")
+	// Recreate the legacy drift 0012 exists to repair: a database that
+	// applied 0006's pre-amendment `= app` text (d1b5fa6 landed after
+	// those databases migrated, so goose never re-ran it). Without this
+	// the convergence ALTER is a no-op the test cannot distinguish from
+	// an omitted statement.
+	execDB(t, ctx, migDB,
+		`ALTER FUNCTION app.get_user_auth_by_email(text) SET search_path = app`)
+
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 12))
+	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
+	assertDefinerPaths(t, ctx, migDB, hardenedSignatures, "search_path=pg_catalog, pg_temp")
+
+	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 11))
+	assert.Equal(t, pre, definerPathCounts(t, ctx, migDB))
+	// Per-signature too: counts alone cannot see a rollback that swaps
+	// paths between two functions. The convergence pin stays pinned —
+	// its canonical pre-0012 state is the hardened path.
+	assertDefinerPaths(t, ctx, migDB, revertedSignatures, "search_path=app")
+	assertDefinerPaths(t, ctx, migDB, []string{"app.get_user_auth_by_email(text)"}, "search_path=pg_catalog, pg_temp")
+	assert.True(t, qpAppCanExecute(t, ctx, migDB, "app.resolve_inbound_org(text)"),
+		"the Down must keep qp_app's EXECUTE grant")
+
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 12))
+	assert.Equal(t, post, definerPathCounts(t, ctx, migDB))
+}
+
+// hardenedSignatures is 0012's whole ALTER list — 17 reverts plus the
+// get_user_auth_by_email convergence pin.
+var hardenedSignatures = []string{
+	"app.resolve_inbound_org(text)",
+	"app.get_current_organization()",
+	"app.platform_insert_public_snapshot(text, text, text, text, text, jsonb, numeric, jsonb, timestamp with time zone)",
+	"app.platform_update_connector_status(text, app.connector_status, numeric)",
+	"app.platform_insert_healing_session(text, uuid, text, text, text, text)",
+	"app.platform_update_healing_session(uuid, app.healing_status, text, boolean, text)",
+	"app.platform_delete_organization(uuid)",
+	"app.find_user_by_email(text)",
+	"app.create_login_token(uuid, text, timestamp with time zone)",
+	"app.create_session(uuid, text, timestamp with time zone)",
+	"app.revoke_session(uuid)",
+	"app.revoke_session_family_by_hash(text)",
+	"app.get_membership(uuid, uuid)",
+	"app.get_user_profile(uuid)",
+	"app.create_mail_outbox(uuid, text)",
+	"app.delete_mail_outbox(uuid)",
+	"app.list_memberships_for_email(text)",
+	"app.get_user_auth_by_email(text)",
+}
+
+// revertedSignatures is hardenedSignatures minus the convergence pin —
+// the Down restores `= app` on exactly these.
+var revertedSignatures = hardenedSignatures[:17]
+
+// assertDefinerPaths checks each signature's proconfig carries want —
+// the per-function complement to the catalog counts.
+func assertDefinerPaths(t *testing.T, ctx context.Context, db *sql.DB, sigs []string, want string) {
+	t.Helper()
+	for _, sig := range sigs {
+		assert.Equal(t, want, definerSearchPath(t, ctx, db, sig), sig)
+	}
+}
+
+// definerSearchPath reports the search_path entry of the named function's
+// proconfig — the only state 0012 changes.
+func definerSearchPath(t *testing.T, ctx context.Context, db *sql.DB, sig string) string {
+	t.Helper()
+	var path string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT c
+		FROM pg_proc p, unnest(p.proconfig) AS c
+		WHERE p.oid = $1::regprocedure
+		  AND c LIKE 'search_path=%'`, sig).Scan(&path))
+	return path
+}
+
+// definerPathCounts tallies search_path pins across the app-schema
+// SECURITY DEFINER surface — the whole-catalog check that catches a
+// missing ALTER anywhere, not just at one probe signature.
+func definerPathCounts(t *testing.T, ctx context.Context, db *sql.DB) map[string]int {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `
+		SELECT c, count(*)
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace,
+		unnest(p.proconfig) AS c
+		WHERE n.nspname = 'app' AND p.prosecdef AND c LIKE 'search_path=%'
+		GROUP BY c`)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+
+	counts := map[string]int{}
+	for rows.Next() {
+		var path string
+		var n int
+		require.NoError(t, rows.Scan(&path, &n))
+		counts[path] = n
+	}
+	require.NoError(t, rows.Err())
+	return counts
+}
+
+// scratchDB provisions a throwaway database for goose — created, seeded
+// with the init prerequisites, and registered for drop on cleanup.
+func scratchDB(t *testing.T, ctx context.Context, superDSN, prefix string) string {
+	t.Helper()
+	dbName := prefix + strings.ReplaceAll(uuid.NewString(), "-", "")
+	super := openDB(t, superDSN)
+	defer func() { _ = super.Close() }()
+	// Runs last: cleanups are LIFO, so every handle opened below closes
+	// before the drop; WITH (FORCE) covers any straggler anyway.
+	t.Cleanup(func() { dropDatabase(t, superDSN, dbName) })
+	execDB(t, ctx, super, fmt.Sprintf(`CREATE DATABASE %q`, dbName))
+	provisionV1Database(t, ctx, superDSN, dbName)
+	return dbName
+}
+
+// qpAppCanExecute checks the grant ALTER FUNCTION must not disturb.
+func qpAppCanExecute(t *testing.T, ctx context.Context, db *sql.DB, sig string) bool {
+	t.Helper()
+	var ok bool
+	require.NoError(t, db.QueryRowContext(ctx,
+		`SELECT has_function_privilege('qp_app', $1::regprocedure, 'EXECUTE')`, sig).Scan(&ok))
+	return ok
 }
 
 // requireUpgradeEnv skips under -short or without the three DSNs this test
