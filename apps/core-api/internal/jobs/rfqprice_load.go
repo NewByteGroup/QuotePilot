@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -25,11 +26,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // priceRfq is the locked slice of app.rfq_requests the worker reads.
+// ReceivedAt is the RFQ's arrival timestamp — S3a reads it as the
+// request_hash ready_date fallback so the digest is stable across days
+// (Devin Review round 3).
 type priceRfq struct {
 	ID         uuid.UUID
 	Status     string
 	Payload    []byte
 	Confidence decimal.NullDecimal
+	ReceivedAt time.Time
 }
 
 // lockPriceRfq SELECTs the RFQ FOR UPDATE — the lock serializes two
@@ -38,9 +43,10 @@ type priceRfq struct {
 func lockPriceRfq(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (priceRfq, bool, error) {
 	var r priceRfq
 	err := tx.QueryRow(ctx, `
-		SELECT id, status::text, coalesce(extracted_payload_json::text,''), extraction_confidence
+		SELECT id, status::text, coalesce(extracted_payload_json::text,''), extraction_confidence,
+		       received_at
 		FROM app.rfq_requests WHERE id = $1 FOR UPDATE`, rfqID).
-		Scan(&r.ID, &r.Status, &r.Payload, &r.Confidence)
+		Scan(&r.ID, &r.Status, &r.Payload, &r.Confidence, &r.ReceivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return priceRfq{}, false, nil
 	}

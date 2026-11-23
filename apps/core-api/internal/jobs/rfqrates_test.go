@@ -426,6 +426,55 @@ func TestRfqRatesReplayNeverRefetches(t *testing.T) {
 		"the ensured re-enqueue dedupes onto the live job")
 }
 
+// TestRfqRatesRetryAcrossDaysNeverRefetches is the Devin Review round-3
+// day-drift case: the extraction carries no ready_date, so the request
+// hash resolves its ready_date fallback off the RFQ's received_at — NOT
+// the worker clock. A River retry (or any later run) on a different day
+// recomputes the SAME digest, finds the checkpoint and collapses onto
+// it: no second paid fetch. Under the old clock-derived fallback this
+// retry re-keyed the request and fetched again.
+func TestRfqRatesRetryAcrossDaysNeverRefetches(t *testing.T) {
+	db := testenv.Open(t)
+	org := uuid.New()
+	testenv.SeedOrganization(t, org, "rates-daydrift")
+	rig := newRatesRig(t, db, liveFetcher(offerResult(), nil))
+	fields := owedFields()
+	delete(fields, "ready_date")
+	rfq := seedPricedRFQ(t, db, org, extractionDoc(fields), "0.9000")
+	// The RFQ arrived 2026-03-01 — nine days before the rig's clock
+	// (pricedNow = 2026-03-10). received_at is the hash's date source.
+	arrived := time.Date(2026, 3, 1, 8, 30, 0, 0, time.UTC)
+	setRFQReceivedAt(t, db, org, rfq, arrived)
+
+	require.NoError(t, rig.worker.Work(context.Background(), rateJob(org, uuid.New(), rfq, 1)))
+
+	rows := loadOffers(t, db, org, rfq)
+	require.Len(t, rows, 1)
+	wantHash := carrier.RequestHash(carrier.Request{
+		OriginLOCODE:    "CNSHA",
+		DestLOCODE:      "BRSSZ",
+		EquipmentOrUnit: "40HC",
+		Quantity:        2,
+		ReadyDate:       time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC),
+	})
+	assert.Equal(t, wantHash, rows[0].RequestHash,
+		"the pinned digest resolves ready_date off received_at, not the run clock")
+	assert.Equal(t, time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC), rig.fetcher.last.ReadyDate.UTC(),
+		"the wire request carried the received_at day")
+
+	// The day+5 retry: a different worker clock, the same received_at —
+	// the recomputed hash matches and the paid fetch is not repeated.
+	retry := jobs.NewRfqRatesWorker(db, rig.fetcher,
+		func() time.Time { return pricedNow.AddDate(0, 0, 5) })
+	retry.Inserter = rig.worker.Inserter
+	require.NoError(t, retry.Work(context.Background(), rateJob(org, uuid.New(), rfq, 2)))
+
+	assert.Equal(t, 1, rig.fetcher.calls, "same received_at ⇒ same hash ⇒ replay, never a re-fetch")
+	assert.Len(t, loadOffers(t, db, org, rfq), 1)
+	assert.Equal(t, 1, priceJobCount(t, db, org, rfq),
+		"the ensured re-enqueue dedupes onto the live job")
+}
+
 // TestRfqRatesReplayNotApplicableAlsoDedupes: the NULL-carrier
 // NOT_APPLICABLE row dedupes too (NULLS NOT DISTINCT) — a replay
 // enqueues pricing without writing a second row.

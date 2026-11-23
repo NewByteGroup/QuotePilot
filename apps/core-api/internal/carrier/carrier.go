@@ -44,7 +44,7 @@ type Request struct {
 	DestLOCODE      string
 	EquipmentOrUnit string
 	Quantity        int
-	ReadyDate       time.Time // effective quote date: extracted ready_date, else the run date
+	ReadyDate       time.Time // effective quote date: extracted ready_date, else the RFQ's received_at day
 }
 
 // Result is a fetcher's answer: Offer is the raw payload bytes

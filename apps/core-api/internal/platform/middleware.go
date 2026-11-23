@@ -87,6 +87,19 @@ func CorrelationID(ctx context.Context) string {
 	return id
 }
 
+// CorrelationUUID carries the request's correlation id into a job
+// envelope as a uuid — the stored X-Request-Id when it parses, a fresh
+// one otherwise (the ingest chain roots a fresh id the same way, so a
+// non-uuid transport id never reaches river_job args).
+//
+//	cid := platform.CorrelationUUID(r.Context())
+func CorrelationUUID(ctx context.Context) uuid.UUID {
+	if id, err := uuid.Parse(CorrelationID(ctx)); err == nil {
+		return id
+	}
+	return uuid.New()
+}
+
 // UserID returns the sub claim Authenticate stored on ctx; ok=false means
 // the middleware did not run or the token failed to verify.
 //

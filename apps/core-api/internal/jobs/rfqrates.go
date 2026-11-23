@@ -63,8 +63,10 @@ type RfqRatesWorker struct {
 	// Fetcher is the bound carrier connector (spec S3a: the interface is
 	// owned by core — LIVE over ai-engine, the portal or the mirror).
 	Fetcher carrier.Fetcher
-	// clock is injected so tests pin fetched_at and the request's
-	// ready_date fallback deterministically.
+	// clock is injected so tests pin fetched_at deterministically. The
+	// request's ready_date fallback is NOT clock-derived — it comes off
+	// the locked RFQ's received_at so the request_hash is stable across
+	// days (Devin Review round 3).
 	clock func() time.Time
 }
 
@@ -142,7 +144,7 @@ func (w *RfqRatesWorker) stage(ctx context.Context, tx pgx.Tx, args RateArgs, at
 		// retry (spec §3).
 		return fmt.Errorf("jobs: rfq_fetch_rates: extraction on %s: %w", rfq.ID, err), nil
 	}
-	req, owed := rateRequest(fields, w.clock())
+	req, owed := rateRequest(fields, rfq.ReceivedAt)
 	req.CorrelationID = args.CorrelationID
 	hash := carrier.RequestHash(req)
 	exists, err := checkpointExists(ctx, tx, rfq.ID, hash)
@@ -179,7 +181,13 @@ type rateDecision struct {
 // the PR). Fields that cannot be established mean "no call was owed
 // this run" — NOT_APPLICABLE; S3b re-decodes the extraction and parks
 // the real gap (REQUIRED_FIELD_MISSING).
-func rateRequest(fields map[string]extractedField, now time.Time) (carrier.Request, rateDecision) {
+//
+// receivedAt is the RFQ's arrival timestamp, the ready_date fallback when
+// the extraction carries none: the request_hash must be stable per RFQ —
+// a retry or reprocess on a later day recomputes the SAME digest and
+// collapses onto the existing checkpoint instead of paying a re-fetch
+// (Devin Review round 3; "quote date" ≈ when the request arrived).
+func rateRequest(fields map[string]extractedField, receivedAt time.Time) (carrier.Request, rateDecision) {
 	var req carrier.Request
 	modal, _ := parseModalField(fields)
 	incoterm, _ := parseIncotermField(fields)
@@ -191,7 +199,7 @@ func rateRequest(fields map[string]extractedField, now time.Time) (carrier.Reque
 	if n, ok := requiredContainerCount(fields); ok {
 		req.Quantity = n
 	}
-	req.ReadyDate = quoteDateField(fields, now)
+	req.ReadyDate = quoteDateField(fields, receivedAt)
 	if !freightOwed(modal, incoterm, req.OriginLOCODE, req.DestLOCODE) {
 		return req, rateDecision{reason: reasonFreightNotOwed}
 	}

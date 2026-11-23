@@ -235,6 +235,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/rfqs/{id}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint
+         * @description The review queue's release action. For an RFQ parked in
+         *     `NEEDS_REVIEW` or `FAILED` — or `READY` while its `DRAFT` quote
+         *     awaits its first render — the server clears the parked reason,
+         *     moves the RFQ back to the resumed stage's active status and
+         *     enqueues that stage's job in one transaction. `resumed_stage`
+         *     names the River job kind the pipeline resumes at. A repeat call
+         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`:
+         *     the interval check runs before the status gate, so it applies
+         *     to any repeat inside the interval regardless of the RFQ's
+         *     current status — a mid-resume RFQ gets 429, not the 409 its
+         *     active status would otherwise mean.
+         */
+        post: operations["reprocessRfq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -585,6 +615,29 @@ export interface components {
             current: components["schemas"]["RepairTimeline"] | null;
             queue: components["schemas"]["RepairQueueItem"][];
             history: components["schemas"]["RepairSession"][];
+        };
+        /**
+         * @description River job kind of the pipeline stage a reprocess resumed.
+         * @enum {string}
+         */
+        ReprocessStage: "rfq_ingest" | "rfq_extract" | "rfq_fetch_rates" | "rfq_price" | "rfq_render";
+        ReprocessRfqResponse: {
+            /** @enum {string} */
+            status: "accepted";
+            resumed_stage: components["schemas"]["ReprocessStage"];
+        };
+        ReprocessError: {
+            /** @description Core error code (e.g. `rate_limited`). */
+            error: string;
+        };
+        ReprocessConflict: {
+            /**
+             * @description `rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly).
+             * @enum {string}
+             */
+            error: "rfq_not_parked" | "rfq_busy";
+            /** @description The RFQ's current `app.rfq_status` (verbatim, not an enum). */
+            status: string;
         };
     };
     responses: {
@@ -980,6 +1033,66 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    reprocessRfq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reprocess accepted — the resumed stage's job is staged. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessRfqResponse"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+            /** @description RFQ does not exist in the active organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+            /** @description Two refusals, distinguished by `error`. `rfq_not_parked` is the permanent one — the RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. `rfq_busy` is the transient one — a live worker holds the `DRAFT` quote's row lock, so a worker owns downstream state for now and the client should retry shortly; it can carry a parked-looking `status`, which is why the code, not the status, says which refusal it is. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessConflict"];
+                };
+            };
+            /** @description Any repeat of the same RFQ inside `REPROCESS_MIN_INTERVAL` — the interval check runs before the status gate, so it answers regardless of the RFQ's current status (a mid-resume RFQ still gets 429 + `Retry-After`, not 409). */
+            429: {
+                headers: {
+                    /** @description Seconds until the next reprocess of this RFQ is accepted. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
         };
     };
 }

@@ -24,6 +24,8 @@ tags:
     description: Signed-in user and active organization.
   - name: inbox
     description: RFQs received by the organization and their quote status.
+  - name: rfqs
+    description: RFQ lifecycle actions of the staged pipeline.
 paths:
   /v1/session:
     get:
@@ -323,6 +325,80 @@ paths:
                 $ref: "#/components/schemas/RepairOverview"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  # Mirrored verbatim from core-api.yaml (server-side source of truth —
+  # this endpoint is implemented, not mocked). Note its error bodies use
+  # the core `{error}` shape, not this file's mock-era `{code, message}`
+  # Error schema.
+  /v1/rfqs/{id}/reprocess:
+    post:
+      operationId: reprocessRfq
+      summary: Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint
+      description: |
+        The review queue's release action. For an RFQ parked in
+        `NEEDS_REVIEW` or `FAILED` — or `READY` while its `DRAFT` quote
+        awaits its first render — the server clears the parked reason,
+        moves the RFQ back to the resumed stage's active status and
+        enqueues that stage's job in one transaction. `resumed_stage`
+        names the River job kind the pipeline resumes at. A repeat call
+        inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`:
+        the interval check runs before the status gate, so it applies
+        to any repeat inside the interval regardless of the RFQ's
+        current status — a mid-resume RFQ gets 429, not the 409 its
+        active status would otherwise mean.
+      tags: [rfqs]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Reprocess accepted — the resumed stage's job is staged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessRfqResponse"
+        "401":
+          description: Missing or invalid credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessError"
+        "404":
+          description: RFQ does not exist in the active organization.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessError"
+        "409":
+          description: >-
+            Two refusals, distinguished by `error`. `rfq_not_parked`
+            is the permanent one — the RFQ is not in
+            `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render;
+            `status` carries its current state. `rfq_busy` is the
+            transient one — a live worker holds the `DRAFT` quote's
+            row lock, so a worker owns downstream state for now and
+            the client should retry shortly; it can carry a
+            parked-looking `status`, which is why the code, not the
+            status, says which refusal it is.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessConflict"
+        "429":
+          description: Any repeat of the same RFQ inside `REPROCESS_MIN_INTERVAL` — the interval check runs before the status gate, so it answers regardless of the RFQ's current status (a mid-resume RFQ still gets 429 + `Retry-After`, not 409).
+          headers:
+            Retry-After:
+              description: Seconds until the next reprocess of this RFQ is accepted.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReprocessError"
 components:
   securitySchemes:
     bearerAuth:
@@ -1104,3 +1180,40 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RepairSession"
+    # Reprocess schemas — mirrored verbatim from core-api.yaml (the
+    # endpoint is implemented server-side, so these use the core
+    # `{error}` error body, not the mock-era `{code, message}` Error).
+    ReprocessStage:
+      type: string
+      description: River job kind of the pipeline stage a reprocess resumed.
+      enum: [rfq_ingest, rfq_extract, rfq_fetch_rates, rfq_price, rfq_render]
+    ReprocessRfqResponse:
+      type: object
+      additionalProperties: false
+      required: [status, resumed_stage]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+        resumed_stage:
+          $ref: "#/components/schemas/ReprocessStage"
+    ReprocessError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Core error code (e.g. `rate_limited`).
+    ReprocessConflict:
+      type: object
+      additionalProperties: false
+      required: [error, status]
+      properties:
+        error:
+          type: string
+          enum: [rfq_not_parked, rfq_busy]
+          description: '`rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly).'
+        status:
+          type: string
+          description: The RFQ's current `app.rfq_status` (verbatim, not an enum).

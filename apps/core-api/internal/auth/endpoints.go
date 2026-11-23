@@ -61,6 +61,11 @@ type Endpoints struct {
 	// surface; assigned post-build in cmd/server alongside Approver. Nil
 	// fails the call loudly.
 	Web WebAPI
+	// Reprocessor serves POST /v1/rfqs/{id}/reprocess on this same strict
+	// surface; assigned post-build in cmd/server alongside Approver (it
+	// needs the River client for the in-transaction resume enqueue). Nil
+	// fails the call loudly.
+	Reprocessor RfqReprocessor
 }
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)

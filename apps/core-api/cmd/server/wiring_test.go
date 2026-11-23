@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -90,6 +91,21 @@ func TestNewStorage(t *testing.T) {
 	dir, ok = s.(*platform.DirStorage)
 	require.True(t, ok)
 	assert.Equal(t, ".dev-storage", dir.Root())
+}
+
+// TestReprocessMinInterval pins the env contract (spec Reprocess): whole
+// seconds honored, unset/unreadable/non-positive degrades to the spec's
+// 60 s floor — a broken value must not disable the per-RFQ gate.
+func TestReprocessMinInterval(t *testing.T) {
+	t.Setenv("REPROCESS_MIN_INTERVAL", "")
+	require.Equal(t, reprocessDefaultInterval, reprocessMinInterval())
+	t.Setenv("REPROCESS_MIN_INTERVAL", "90")
+	require.Equal(t, 90*time.Second, reprocessMinInterval())
+	t.Setenv("REPROCESS_MIN_INTERVAL", "abc")
+	require.Equal(t, reprocessDefaultInterval, reprocessMinInterval())
+	t.Setenv("REPROCESS_MIN_INTERVAL", "0")
+	require.Equal(t, reprocessDefaultInterval, reprocessMinInterval(),
+		"a zero floor would let retry loops fan out carrier calls")
 }
 
 // TestNewRateFetcher pins the S3a binding decision (spec S3a): the

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/rfqs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/webapi"
 )
@@ -85,6 +87,9 @@ func run(ctx context.Context) error {
 	// same generated mux.
 	endpoints.Approver = quotes.NewEndpoints(db, riverClient)
 	endpoints.Web = webapi.NewEndpoints(db, store, &cfg, time.Now)
+	// The reprocess delegate joins the same generated mux — the River
+	// client stages the resumed stage's job inside its tenant tx.
+	endpoints.Reprocessor = rfqs.NewEndpoints(db, riverClient, reprocessMinInterval(), time.Now)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -252,6 +257,30 @@ func newOutboundFrom(cfg *platform.Config) string {
 	return devDefaultOutboundFrom
 }
 
+// reprocessDefaultInterval is the spec's per-RFQ reprocess floor when
+// REPROCESS_MIN_INTERVAL is unset or unreadable — a missing gate lets a
+// retry loop fan out jobs and carrier calls, so a bad value degrades to
+// the spec default rather than disabling the gate or refusing boot.
+const reprocessDefaultInterval = 60 * time.Second
+
+// reprocessMinInterval reads REPROCESS_MIN_INTERVAL as whole seconds
+// (spec Reprocess; the .env.example name is the contract). Its
+// os.Getenv read lives here with the other feature envs — same shape as
+// MIRROR_PORTAL_ENABLED inside newRateFetcher.
+func reprocessMinInterval() time.Duration {
+	s := strings.TrimSpace(os.Getenv("REPROCESS_MIN_INTERVAL"))
+	if s == "" {
+		return reprocessDefaultInterval
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		slog.Warn("server: REPROCESS_MIN_INTERVAL unreadable — falling back",
+			"value", s, "default", reprocessDefaultInterval)
+		return reprocessDefaultInterval
+	}
+	return time.Duration(n) * time.Second
+}
+
 // newStorage binds the object-storage seam. R2 credentials are a pending
 // spec open item, so every environment gets the directory-backed dev store
 // for now — bytes land under QP_STORAGE_DIR (default .dev-storage) and
@@ -328,6 +357,18 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
 	mux.Handle("GET /v1/quotes/{quoteId}", platform.Correlation(
 		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
+	// POST /v1/rfqs/{id}/reprocess — spec section 4 "Reprocess": the
+	// review queue's release action. The same chain approve mounts —
+	// CheckOrigin guards the cookie transport on the state-changing
+	// route, RequireRole narrows membership to the analyst set, and the
+	// strict surface routes the path to the RfqReprocessor delegate.
+	mux.Handle("POST /v1/rfqs/{id}/reprocess", platform.Correlation(
+		platform.CheckOrigin(cfg)(
+			platform.Authenticate(cfg)(
+				platform.ResolveTenant(store)(
+					platform.RequireRole(
+						platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+						authSrv))))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}
