@@ -1190,9 +1190,12 @@ export interface operations {
         requestBody?: never;
         responses: {
             /**
-             * @description The approved version's status and stored approval stamp —
-             *     identical on a re-approve (the no-op returns what the first
-             *     approval wrote).
+             * @description The version's current `app.quote_status` plus its stored
+             *     approval stamp — the stamp (`approved_at`,
+             *     `approved_by_user_id`) is what a re-approve no-op preserves;
+             *     `status` reports the live value, so a sent quote answers
+             *     `APPROVED_SENT` on retry rather than the first response's
+             *     `DRAFT`.
              */
             200: {
                 headers: {

@@ -482,6 +482,14 @@ func TestInboxQuoteVersionID(t *testing.T) {
 	testenv.SeedOrganization(t, org, "qvid-a")
 	uid, _ := seedWebUser(t, "qvid", "Version User")
 	seedWebMembership(t, org, uid, platform.RoleAdmin, now.Add(-72*time.Hour))
+	version := seedVersionPair(t, r, org, now)
+	assertVersionHandle(t, inboxPage(t, r, uid, org), version)
+}
+
+// seedVersionPair plants a priced RFQ plus a pre-pricing one — the
+// with/without-quote pair the approve-handle assertions compare.
+func seedVersionPair(t *testing.T, r *rig, org uuid.UUID, now time.Time) uuid.UUID {
+	t.Helper()
 	priced := seedRfq(t, r.db, org, rfqSeed{
 		number: 61, customerEmail: "priced@cust.dev", subject: "Priced freight",
 		status: "READY", receivedAt: now.Add(-time.Hour),
@@ -490,12 +498,23 @@ func TestInboxQuoteVersionID(t *testing.T) {
 		number: 62, customerEmail: "early@cust.dev", subject: "Early freight",
 		status: "PARSING", receivedAt: now.Add(-2 * time.Hour),
 	})
-	version := seedQuote(t, r.db, org, priced, "0.15", "100", "115", "0.9", pricingFixture(t), nil)
+	return seedQuote(t, r.db, org, priced, "0.15", "100", "115", "0.9", pricingFixture(t), nil)
+}
 
+// inboxPage fetches and decodes the first inbox page for uid in org.
+func inboxPage(t *testing.T, r *rig, uid, org uuid.UUID) authapi.InboxQuotePage {
+	t.Helper()
 	rec := r.get(t, uid, "/v1/inbox/quotes", org.String())
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var page authapi.InboxQuotePage
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&page))
+	return page
+}
+
+// assertVersionHandle checks the priced row carries the version id the
+// approve path takes and the pre-pricing row carries none.
+func assertVersionHandle(t *testing.T, page authapi.InboxQuotePage, version uuid.UUID) {
+	t.Helper()
 	require.Len(t, page.Items, 2)
 	byNum := map[int]authapi.InboxQuote{}
 	for _, it := range page.Items {
