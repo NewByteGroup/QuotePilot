@@ -28,7 +28,10 @@
 -- +goose StatementBegin
 CREATE TABLE app.quote_send_claims (
     -- One claimant per quote version: the PK itself is the exclusion.
-    quote_id        uuid PRIMARY KEY REFERENCES app.quotes (id),
+    -- CASCADE: platform_delete_organization cascades org → quotes, and a
+    -- claim left by a crashed or in-flight send must not hold the row and
+    -- roll the teardown back (same rule the quote line items follow).
+    quote_id        uuid PRIMARY KEY REFERENCES app.quotes (id) ON DELETE CASCADE,
     organization_id uuid NOT NULL,
     -- river.river_job.id of the claiming job — deliberately no FK:
     -- river_job is shared-schema state outside the tenant model.

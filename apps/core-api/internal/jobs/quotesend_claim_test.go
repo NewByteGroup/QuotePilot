@@ -9,7 +9,9 @@ package jobs_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -232,4 +234,84 @@ func TestQuoteSendRefusalDropsClaim(t *testing.T) {
 	n, meta := auditCount(t, db, f.org, "quote.send_refused")
 	assert.Equal(t, 1, n)
 	assert.Equal(t, "missing_render", meta["reason"])
+}
+
+// blockingSender is a resend.Sender that parks inside Send until the test
+// releases it — the way to prove the provider phase holds no quote lock.
+type blockingSender struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+var _ resend.Sender = (*blockingSender)(nil)
+
+func (b *blockingSender) Send(ctx context.Context, _ resend.SendRequest) (string, error) {
+	b.once.Do(func() { close(b.started) })
+	select {
+	case <-b.release:
+		return "out-msg-blocked", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// TestQuoteSendQuoteLockFreeDuringProvider is the test the claim row
+// exists for: with Send parked mid-call, a NOWAIT probe takes the quote's
+// row lock instantly — under the old single-tx send the same probe died
+// on 55P03. Mutual exclusion mid-send is the claim row, nothing else.
+func TestQuoteSendQuoteLockFreeDuringProvider(t *testing.T) {
+	db := testenv.Open(t)
+	f := seedSend(t, db, healthyFixture())
+	storage := platform.NewFakeStorage()
+	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
+	blocker := &blockingSender{started: make(chan struct{}), release: make(chan struct{})}
+	worker := jobs.NewQuoteSendWorker(db, blocker, storage, rigOutboundFrom)
+
+	done := make(chan error, 1)
+	go func() { done <- worker.Work(context.Background(), sendJob(f.org, f.quote)) }()
+
+	select {
+	case <-blocker.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("provider call never started")
+	}
+
+	require.NoError(t, db.InTenantTx(context.Background(), f.org, func(ctx context.Context, tx pgx.Tx) error {
+		var id uuid.UUID
+		return tx.QueryRow(ctx,
+			`SELECT id FROM app.quotes WHERE id = $1 FOR UPDATE NOWAIT`, f.quote).Scan(&id)
+	}))
+	_, held := claimHolder(t, db, f)
+	assert.True(t, held, "the claim, not the lock, excludes rivals mid-send")
+
+	close(blocker.release)
+	require.NoError(t, <-done)
+	s := loadSendState(t, db, f)
+	assert.Equal(t, "APPROVED_SENT", s.Status)
+}
+
+// TestQuoteSendLastAttemptLiveClaimKeepsRfq: a job that dead-letters on
+// the in-flight error leaves the RFQ and the rival's claim alone — the
+// live rival still owns the send's outcome, so writeSendFailed must not
+// run for it.
+func TestQuoteSendLastAttemptLiveClaimKeepsRfq(t *testing.T) {
+	db := testenv.Open(t)
+	f := seedSend(t, db, healthyFixture())
+	rivalID := stageRiverJob(t, db, f.org)
+	seedClaim(t, db, f, rivalID)
+	sender := &resend.FakeSender{MessageID: "x"}
+	rig := newSendRig(db, sender, platform.NewFakeStorage())
+
+	job := sendJobAs(f.org, f.quote, deadJobID+1)
+	job.JobRow.Attempt = job.JobRow.MaxAttempts // final attempt: dead-letter path
+	err := rig.worker.Work(context.Background(), job)
+	require.Error(t, err)
+
+	s := loadSendState(t, db, f)
+	assert.NotEqual(t, "FAILED", s.RfqState, "a live rival still owns the send's outcome")
+	held, exists := claimHolder(t, db, f)
+	assert.True(t, exists)
+	assert.Equal(t, rivalID, held, "the rival's claim survives")
+	assert.Equal(t, 0, sender.Calls())
 }
