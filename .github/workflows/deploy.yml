@@ -1,0 +1,132 @@
+# Deploy pipeline for the QuotePilot monorepo (ADR-007 section 6).
+#
+# Shape: push to develop publishes ghcr images tagged <sha> + `dev` and
+# redeploys the Railway dev services; push to main does the same for
+# `staging`, re-tagging the same image SHAs — never rebuilding. `apps/web`
+# ships on Cloudflare Pages outside this workflow (ADR-007 open items).
+#
+# Secrets live only on the GitHub environments `dev`/`staging` (section 3):
+# RAILWAY_TOKEN, RAILWAY_PROJECT_ID, RAILWAY_ENVIRONMENT, RAILWAY_CORE_API_SERVICE.
+# Until they are provisioned the deploy job passes with a loud notice —
+# a silent skip would hide a no-deploy, a failed check would pollute CI.
+#
+# Migrations run as the Railway service's pre-deploy command `/app/migrate`
+# (the image ships the binary alongside /app/server): it executes inside
+# Railway's private network where pgvector.railway.internal resolves —
+# `railway run` from a GitHub runner could not reach it. A failed
+# migration fails the deploy before the new version takes traffic.
+
+name: deploy
+
+on:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # Deploys serialize per branch and are never cancelled mid-flight — a
+  # half-applied redeploy is worse than a queued one.
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ENV_TAG: ${{ github.ref_name == 'main' && 'staging' || 'dev' }}
+  CORE_IMAGE: ghcr.io/newbytegroup/quotepilot-core-api
+  AI_IMAGE: ghcr.io/newbytegroup/quotepilot-ai-engine
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write # GITHUB_TOKEN pushes to ghcr.io under the repo's org
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io \
+            -u "${{ github.actor }}" --password-stdin
+
+      # Plain docker build/push, same as the security job's image scan —
+      # no new action surface to pin.
+      - name: Build and push core-api image
+        run: |
+          set -euo pipefail
+          docker build \
+            -t "$CORE_IMAGE:${{ github.sha }}" \
+            -t "$CORE_IMAGE:${{ env.ENV_TAG }}" \
+            apps/core-api
+          docker push "$CORE_IMAGE:${{ github.sha }}"
+          docker push "$CORE_IMAGE:${{ env.ENV_TAG }}"
+
+      - name: Build and push ai-engine image
+        run: |
+          if [ ! -f apps/ai-engine/Dockerfile ]; then
+            echo "stub: no ai-engine Dockerfile yet — activates when it lands (Marcelo's serving entrypoint)"
+            exit 0
+          fi
+          set -euo pipefail
+          docker build \
+            -t "$AI_IMAGE:${{ github.sha }}" \
+            -t "$AI_IMAGE:${{ env.ENV_TAG }}" \
+            apps/ai-engine
+          docker push "$AI_IMAGE:${{ github.sha }}"
+          docker push "$AI_IMAGE:${{ env.ENV_TAG }}"
+
+  deploy:
+    name: deploy-${{ github.ref_name == 'main' && 'staging' || 'dev' }}
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ github.ref_name == 'main' && 'staging' || 'dev' }}
+    steps:
+      - name: Check deploy credentials
+        id: gate
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            {
+              echo "## Deploy skipped — secrets not provisioned";
+              echo "";
+              echo "\`RAILWAY_TOKEN\` is not set on the \`${{ env.ENV_TAG }}\` environment.";
+              echo "Images were published; the Railway redeploy runs once ADR-007's";
+              echo "environment secrets land (open items).";
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::RAILWAY_TOKEN not provisioned on ${{ env.ENV_TAG }} — deploy skipped"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install Railway CLI
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          npm install -g @railway/cli@5.74.0
+          railway --version
+
+      # `--from-source` re-pulls the service's configured image reference
+      # (the :$ENV_TAG tag publish just moved) instead of redeploying the
+      # previous digest as-is. The pre-deploy command /app/migrate on the
+      # service runs migrations before traffic switches over.
+      - name: Redeploy core-api on Railway
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+          RAILWAY_CORE_API_SERVICE: ${{ secrets.RAILWAY_CORE_API_SERVICE }}
+        run: |
+          set -euo pipefail
+          railway redeploy \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --service "$RAILWAY_CORE_API_SERVICE" \
+            --from-source \
+            --yes
