@@ -64,10 +64,10 @@ type ShellFacts struct {
 
 // ErrQuoteBusy is DecideResume's answer when the DRAFT quote's row lock
 // is already held — draftRenderState's NOWAIT refusal (55P03). A live
-// worker (rfq_render's lockRenderQuote, quote_send's lockSendQuote) owns
-// downstream state, so the park claim a reprocess would act on is wrong
-// for now. The endpoint maps it to the same 409 a not-parked RFQ gets:
-// a refusal, never a fault.
+// worker (rfq_render's lockRenderQuote, quote_send's claim/record txs'
+// lockSendQuote) owns downstream state, so the park claim a reprocess
+// would act on is wrong for now. The endpoint maps it to the same 409 a
+// not-parked RFQ gets: a refusal, never a fault.
 var ErrQuoteBusy = errors.New("jobs: reprocess: draft quote is locked by a live worker")
 
 // DecideResume walks the checkpoint chain for one already-locked RFQ row
@@ -219,6 +219,8 @@ func inboundMessageID(ctx context.Context, tx pgx.Tx, resendID string) (uuid.UUI
 // never has to be waited out (Devin Review: without the lock, a `running`
 // rfq_render dedupe-hit at enqueue time was not provably about-to-complete,
 // because the worker locks the QUOTE row, not the RFQ the endpoint holds).
+// The probe is the only RFQ → quote acquisition anywhere — the lock-order
+// invariant recordSent documents is what keeps it safe to run NOWAIT.
 func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (awaiting, busy bool, err error) {
 	_, rendered, found, busy, err := draftRenderState(ctx, tx, rfqID)
 	if err != nil {
@@ -233,16 +235,16 @@ func DraftAwaitingRender(ctx context.Context, tx pgx.Tx, rfqID uuid.UUID) (await
 // means pdf_storage_key carries a key.
 //
 // NOWAIT is a lock-ordering rule, not impatience: this endpoint already
-// holds FOR UPDATE on the RFQ row (RFQ → quote), while quote_send holds
-// the same quote lock across the provider delivery call — seconds — before
-// recordSent locks the RFQ (quote → RFQ). A blocking wait here inverts
-// their order and deadlocks, and the send tx dying as the victim after the
-// provider accepted the mail parks a delivered quote's RFQ FAILED. A
-// contended row is honest "not reprocessable" signal instead — a live
-// worker owns downstream state — so lock_not_available (55P03) reports
-// busy rather than waiting. The lock attempt still matters: acquiring it
-// proves no render is mid-flight, which is what makes a `running` dedupe
-// hit at enqueue time provably about-to-complete (Devin Review).
+// holds FOR UPDATE on the RFQ row (RFQ → quote), while the live workers
+// acquire the quote row lock first and update the RFQ afterwards
+// (quote → RFQ; recordSent documents the invariant — no path may hold an
+// rfq_requests row lock while acquiring app.quotes). A blocking wait here
+// sits in the inverse order and deadlocks. A contended row is honest
+// "not reprocessable" signal instead — a live worker owns downstream
+// state — so lock_not_available (55P03) reports busy rather than
+// waiting. The lock attempt still matters: acquiring it proves no render
+// is mid-flight, which is what makes a `running` dedupe hit at enqueue
+// time provably about-to-complete (Devin Review).
 //
 // The SAVEPOINT is not optional: 55P03 aborts the whole transaction like
 // any statement error, so the probe must fail into a savepoint and roll
