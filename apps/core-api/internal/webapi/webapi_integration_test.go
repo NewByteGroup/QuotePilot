@@ -133,7 +133,7 @@ func TestGetSessionBadHeader400(t *testing.T) {
 	rec := r.get(t, uid, "/v1/session", "definitely-not-a-uuid")
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.JSONEq(t, `{"error":"missing_organization"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 }
 
 // TestGetSessionNonMemberHeader404: a well-formed header naming an org
@@ -150,7 +150,7 @@ func TestGetSessionNonMemberHeader404(t *testing.T) {
 	rec := r.get(t, uid, "/v1/session", orgB.String())
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 }
 
 // TestSwitchOrganizationSetsCookie: the 200 carries the switched Session
@@ -223,7 +223,7 @@ func TestSwitchOrganization404s(t *testing.T) {
 	} {
 		rec := r.post(t, uid, "/v1/session/organization", tc.body)
 		assert.Equal(t, http.StatusNotFound, rec.Code, tc.name)
-		assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String(), tc.name)
+		assert.JSONEq(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String(), tc.name)
 	}
 	rec := r.post(t, uid, "/v1/session/organization", "")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -687,7 +687,7 @@ func TestQuoteDetail404s(t *testing.T) {
 	} {
 		rec := r.get(t, uid, "/v1/quotes/"+tc.id, orgA.String())
 		assert.Equal(t, http.StatusNotFound, rec.Code, tc.name)
-		assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String(), tc.name)
+		assert.JSONEq(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String(), tc.name)
 	}
 }
 

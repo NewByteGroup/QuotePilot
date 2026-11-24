@@ -9,8 +9,9 @@
 //
 // Handlers implement StrictServerInterface and are mounted through
 // NewStrictHandlerWithOptions + HandlerWithOptions — HandlerWithOptions, not
-// HandlerFromMux, because the uniform {"error": ...} bodies of spec section 7
-// plug in at three distinct hooks:
+// HandlerFromMux, because the uniform {"error","message": ...} bodies of
+// spec section 7 (the {error, message} pair of issue #61) plug in at three
+// distinct hooks:
 //   - StdHTTPServerOptions.ErrorHandlerFunc catches wrapper-level binding
 //     failures (none today: X-Organization-Id is deliberately OPTIONAL in the
 //     contract so ResolveTenant — not the binder — emits
@@ -38,5 +39,6 @@
 //
 // authapi.gen.go is generated; regenerate with `make generate` in
 // apps/core-api and never edit it by hand (CI contracts-drift fails on any
-// diff). This doc.go is the only hand-written file in the package.
+// diff). The only hand-written files in the package are this doc.go and
+// errors.go, which carries the per-code message copy of issue #61.
 package authapi

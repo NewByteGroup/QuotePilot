@@ -155,7 +155,7 @@ func TestLogoutDriverErrorKeepsCookies(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"),
 		"a failed revoke must not log the client out of a live family")
 	assert.Empty(t, r.q.revocations, "a driver fault registers no revocation")

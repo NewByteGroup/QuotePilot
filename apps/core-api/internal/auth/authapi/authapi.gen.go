@@ -368,6 +368,13 @@ type Error struct {
 	// DRAFT quote's row lock, so retry shortly even when `status`
 	// still reads parked.
 	Error ErrorCode `json:"error"`
+
+	// Message Human-readable failure detail safe to display (issue #61 —
+	// the converged `{error, message}` body: the code for machines,
+	// this string for people). The server fills it from a per-code
+	// default; a handler may override it with contextual text, but
+	// it is never empty.
+	Message string `json:"message"`
 }
 
 // ErrorCode Machine-readable failure code. `unauthenticated`,
@@ -650,6 +657,10 @@ type ReprocessConflict struct {
 	// DRAFT quote's row lock, so retry shortly even when `status`
 	// still reads parked.
 	Error ErrorCode `json:"error"`
+
+	// Message Human-readable failure detail safe to display — the same
+	// `message` member the plain Error body carries (issue #61).
+	Message string `json:"message"`
 
 	// Status The RFQ's current `app.rfq_status` — `RECEIVED`, `PARSING`,
 	// `PRICING`, `READY`, `APPROVED_SENT` or `IGNORED`

@@ -236,14 +236,14 @@ func resetStatusOK() (authapi.PostAuthPasswordResetResponseObject, error) {
 // other route's request-shape failure.
 func resetBadRequest() authapi.PostAuthPasswordResetResponseObject {
 	return authapi.PostAuthPasswordReset400JSONResponse{
-		BadRequestJSONResponse: authapi.BadRequestJSONResponse{Error: authapi.ErrorCodeBadRequest},
+		BadRequestJSONResponse: authapi.BadRequestJSONResponse(authapi.NewError(authapi.ErrorCodeBadRequest)),
 	}
 }
 
 // resetRateLimited is the reset request's typed 429 — same body as login's.
 func resetRateLimited() authapi.PostAuthPasswordResetResponseObject {
 	return authapi.PostAuthPasswordReset429JSONResponse{
-		RateLimitedJSONResponse: authapi.RateLimitedJSONResponse{Error: authapi.ErrorCodeRateLimited},
+		RateLimitedJSONResponse: authapi.RateLimitedJSONResponse(authapi.NewError(authapi.ErrorCodeRateLimited)),
 	}
 }
 
@@ -259,17 +259,17 @@ func passwordSetStatusOK() (authapi.PostAuthPasswordResponseObject, error) {
 // policy.
 func passwordSetBadRequest() authapi.PostAuthPasswordResponseObject {
 	return authapi.PostAuthPassword400JSONResponse{
-		BadRequestJSONResponse: authapi.BadRequestJSONResponse{Error: authapi.ErrorCodeBadRequest},
+		BadRequestJSONResponse: authapi.BadRequestJSONResponse(authapi.NewError(authapi.ErrorCodeBadRequest)),
 	}
 }
 
 // passwordSetUnauthenticated is the set-password route's single 401 — the
-// same {"error":"unauthenticated"} the session endpoint emits for a dead
+// same {"error":"unauthenticated","message":…} the session endpoint emits for a dead
 // token, so used, expired, unknown and wrong-purpose tokens are
 // byte-identical on the wire (the amendment's anti-enumeration contract).
 func passwordSetUnauthenticated() authapi.PostAuthPasswordResponseObject {
 	return authapi.PostAuthPassword401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 	}
 }
 
@@ -277,6 +277,6 @@ func passwordSetUnauthenticated() authapi.PostAuthPasswordResponseObject {
 // route — the same body login's limiters emit.
 func passwordSetRateLimited() authapi.PostAuthPasswordResponseObject {
 	return authapi.PostAuthPassword429JSONResponse{
-		RateLimitedJSONResponse: authapi.RateLimitedJSONResponse{Error: authapi.ErrorCodeRateLimited},
+		RateLimitedJSONResponse: authapi.RateLimitedJSONResponse(authapi.NewError(authapi.ErrorCodeRateLimited)),
 	}
 }

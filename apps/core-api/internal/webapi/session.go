@@ -86,7 +86,7 @@ func (e *Endpoints) GetSession(ctx context.Context, _ authapi.GetSessionRequestO
 	userID, ok := platform.UserID(ctx)
 	if !ok {
 		return authapi.GetSession401JSONResponse{
-			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 		}, nil
 	}
 	h := hintsFromContext(ctx)
@@ -124,10 +124,10 @@ func (r getOK) VisitGetSessionResponse(w http.ResponseWriter) error {
 func sessionFailResponse(f sessionFail) authapi.GetSessionResponseObject {
 	switch f {
 	case failBadHint:
-		return authapi.GetSession400JSONResponse{Error: authapi.ErrorCodeMissingOrganization}
+		return authapi.GetSession400JSONResponse(authapi.NewError(authapi.ErrorCodeMissingOrganization))
 	case failOrg, failNoOrgs:
 		return authapi.GetSession404JSONResponse{
-			NotFoundJSONResponse: authapi.NotFoundJSONResponse{Error: authapi.ErrorCodeNotFound},
+			NotFoundJSONResponse: authapi.NotFoundJSONResponse(authapi.NewError(authapi.ErrorCodeNotFound)),
 		}
 	}
 	return nil
@@ -142,12 +142,12 @@ func (e *Endpoints) SwitchOrganization(ctx context.Context, req authapi.SwitchOr
 	userID, ok := platform.UserID(ctx)
 	if !ok {
 		return authapi.SwitchOrganization401JSONResponse{
-			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 		}, nil
 	}
 	if req.Body == nil {
 		return authapi.SwitchOrganization400JSONResponse{
-			BadRequestJSONResponse: authapi.BadRequestJSONResponse{Error: authapi.ErrorCodeBadRequest},
+			BadRequestJSONResponse: authapi.BadRequestJSONResponse(authapi.NewError(authapi.ErrorCodeBadRequest)),
 		}, nil
 	}
 	target := uuid.UUID(req.Body.OrganizationID)
@@ -158,7 +158,7 @@ func (e *Endpoints) SwitchOrganization(ctx context.Context, req authapi.SwitchOr
 	switch fail {
 	case failOrg, failNoOrgs:
 		return authapi.SwitchOrganization404JSONResponse{
-			NotFoundJSONResponse: authapi.NotFoundJSONResponse{Error: authapi.ErrorCodeNotFound},
+			NotFoundJSONResponse: authapi.NotFoundJSONResponse(authapi.NewError(authapi.ErrorCodeNotFound)),
 		}, nil
 	}
 	return switchOK{cfg: e.cfg, org: target, body: s}, nil

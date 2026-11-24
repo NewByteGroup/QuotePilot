@@ -175,7 +175,7 @@ export const handlers = [
     const { organizationId } = await request.json()
     const organization = session.organizations.find((item) => item.id === organizationId)
     if (!organization) {
-      return response(404).json({ code: 'not_found', message: 'Organization not found' })
+      return response(404).json({ error: 'not_found', message: 'Organization not found' })
     }
     setSession({ ...session, organization })
     return response(200).json(session)
@@ -183,11 +183,14 @@ export const handlers = [
   http.patch('/v1/me/preferences', async ({ request, response }) => {
     const { name, language } = await request.json()
     if (language !== undefined && !USER_LANGUAGES.includes(language)) {
-      return response(400).json({ code: 'invalid_request', message: 'Unsupported language.' })
+      return response(400).json({ error: 'invalid_request', message: 'Unsupported language.' })
     }
     const trimmedName = name?.trim()
     if (trimmedName !== undefined && (trimmedName.length === 0 || trimmedName.length > 120)) {
-      return response(400).json({ code: 'invalid_request', message: 'Name must have 1–120 chars.' })
+      return response(400).json({
+        error: 'invalid_request',
+        message: 'Name must have 1–120 chars.',
+      })
     }
     setSession({
       ...session,
@@ -213,7 +216,7 @@ export const handlers = [
   http.get('/v1/quotes/{quoteId}', ({ params, response }) => {
     const quote = organizationQuotes(new Date()).find((item) => item.id === params.quoteId)
     if (!quote) {
-      return response(404).json({ code: 'not_found', message: 'Quote not found' })
+      return response(404).json({ error: 'not_found', message: 'Quote not found' })
     }
     return response(200).json(buildQuoteDetail(quote, session.organization))
   }),
@@ -233,7 +236,7 @@ export const handlers = [
       const { pricingRules } = current()
       const automation = pricingRules.automations.find((item) => item.key === params.automationKey)
       if (!automation) {
-        return response(404).json({ code: 'not_found', message: 'Automation not found' })
+        return response(404).json({ error: 'not_found', message: 'Automation not found' })
       }
       const updated = { ...automation, enabled }
       setPricingRules({
@@ -251,7 +254,7 @@ export const handlers = [
   http.patch('/v1/organization/identity', async ({ request, response }) => {
     const result = applyIdentityUpdate(current().companyIdentity, await request.json())
     if ('error' in result) {
-      return response(400).json({ code: 'invalid_request', message: result.error })
+      return response(400).json({ error: 'invalid_request', message: result.error })
     }
     setCompanyIdentity(result.identity)
     return response(200).json(current().companyIdentity)
@@ -259,10 +262,13 @@ export const handlers = [
   http.put('/v1/organization/identity/letterhead-logo', async ({ request, response }) => {
     const file = (await request.formData()).get('file')
     if (!file || typeof file === 'string') {
-      return response(400).json({ code: 'invalid_request', message: 'file is required' })
+      return response(400).json({ error: 'invalid_request', message: 'file is required' })
     }
     if (!LETTERHEAD_LOGO_TYPES.includes(file.type) || file.size > LETTERHEAD_LOGO_MAX_BYTES) {
-      return response(400).json({ code: 'invalid_request', message: 'PNG, JPEG or SVG up to 2 MB' })
+      return response(400).json({
+        error: 'invalid_request',
+        message: 'PNG, JPEG or SVG up to 2 MB',
+      })
     }
     setCompanyIdentity({
       ...current().companyIdentity,

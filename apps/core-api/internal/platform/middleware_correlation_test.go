@@ -224,7 +224,7 @@ func TestMembershipLookupLogsError(t *testing.T) {
 	chain.ServeHTTP(rec, tenantRequest(t, cfg, "cid-membership-fail"))
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`, rec.Body.String(),
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`, rec.Body.String(),
 		"the client-facing 500 stays byte-identical")
 	assert.Equal(t, "cid-membership-fail", rec.Header().Get("X-Request-Id"))
 	assert.False(t, p.called)

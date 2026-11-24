@@ -48,7 +48,7 @@ func TestLoginOutboxTxRollbackOnEnqueueFailure(t *testing.T) {
 	failEnqueue := func(context.Context, pgx.Tx, uuid.UUID) error { return errBoom }
 	rec := postLoginTo(t, loginHandler(t, sessionConfig(), store, failEnqueue), `{"email":"`+email+`"}`)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 
 	var tokens int
 	require.NoError(t, migrator.QueryRow(ctx,

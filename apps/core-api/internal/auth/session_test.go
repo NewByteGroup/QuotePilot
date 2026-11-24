@@ -134,7 +134,7 @@ func TestSessionUniform401(t *testing.T) {
 	for _, rec := range recs {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(),
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(),
 			"used, expired and unknown must answer byte-identically")
 		assert.Empty(t, rec.Header().Values("Set-Cookie"),
 			"a rejected token must never write a cookie")
@@ -146,7 +146,7 @@ func TestSessionUniform401(t *testing.T) {
 // TestSessionBadRequests covers every request-shape failure: bodies the JSON
 // binder rejects (routed by RequestErrorHandlerFunc) and bodies that bind
 // but carry an absent token (the handler's own 400). All share the one
-// {"error":"bad_request"} body and none reach the store.
+// {"error":"bad_request","message":…} body and none reach the store.
 func TestSessionBadRequests(t *testing.T) {
 	r := newSessionRig(t, sessionConfig())
 
@@ -166,7 +166,7 @@ func TestSessionBadRequests(t *testing.T) {
 			rec := r.postSession(t, tc.body)
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 			assert.Empty(t, rec.Header().Values("Set-Cookie"))
 		})
 	}
@@ -175,7 +175,7 @@ func TestSessionBadRequests(t *testing.T) {
 }
 
 // TestSessionFailuresAreUniform500 proves a driver failure is the same 500
-// {"error":"internal"} wherever it strikes on the path — consume, the two
+// {"error":"internal","message":…} wherever it strikes on the path — consume, the two
 // payload reads, the session insert — and that no Set-Cookie header ever
 // leaks onto an error response. A profile row missing after a successful
 // consume joins the table: it is contract drift, answered the same way.
@@ -208,7 +208,7 @@ func TestSessionFailuresAreUniform500(t *testing.T) {
 			rec := r.postSession(t, `{"token":"`+token+`"}`)
 			assert.Equal(t, http.StatusInternalServerError, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 			assert.Empty(t, rec.Header().Values("Set-Cookie"),
 				"the error path must never leak a Set-Cookie header")
 		})
@@ -226,7 +226,7 @@ func TestSessionFailuresAreUniform500(t *testing.T) {
 	token := r.plantToken(t, userID, r.clock.now.Add(r.cfg.LoginTTL))
 	rec := r.postSession(t, `{"token":"`+token+`"}`)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Len(t, r.q.creates, 1,
 		"the fake has no tx to roll back — the row's fate under a real one is pinned by TestSessionExchangeRollsBackConsume")

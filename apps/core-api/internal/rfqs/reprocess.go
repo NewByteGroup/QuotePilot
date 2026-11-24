@@ -386,26 +386,28 @@ func (o reprocessOutcome) response() authapi.ReprocessRfqResponseObject {
 		}
 	case kindNotFound:
 		return authapi.ReprocessRfq404JSONResponse{
-			NotFoundJSONResponse: authapi.NotFoundJSONResponse{Error: authapi.ErrorCodeNotFound},
+			NotFoundJSONResponse: authapi.NotFoundJSONResponse(authapi.NewError(authapi.ErrorCodeNotFound)),
 		}
 	case kindNotParked:
 		return authapi.ReprocessRfq409JSONResponse{
-			Error:  authapi.ErrorCodeRfqNotParked,
-			Status: o.status,
+			Error:   authapi.ErrorCodeRfqNotParked,
+			Message: authapi.ErrorMessage(authapi.ErrorCodeRfqNotParked),
+			Status:  o.status,
 		}
 	case kindBusy:
 		return authapi.ReprocessRfq409JSONResponse{
-			Error:  authapi.ErrorCodeRfqBusy,
-			Status: o.status,
+			Error:   authapi.ErrorCodeRfqBusy,
+			Message: authapi.ErrorMessage(authapi.ErrorCodeRfqBusy),
+			Status:  o.status,
 		}
 	case kindRateLimited:
 		return authapi.ReprocessRfq429JSONResponse{
-			Body:    authapi.Error{Error: authapi.ErrorCodeRateLimited},
+			Body:    authapi.NewError(authapi.ErrorCodeRateLimited),
 			Headers: authapi.ReprocessRfq429ResponseHeaders{RetryAfter: &o.retryAfter},
 		}
 	}
 	return authapi.ReprocessRfq500JSONResponse{
-		InternalErrorJSONResponse: authapi.InternalErrorJSONResponse{Error: authapi.ErrorCodeInternal},
+		InternalErrorJSONResponse: authapi.InternalErrorJSONResponse(authapi.NewError(authapi.ErrorCodeInternal)),
 	}
 }
 
@@ -413,6 +415,6 @@ func (o reprocessOutcome) response() authapi.ReprocessRfqResponseObject {
 // route — the same body the middleware emits for a bad token.
 func reprocessUnauthenticated() authapi.ReprocessRfqResponseObject {
 	return authapi.ReprocessRfq401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 	}
 }

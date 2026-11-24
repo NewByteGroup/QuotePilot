@@ -792,10 +792,18 @@ components:
     Error:
       type: object
       additionalProperties: false
-      required: [error]
+      required: [error, message]
       properties:
         error:
           $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: |
+            Human-readable failure detail safe to display (issue #61 —
+            the converged `{error, message}` body: the code for machines,
+            this string for people). The server fills it from a per-code
+            default; a handler may override it with contextual text, but
+            it is never empty.
 
     MembershipRole:
       type: string
@@ -980,10 +988,15 @@ components:
     ReprocessConflict:
       type: object
       additionalProperties: false
-      required: [error, status]
+      required: [error, message, status]
       properties:
         error:
           $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: |
+            Human-readable failure detail safe to display — the same
+            `message` member the plain Error body carries (issue #61).
         status:
           type: string
           description: |

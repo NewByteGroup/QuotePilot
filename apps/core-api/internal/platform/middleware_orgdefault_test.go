@@ -138,7 +138,7 @@ func TestResolveTenantDefaultUnsafeMethodAndBadHint(t *testing.T) {
 			platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(p.handler())).ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
-			assert.Equal(t, `{"error":"missing_organization"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 			assert.False(t, p.called)
 		})
 	}
@@ -160,6 +160,6 @@ func TestResolveTenantDefaultNoMemberships(t *testing.T) {
 	chain.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, `{"error":"missing_organization"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 	assert.False(t, p.called)
 }

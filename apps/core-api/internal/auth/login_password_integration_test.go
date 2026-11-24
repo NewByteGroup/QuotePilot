@@ -65,7 +65,7 @@ func TestLoginPasswordEndToEnd(t *testing.T) {
 	// answer the uniform 401 — the wire cannot tell the cases apart.
 	rec = postLoginTo(t, handler, `{"email":"`+email+`","password":"wrong"}`)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 
 	noHashEmail := "pw-nohash-" + uuid.NewString() + "@test.dev"

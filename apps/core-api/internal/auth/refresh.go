@@ -181,8 +181,8 @@ func (r refreshRejected) VisitPostAuthRefreshResponse(w http.ResponseWriter) err
 	http.SetCookie(w, r.access)
 	http.SetCookie(w, r.refresh)
 	return authapi.PostAuthRefresh401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{
-			Error: authapi.ErrorCodeUnauthenticated,
-		},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(
+			authapi.NewError(authapi.ErrorCodeUnauthenticated),
+		),
 	}.VisitPostAuthRefreshResponse(w)
 }

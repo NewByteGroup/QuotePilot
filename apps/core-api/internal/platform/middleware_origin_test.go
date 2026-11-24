@@ -65,7 +65,7 @@ func runOriginCase(t *testing.T, handler http.Handler, p *probe, tc originCase) 
 	assert.Equal(t, tc.wantCode, rec.Code)
 	assert.Equal(t, tc.wantCall, p.called)
 	if tc.wantCode == http.StatusForbidden {
-		assert.Equal(t, `{"error":"forbidden"}`, rec.Body.String())
+		assert.Equal(t, `{"error":"forbidden","message":"you do not have permission to perform this action"}`, rec.Body.String())
 	}
 }
 
