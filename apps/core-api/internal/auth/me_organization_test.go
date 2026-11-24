@@ -90,7 +90,7 @@ func TestMeOrganizationUniform401(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := r.getMeOrg(t, r.authed, tc.cookie, orgID.String())
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
-			assert.Equal(t, `{"error":"unauthenticated"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`, rec.Body.String())
 			if reference == nil {
 				reference = rec.Body.Bytes()
 			}
@@ -121,7 +121,7 @@ func TestMeOrganizationHeaderRequired(t *testing.T) {
 			rec := r.getMeOrg(t, r.authed, r.meOrgAccessCookie(t, userID), tc.header)
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"missing_organization"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 		})
 	}
 	assert.Empty(t, r.q.membershipCalls, "the 400 must precede the membership lookup")
@@ -157,7 +157,7 @@ func TestMeOrganizationNonMemberIs404(t *testing.T) {
 				"%s must be byte-identical to every other tenant miss", tc.name)
 		})
 	}
-	assert.Equal(t, `{"error":"not_found"}`, string(reference))
+	assert.Equal(t, `{"error":"not_found","message":"the requested resource does not exist"}`, string(reference))
 	assert.Len(t, r.q.membershipCalls, 2, "both requests pay the same single lookup")
 	assert.False(t, r.runner.called, "a rejected request must not enter the tenant tx")
 }
@@ -178,7 +178,7 @@ func TestMeOrganizationRequireRoleGates(t *testing.T) {
 	rec := r.getMeOrg(t, r.owner, r.meOrgAccessCookie(t, analyst), orgID.String())
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"forbidden"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"forbidden","message":"you do not have permission to perform this action"}`, rec.Body.String())
 	assert.False(t, r.runner.called, "a role-denied request must not enter the tenant tx")
 
 	rec = r.getMeOrg(t, r.owner, r.meOrgAccessCookie(t, owner), orgID.String())
@@ -193,7 +193,7 @@ func TestMeOrganizationRequireRoleGates(t *testing.T) {
 // TestMeOrganizationFailuresAreUniform500 proves every post-chain failure —
 // the runner's driver error, the function call's driver error, the empty row
 // that membership made impossible, and a branding blob that is not a JSON
-// object — collapses to the one {"error":"internal"} body.
+// object — collapses to the one {"error":"internal","message":…} body.
 func TestMeOrganizationFailuresAreUniform500(t *testing.T) {
 	orgID := uuid.New()
 	for _, tc := range []struct {
@@ -221,14 +221,14 @@ func TestMeOrganizationFailuresAreUniform500(t *testing.T) {
 
 			assert.Equal(t, http.StatusInternalServerError, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 		})
 	}
 }
 
 // TestMeOrganizationWithoutChainDenies is the fail-closed proof: mounts that
 // skip the tenant leg — the bare generated mux and the half-mounted
-// Authenticate-only chain — answer the same {"error":"unauthenticated"} the
+// Authenticate-only chain — answer the same {"error":"unauthenticated","message":…} the
 // middleware emits, without a membership lookup or a tenant transaction.
 func TestMeOrganizationWithoutChainDenies(t *testing.T) {
 	r := newMeOrgRig(t, sessionConfig())
@@ -247,7 +247,7 @@ func TestMeOrganizationWithoutChainDenies(t *testing.T) {
 			rec := r.getMeOrg(t, tc.mount, r.meOrgAccessCookie(t, userID), orgID.String())
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 		})
 	}
 	assert.Empty(t, r.q.membershipCalls)
@@ -370,5 +370,5 @@ func TestMeOrganizationEndToEnd(t *testing.T) {
 	rec = httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 }

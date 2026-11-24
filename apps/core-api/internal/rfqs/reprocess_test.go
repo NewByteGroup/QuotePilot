@@ -461,7 +461,7 @@ func TestReprocessRateLimited(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	assert.Equal(t, "30", rec.Header().Get("Retry-After"),
 		"the remaining wait off the audit row's created_at")
-	assert.JSONEq(t, `{"error":"rate_limited"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"rate_limited","message":"too many requests — retry later"}`, rec.Body.String())
 
 	r := loadRfq(t, db, org, rfq)
 	assert.Equal(t, "NEEDS_REVIEW", r.Status, "a refused reprocess writes nothing")
@@ -524,7 +524,7 @@ func TestReprocessRateLimitedBeatsStatusGate(t *testing.T) {
 	rec := rig.postReprocess(t, user, org, rfq)
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
-	assert.JSONEq(t, `{"error":"rate_limited"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"rate_limited","message":"too many requests — retry later"}`, rec.Body.String())
 	assert.Empty(t, stagedJobs(t, db, rfq), "a 429 enqueues nothing")
 	n, _, _ := reprocessedAudits(t, db, org, rfq)
 	assert.Equal(t, 1, n, "only the seeded audit row — the refusal never writes")

@@ -5,6 +5,6 @@
 // authapi.StrictServerInterface contract generated from
 // packages/contracts/openapi/core-api.yaml; NewServer mounts it with the
 // strict hooks that turn binding and driver failures into the spec section 7
-// uniform {"error": ...} bodies. Endpoints ship per-PR — the operations not
+// uniform {"error","message": ...} bodies (issue #61). Endpoints ship per-PR — the operations not
 // yet implemented fail loudly until their own PRs land.
 package auth

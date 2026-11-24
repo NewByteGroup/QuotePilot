@@ -2,8 +2,8 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -12,6 +12,8 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 )
 
 // accessCookie is the spec section 4 transport for the access JWT. The
@@ -445,14 +447,16 @@ func trustedOrigin(webURL string) string {
 
 // writeError is the single failure writer every middleware rejection routes
 // through (spec section 7's uniform-failure contract): a fixed
-// {"error":"<code>"} body with a fixed content type. Callers pass only the
-// status and the code — there is no parameter through which distinguishing
-// detail could leak, which is what makes a non-member and a nonexistent org
+// {"error":"<code>","message":"<text>"} body with a fixed content type — the
+// {error, message} pair of issue #61, where the message rides the per-code
+// default authapi.ErrorMessage holds. Callers pass only the status and the
+// code — there is no parameter through which distinguishing detail could
+// leak, which is what makes a non-member and a nonexistent org
 // byte-identical on the wire.
 func writeError(ctx context.Context, w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if _, err := io.WriteString(w, `{"error":"`+code+`"}`); err != nil {
+	if _, err := w.Write(errorBody(code)); err != nil {
 		// The wire contract cannot change mid-response; the only thing left
 		// is the diagnostic, logged rather than discarded. correlation_id is
 		// passed explicitly — WarnContext does not turn ctx values into
@@ -462,4 +466,20 @@ func writeError(ctx context.Context, w http.ResponseWriter, status int, code str
 			"correlation_id", CorrelationID(ctx),
 			"status", status, "code", code, "error", err)
 	}
+}
+
+// errorBody renders the middleware's half of the {error, message} contract
+// (issue #61): authapi.NewError pairs the code with its default copy, and
+// json.Marshal — not a string splice — is what keeps a future message
+// containing a quote from corrupting the body. The codes this file emits
+// are all ErrorCode members, so the cast never leaves the enum; an
+// unmapped code would still get authapi's non-empty fallback. Marshal of
+// this fixed two-string struct cannot fail; the bare-code fallback exists
+// only so the failure branch can never emit nothing.
+func errorBody(code string) []byte {
+	body, err := json.Marshal(authapi.NewError(authapi.ErrorCode(code)))
+	if err != nil {
+		return []byte(`{"error":"` + code + `"}`)
+	}
+	return body
 }

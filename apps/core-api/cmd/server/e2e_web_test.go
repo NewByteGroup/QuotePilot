@@ -344,6 +344,7 @@ func (r *e2eRig) e2eAssertDetail404(t *testing.T, c *http.Client, rfq uuid.UUID)
 	body := readJSON[authapi.Error](t, resp, http.StatusNotFound)
 	assert.Equal(t, authapi.ErrorCodeNotFound, body.Error,
 		"a cross-tenant RFQ id is indistinguishable from an unknown one")
+	assert.NotEmpty(t, body.Message, "issue #61: every error body carries display text")
 }
 
 // e2eApproveQuote posts the approval and asserts the stored-stamp body
@@ -373,13 +374,14 @@ func (r *e2eRig) e2eApproveQuote(t *testing.T, c *http.Client, quote, user uuid.
 }
 
 // e2eAssertUnauthenticated fires one cookieless request and asserts the
-// middleware's uniform {"error":"unauthenticated"} — the fail-closed
+// middleware's uniform {"error":"unauthenticated","message":…} — the fail-closed
 // contract the browser's login redirect depends on.
 func (r *e2eRig) e2eAssertUnauthenticated(t *testing.T, c *http.Client, method, path string) {
 	t.Helper()
 	resp := r.do(t, c, method, path, "")
 	body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
 	assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error, "%s %s", method, path)
+	assert.NotEmpty(t, body.Message, "issue #61: every error body carries display text")
 }
 
 // TestE2EWebHappyPath walks the web app's bootstrap-to-approval sequence
@@ -436,7 +438,7 @@ func TestE2EWebTenantIsolation(t *testing.T) {
 }
 
 // TestE2EWebUnauthenticated pins the uniform 401 on every protected route:
-// a cookieless client gets the middleware's {"error":"unauthenticated"}
+// a cookieless client gets the middleware's {"error":"unauthenticated","message":…}
 // before any handler runs — reads and the approve write alike.
 func TestE2EWebUnauthenticated(t *testing.T) {
 	r := newE2ERig(t)
@@ -454,6 +456,7 @@ func TestE2EWebUnauthenticated(t *testing.T) {
 	resp := r.doBare(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")
 	body := readJSON[authapi.Error](t, resp, http.StatusUnauthorized)
 	assert.Equal(t, authapi.ErrorCodeUnauthenticated, body.Error)
+	assert.NotEmpty(t, body.Message, "issue #61: every error body carries display text")
 	// And the signed-out browser — trusted Origin, no cookies — meets the
 	// same 401 through the CheckOrigin-guarded mount.
 	r.e2eAssertUnauthenticated(t, bare, http.MethodPost, "/quotes/"+uuid.NewString()+"/approve")

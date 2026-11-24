@@ -98,7 +98,7 @@ func TestLoginUniform200(t *testing.T) {
 // TestLoginBadRequests covers every request-shape failure: bodies the JSON
 // binder rejects (routed by RequestErrorHandlerFunc) and bodies that bind but
 // carry an absent or ill-formed email (the handler's own 400). All share the
-// one {"error":"bad_request"} body and none reach the store.
+// one {"error":"bad_request","message":…} body and none reach the store.
 func TestLoginBadRequests(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	r.q.users["ada@test.dev"] = uuid.New()
@@ -121,7 +121,7 @@ func TestLoginBadRequests(t *testing.T) {
 			rec := r.postLogin(t, tc.body)
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		})
 	}
 	assert.Empty(t, r.q.finds, "no rejected request may reach the store")
@@ -131,7 +131,7 @@ func TestLoginBadRequests(t *testing.T) {
 }
 
 // TestLoginFailuresAreUniform500 proves a failure is the same 500
-// {"error":"internal"} wherever it strikes — the lookup, the token insert,
+// {"error":"internal","message":…} wherever it strikes — the lookup, the token insert,
 // the outbox insert or the enqueue itself: a server fault is not an
 // enumeration signal. A provider mail failure is deliberately absent here:
 // the send runs in the auth_mail_send worker off the response path, so it
@@ -158,7 +158,7 @@ func TestLoginFailuresAreUniform500(t *testing.T) {
 			rec := r.postLogin(t, `{"email":"ada@test.dev"}`)
 			assert.Equal(t, http.StatusInternalServerError, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 		})
 	}
 }
@@ -175,7 +175,7 @@ func TestLoginOversizedBodyIsUniform400(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 	assert.Empty(t, r.q.finds, "an oversized body must never reach the store")
 	assert.Empty(t, r.enq.ids)
 }
@@ -196,7 +196,7 @@ func TestLoginIPRateLimit(t *testing.T) {
 	rec := r.postLogin(t, `{"email":"ada@test.dev"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"rate_limited","message":"too many requests — retry later"}`+"\n", rec.Body.String())
 	assert.Len(t, r.enq.ids, 2, "a denied request stages nothing")
 	assert.Len(t, r.q.creates, 2, "a denied request stores no token")
 
@@ -229,7 +229,7 @@ func TestLoginEmailRateLimit(t *testing.T) {
 
 	rec := r.postLogin(t, `{"email":"ADA@Test.dev"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"rate_limited","message":"too many requests — retry later"}`+"\n", rec.Body.String())
 	assert.Len(t, r.enq.ids, 1, "a denied request stages nothing")
 
 	assert.Equal(t, http.StatusOK, r.postLogin(t, `{"email":"grace@test.dev"}`).Code,
@@ -297,7 +297,7 @@ func TestLoginTrailingGarbageIsUniform400(t *testing.T) {
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev"}`+strings.Repeat(" ", 9<<10))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 	assert.Empty(t, r.q.creates, "a rejected body never reaches the store")
 	assert.Empty(t, r.enq.ids)
 }

@@ -121,7 +121,7 @@ func TestAuthenticateUniform401(t *testing.T) {
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.False(t, p.called, "the handler must not run on a rejected request")
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"unauthenticated"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`, rec.Body.String())
 			if reference == nil {
 				reference = rec.Body.Bytes()
 			}
@@ -187,7 +187,7 @@ func TestResolveTenantUniform404(t *testing.T) {
 		assert.False(t, p.called, "%s must not reach the handler", tc.name)
 		bodies[tc.name] = rec.Body.Bytes()
 	}
-	assert.Equal(t, `{"error":"not_found"}`, string(bodies["non-member of existing org"]))
+	assert.Equal(t, `{"error":"not_found","message":"the requested resource does not exist"}`, string(bodies["non-member of existing org"]))
 	assert.Equal(t, bodies["non-member of existing org"], bodies["nonexistent org"],
 		"non-member and nonexistent org responses must be byte-identical")
 }
@@ -224,7 +224,7 @@ func TestResolveTenantRechecksMembership(t *testing.T) {
 	rec = httptest.NewRecorder()
 	serve.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "a removed member must fail on the next request")
-	assert.Equal(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 	assert.False(t, p.called)
 }
 
@@ -256,7 +256,7 @@ func TestResolveTenantHeaderRequired(t *testing.T) {
 			platform.Authenticate(cfg)(platform.ResolveTenant(store)(p.handler())).ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
-			assert.Equal(t, `{"error":"missing_organization"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 			assert.False(t, p.called)
 		})
 	}
@@ -283,7 +283,7 @@ type errRow struct{}
 func (errRow) Scan(...any) error { return errDriver }
 
 // TestResolveTenantDriverError proves a get_membership driver failure maps
-// to 500 {"error":"internal"} — a server fault, not org-existence information
+// to 500 {"error":"internal","message":…} — a server fault, not org-existence information
 // — and never reaches the handler.
 func TestResolveTenantDriverError(t *testing.T) {
 	p := &probe{}
@@ -295,7 +295,7 @@ func TestResolveTenantDriverError(t *testing.T) {
 	platform.Authenticate(cfg)(platform.ResolveTenant(store)(p.handler())).ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`, rec.Body.String())
 	assert.False(t, p.called)
 }
 
@@ -311,7 +311,7 @@ func TestResolveTenantWithoutAuth(t *testing.T) {
 	platform.ResolveTenant(store)(p.handler()).ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`, rec.Body.String())
 	assert.False(t, p.called)
 }
 
@@ -324,7 +324,7 @@ func TestRequireRoleWithoutContext(t *testing.T) {
 		rec, httptest.NewRequest(http.MethodPost, "/owner-only", nil))
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Equal(t, `{"error":"forbidden"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"forbidden","message":"you do not have permission to perform this action"}`, rec.Body.String())
 	assert.False(t, p.called)
 }
 
@@ -372,7 +372,7 @@ func TestRequireRoleThroughChain(t *testing.T) {
 			tc.chain.ServeHTTP(rec, tc.req)
 			assert.Equal(t, tc.status, rec.Code)
 			if tc.status == http.StatusForbidden {
-				assert.Equal(t, `{"error":"forbidden"}`, rec.Body.String())
+				assert.Equal(t, `{"error":"forbidden","message":"you do not have permission to perform this action"}`, rec.Body.String())
 			}
 		})
 	}

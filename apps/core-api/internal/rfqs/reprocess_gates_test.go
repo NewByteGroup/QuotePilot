@@ -47,6 +47,7 @@ func TestReprocessConflictStatuses(t *testing.T) {
 			var body authapi.ReprocessConflict
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 			assert.Equal(t, authapi.ErrorCodeRfqNotParked, body.Error)
+			assert.NotEmpty(t, body.Message, "issue #61: every error body carries display text")
 			assert.Equal(t, status, body.Status, "the current status rides the 409 body")
 			assert.Empty(t, stagedJobs(t, db, rfq))
 			r := loadRfq(t, db, org, rfq)
@@ -79,6 +80,7 @@ func TestReprocessReadyRenderedDraft409(t *testing.T) {
 	var body authapi.ReprocessConflict
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, authapi.ErrorCodeRfqNotParked, body.Error)
+	assert.NotEmpty(t, body.Message, "issue #61: every error body carries display text")
 	assert.Equal(t, "READY", body.Status)
 	assert.Empty(t, stagedJobs(t, db, rfq), "a 409 enqueues nothing")
 }
@@ -98,7 +100,7 @@ func TestReprocessUnknownAndCrossTenant404(t *testing.T) {
 
 	rec := rig.postReprocess(t, user, orgB, uuid.New())
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 
 	rec = rig.postReprocess(t, user, orgB, foreign)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String(),

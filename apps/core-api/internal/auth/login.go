@@ -321,12 +321,12 @@ func (r loginSessionOK) VisitPostAuthLoginResponse(w http.ResponseWriter) error 
 }
 
 // loginUnauthenticated is the password path's single 401 — the same
-// {"error":"unauthenticated"} body POST /auth/session emits for a dead
+// {"error":"unauthenticated","message":…} body POST /auth/session emits for a dead
 // token, so a wrong password, an unknown email and an unset password are
 // byte-identical on the wire (ADR-005 amendment's anti-enumeration contract).
 func loginUnauthenticated() authapi.PostAuthLoginResponseObject {
 	return authapi.PostAuthLogin401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 	}
 }
 
@@ -335,7 +335,7 @@ func loginUnauthenticated() authapi.PostAuthLoginResponseObject {
 // reach the same body through writeBadRequest.
 func loginBadRequest() authapi.PostAuthLoginResponseObject {
 	return authapi.PostAuthLogin400JSONResponse{
-		BadRequestJSONResponse: authapi.BadRequestJSONResponse{Error: authapi.ErrorCodeBadRequest},
+		BadRequestJSONResponse: authapi.BadRequestJSONResponse(authapi.NewError(authapi.ErrorCodeBadRequest)),
 	}
 }
 
@@ -344,6 +344,6 @@ func loginBadRequest() authapi.PostAuthLoginResponseObject {
 // contract fixes "rate_limited").
 func loginRateLimited() authapi.PostAuthLoginResponseObject {
 	return authapi.PostAuthLogin429JSONResponse{
-		RateLimitedJSONResponse: authapi.RateLimitedJSONResponse{Error: authapi.ErrorCodeRateLimited},
+		RateLimitedJSONResponse: authapi.RateLimitedJSONResponse(authapi.NewError(authapi.ErrorCodeRateLimited)),
 	}
 }

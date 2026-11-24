@@ -117,7 +117,7 @@ func TestResolveTenantMalformedCookie(t *testing.T) {
 			platform.Authenticate(cfg)(platform.ResolveTenant(store)(p.handler())).ServeHTTP(rec, req)
 
 			assert.Equal(t, http.StatusBadRequest, rec.Code)
-			assert.Equal(t, `{"error":"missing_organization"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 			assert.False(t, p.called)
 		})
 	}
@@ -141,7 +141,7 @@ func TestResolveTenantCookieNonMemberIs404(t *testing.T) {
 	chain.ServeHTTP(rec, orgCookieRequest(t, cfg, userID, orgID.String()))
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Equal(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 	assert.False(t, p.called)
 }
 
@@ -165,7 +165,7 @@ func TestResolveTenantMalformedHeaderBeatsCookie(t *testing.T) {
 	chain.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Equal(t, `{"error":"missing_organization"}`, rec.Body.String())
+	assert.Equal(t, `{"error":"missing_organization","message":"an organization hint is required — pass the X-Organization-Id header or the qp_org cookie"}`, rec.Body.String())
 	assert.False(t, p.called, "a bad header must not fall back to the cookie")
 }
 

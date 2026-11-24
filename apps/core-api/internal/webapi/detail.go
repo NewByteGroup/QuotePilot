@@ -55,7 +55,7 @@ func (e *Endpoints) GetQuoteDetail(ctx context.Context, req authapi.GetQuoteDeta
 	orgID, ok := platform.OrgID(ctx)
 	if !ok {
 		return authapi.GetQuoteDetail401JSONResponse{
-			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 		}, nil
 	}
 	var detail *authapi.QuoteDetail
@@ -74,7 +74,7 @@ func (e *Endpoints) GetQuoteDetail(ctx context.Context, req authapi.GetQuoteDeta
 	}
 	if detail == nil {
 		return authapi.GetQuoteDetail404JSONResponse{
-			NotFoundJSONResponse: authapi.NotFoundJSONResponse{Error: authapi.ErrorCodeNotFound},
+			NotFoundJSONResponse: authapi.NotFoundJSONResponse(authapi.NewError(authapi.ErrorCodeNotFound)),
 		}, nil
 	}
 	return authapi.GetQuoteDetail200JSONResponse(*detail), nil

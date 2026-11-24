@@ -301,8 +301,15 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         Error: {
-            /** @example invalid_parameter */
-            code: string;
+            /**
+             * @description Machine-readable failure code — the core ErrorCode
+             *     vocabulary. Named `error` (issue #61): the mock-era `code`
+             *     member is gone so the browser reads the field the wire
+             *     actually sends.
+             * @example bad_request
+             */
+            error: string;
+            /** @description Human-readable failure detail safe to display. */
             message: string;
         };
         Session: {
@@ -667,6 +674,8 @@ export interface components {
         ReprocessError: {
             /** @description Core error code (e.g. `rate_limited`). */
             error: string;
+            /** @description Human-readable failure detail safe to display. */
+            message: string;
         };
         ReprocessConflict: {
             /**
@@ -674,6 +683,8 @@ export interface components {
              * @enum {string}
              */
             error: "rfq_not_parked" | "rfq_busy";
+            /** @description Human-readable failure detail safe to display. */
+            message: string;
             /** @description The RFQ's current `app.rfq_status` (verbatim, not an enum). */
             status: string;
         };
@@ -702,6 +713,8 @@ export interface components {
              * @enum {string}
              */
             error: "quote_superseded" | "negative_margin";
+            /** @description Human-readable failure detail safe to display. */
+            message: string;
         };
     };
     responses: {

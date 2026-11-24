@@ -268,7 +268,7 @@ func (r sessionOK) VisitPostAuthSessionResponse(w http.ResponseWriter) error {
 // same body through writeBadRequest.
 func sessionBadRequest() authapi.PostAuthSessionResponseObject {
 	return authapi.PostAuthSession400JSONResponse{
-		BadRequestJSONResponse: authapi.BadRequestJSONResponse{Error: authapi.ErrorCodeBadRequest},
+		BadRequestJSONResponse: authapi.BadRequestJSONResponse(authapi.NewError(authapi.ErrorCodeBadRequest)),
 	}
 }
 
@@ -277,6 +277,6 @@ func sessionBadRequest() authapi.PostAuthSessionResponseObject {
 // so this is the only unauthenticated body the endpoint can emit.
 func sessionUnauthenticated() authapi.PostAuthSessionResponseObject {
 	return authapi.PostAuthSession401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 	}
 }

@@ -142,7 +142,7 @@ func TestRefreshReuseRevokesFamily(t *testing.T) {
 	replay := r.postRefresh(t, qpRefreshCookie(gen0))
 	assert.Equal(t, http.StatusUnauthorized, replay.Code)
 	assert.Equal(t, "application/json", replay.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", replay.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", replay.Body.String())
 	requireClearedPair(t, replay)
 
 	// The family kill is total: the replayed generation and its committed
@@ -155,7 +155,7 @@ func TestRefreshReuseRevokesFamily(t *testing.T) {
 	dead := r.postRefresh(t, qpRefreshCookie(gen1))
 	assert.Equal(t, http.StatusUnauthorized, dead.Code,
 		"the committed successor is dead with its family")
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", dead.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", dead.Body.String())
 	requireClearedPair(t, dead)
 }
 
@@ -181,7 +181,7 @@ func TestRefreshUniform401(t *testing.T) {
 	for _, rec := range recs {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(),
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(),
 			"absent, unknown, expired and revoked must answer byte-identically")
 		requireClearedPair(t, rec)
 	}
@@ -195,7 +195,7 @@ func TestRefreshUniform401(t *testing.T) {
 }
 
 // TestRefreshDriverErrorIsUniform500 proves a store fault answers the same
-// 500 {"error":"internal"} as every other handler-side failure — and that
+// 500 {"error":"internal","message":…} as every other handler-side failure — and that
 // no Set-Cookie header leaks onto the error path: cookies live only inside
 // typed response objects, so a bare error can never write one.
 func TestRefreshDriverErrorIsUniform500(t *testing.T) {
@@ -207,7 +207,7 @@ func TestRefreshDriverErrorIsUniform500(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"),
 		"the error path must never leak a Set-Cookie header")
 }
@@ -229,7 +229,7 @@ func TestRefreshSignFailureOrphansRotation(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 
 	// The rotation committed anyway: the presented row is stamped and the

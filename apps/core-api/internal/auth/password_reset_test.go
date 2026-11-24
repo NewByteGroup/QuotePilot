@@ -71,7 +71,7 @@ func TestPasswordResetSpendsBothBuckets(t *testing.T) {
 		r.postPath(t, "/auth/password-reset", `{"email":"ada@test.dev"}`).Code)
 	rec := r.postPath(t, "/auth/password-reset", `{"email":"ada@test.dev"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"rate_limited","message":"too many requests — retry later"}`+"\n", rec.Body.String())
 	assert.Len(t, r.q.resetCreates, 1, "a denied request stages nothing")
 
 	r2 := newRig(t, 1, platform.LoginEmailCapacity)
@@ -154,7 +154,7 @@ func TestPasswordSetUniform401(t *testing.T) {
 		rec := r.postPath(t, "/auth/password",
 			`{"token":"`+tok+`","password":"s3cret-pilot"}`)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, name)
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(), name)
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(), name)
 		assert.Empty(t, rec.Header().Values("Set-Cookie"), name)
 	}
 	assert.Len(t, r.q.passwordSets, 1, "only the first, live consume wrote a credential")
@@ -175,7 +175,7 @@ func TestPasswordSetRequestShapes(t *testing.T) {
 	} {
 		rec := r.postPath(t, "/auth/password", body)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, name)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String(), name)
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String(), name)
 	}
 	assert.Empty(t, r.q.resetConsumes, "a rejected request never reaches the consume")
 	assert.Empty(t, r.q.passwordSets)
@@ -194,7 +194,7 @@ func TestPasswordSetSpendsIPBucket(t *testing.T) {
 	rec := r.postPath(t, "/auth/password",
 		`{"token":"`+token+`","password":"s3cret-pilot"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"rate_limited","message":"too many requests — retry later"}`+"\n", rec.Body.String())
 	assert.Len(t, r.q.resetConsumes, 1, "the denied retry never reached the consume")
 }
 
@@ -213,7 +213,7 @@ func TestTokenPurposesDoNotExchange(t *testing.T) {
 	// filter makes it the same miss as a dead link — 401, no cookies.
 	rec := r.postPath(t, "/auth/session", `{"token":"`+resetToken+`"}`)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Empty(t, r.q.sessions, "a reset token must never mint a session")
 
@@ -222,7 +222,7 @@ func TestTokenPurposesDoNotExchange(t *testing.T) {
 	rec = r.postPath(t, "/auth/password",
 		`{"token":"`+loginToken+`","password":"s3cret-pilot"}`)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, r.q.passwordSets, "a magic link must never set a password")
 	assert.Empty(t, r.q.sessionRevokes)
 

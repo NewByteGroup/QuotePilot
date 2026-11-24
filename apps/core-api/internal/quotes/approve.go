@@ -257,19 +257,19 @@ func (o approveOutcome) response(quoteID uuid.UUID) authapi.ApproveQuoteResponse
 		}
 	case kindNotFound:
 		return authapi.ApproveQuote404JSONResponse{
-			NotFoundJSONResponse: authapi.NotFoundJSONResponse{Error: authapi.ErrorCodeNotFound},
+			NotFoundJSONResponse: authapi.NotFoundJSONResponse(authapi.NewError(authapi.ErrorCodeNotFound)),
 		}
 	case kindSuperseded:
 		return authapi.ApproveQuote409JSONResponse{
-			ConflictJSONResponse: authapi.ConflictJSONResponse{Error: authapi.ErrorCodeQuoteSuperseded},
+			ConflictJSONResponse: authapi.ConflictJSONResponse(authapi.NewError(authapi.ErrorCodeQuoteSuperseded)),
 		}
 	case kindNegativeMargin:
 		return authapi.ApproveQuote409JSONResponse{
-			ConflictJSONResponse: authapi.ConflictJSONResponse{Error: authapi.ErrorCodeNegativeMargin},
+			ConflictJSONResponse: authapi.ConflictJSONResponse(authapi.NewError(authapi.ErrorCodeNegativeMargin)),
 		}
 	}
 	return authapi.ApproveQuote500JSONResponse{
-		InternalErrorJSONResponse: authapi.InternalErrorJSONResponse{Error: authapi.ErrorCodeInternal},
+		InternalErrorJSONResponse: authapi.InternalErrorJSONResponse(authapi.NewError(authapi.ErrorCodeInternal)),
 	}
 }
 
@@ -277,6 +277,6 @@ func (o approveOutcome) response(quoteID uuid.UUID) authapi.ApproveQuoteResponse
 // route — the same body the middleware emits for a bad token.
 func approveUnauthenticated() authapi.ApproveQuoteResponseObject {
 	return authapi.ApproveQuote401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 	}
 }

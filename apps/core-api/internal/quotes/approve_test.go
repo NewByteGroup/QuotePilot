@@ -295,7 +295,7 @@ func TestApproveSupersededRefused(t *testing.T) {
 
 	rec := rig.postApprove(t, user, org, quote)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"quote_superseded"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"quote_superseded","message":"this quote version was superseded — approve the latest version"}`, rec.Body.String())
 
 	q := loadQuote(t, db, org, quote)
 	assert.Nil(t, q.ApprovedAt, "a refused approve writes nothing")
@@ -316,7 +316,7 @@ func TestApproveNegativeMarginRefused(t *testing.T) {
 
 	rec := rig.postApprove(t, user, org, quote)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"negative_margin"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"negative_margin","message":"the pinned price is below cost — reprice before approving"}`, rec.Body.String())
 
 	q := loadQuote(t, db, org, quote)
 	assert.Nil(t, q.ApprovedAt)
@@ -341,7 +341,7 @@ func TestApproveUnknownAndCrossTenant404(t *testing.T) {
 
 	rec := rig.postApprove(t, user, orgB, uuid.New())
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 
 	rec = rig.postApprove(t, user, orgB, foreignQuote)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String(),

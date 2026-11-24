@@ -4,6 +4,12 @@
 # the request edge core-api already implements (auth, /me); the endpoints below
 # are to be folded into it with Pedro as each one lands. This file is written
 # as OpenAPI 3.0.3, per ADR-002.
+#
+# Casing boundary (issue #61): the auth/session surface keeps its
+# snake_case field names — the profile/membership vocabulary core-api
+# already emits on the wire (full_name, user_id, approved_by_user_id);
+# web-v1 domain models use camelCase. New fields follow the side of the
+# boundary they land on.
 openapi: 3.0.3
 info:
   title: QuotePilot web API (mock contract)
@@ -326,9 +332,9 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
   # Mirrored verbatim from core-api.yaml (server-side source of truth —
-  # this endpoint is implemented, not mocked). Note its error bodies use
-  # the core `{error}` shape, not this file's mock-era `{code, message}`
-  # Error schema.
+  # this endpoint is implemented, not mocked). Its error bodies are the
+  # converged `{error, message}` shape of issue #61 — shared with the
+  # Error schema above now that the mock-era `{code, message}` is gone.
   /v1/rfqs/{id}/reprocess:
     post:
       operationId: reprocessRfq
@@ -402,9 +408,8 @@ paths:
   # Mirrored verbatim from core-api.yaml (server-side source of truth —
   # this endpoint is implemented, not mocked) minus the `qpAccess`
   # security and the `X-Organization-Id` parameter: bearerAuth is global
-  # here and the browser's tenant rides the qp_org cookie. Note its error
-  # bodies use the core `{error}` shape, not this file's mock-era
-  # {code, message} Error schema.
+  # here and the browser's tenant rides the qp_org cookie. Its error
+  # bodies are the same converged `{error, message}` shape (issue #61).
   /quotes/{id}/approve:
     post:
       operationId: approveQuote
@@ -506,13 +511,19 @@ components:
   schemas:
     Error:
       type: object
-      required: [code, message]
+      required: [error, message]
       properties:
-        code:
+        error:
           type: string
-          example: invalid_parameter
+          description: |
+            Machine-readable failure code — the core ErrorCode
+            vocabulary. Named `error` (issue #61): the mock-era `code`
+            member is gone so the browser reads the field the wire
+            actually sends.
+          example: bad_request
         message:
           type: string
+          description: Human-readable failure detail safe to display.
     Session:
       type: object
       required: [user, organization, organizations]
@@ -1268,8 +1279,8 @@ components:
           items:
             $ref: "#/components/schemas/RepairSession"
     # Reprocess schemas — mirrored verbatim from core-api.yaml (the
-    # endpoint is implemented server-side, so these use the core
-    # `{error}` error body, not the mock-era `{code, message}` Error).
+    # endpoint is implemented server-side; its error bodies are the
+    # converged `{error, message}` shape of issue #61).
     ReprocessStage:
       type: string
       description: River job kind of the pipeline stage a reprocess resumed.
@@ -1287,26 +1298,32 @@ components:
     ReprocessError:
       type: object
       additionalProperties: false
-      required: [error]
+      required: [error, message]
       properties:
         error:
           type: string
           description: Core error code (e.g. `rate_limited`).
+        message:
+          type: string
+          description: Human-readable failure detail safe to display.
     ReprocessConflict:
       type: object
       additionalProperties: false
-      required: [error, status]
+      required: [error, message, status]
       properties:
         error:
           type: string
           enum: [rfq_not_parked, rfq_busy]
           description: '`rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly).'
+        message:
+          type: string
+          description: Human-readable failure detail safe to display.
         status:
           type: string
           description: The RFQ's current `app.rfq_status` (verbatim, not an enum).
     # Approve schemas — mirrored from core-api.yaml (the endpoint is
-    # implemented server-side, so these use the core `{error}` error
-    # body, not the mock-era {code, message} Error). `QuoteStatus` is
+    # implemented server-side; its error bodies are the converged
+    # `{error, message}` shape of issue #61). `QuoteStatus` is
     # already the inbox bucket enum in this file, so the core contract's
     # `app.quote_status` enum lands here as `QuoteVersionStatus`.
     QuoteVersionStatus:
@@ -1336,9 +1353,12 @@ components:
     ApproveConflict:
       type: object
       additionalProperties: false
-      required: [error]
+      required: [error, message]
       properties:
         error:
           type: string
           enum: [quote_superseded, negative_margin]
           description: '`quote_superseded` (a recalculation retired this version — approve the latest) or `negative_margin` (the pinned price is below cost).'
+        message:
+          type: string
+          description: Human-readable failure detail safe to display.

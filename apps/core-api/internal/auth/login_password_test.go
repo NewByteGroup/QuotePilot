@@ -119,7 +119,7 @@ func TestLoginPasswordStaleCredentialAborts(t *testing.T) {
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(),
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(),
 		"a mid-flight credential change is indistinguishable from a wrong password")
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Empty(t, r.q.sessions, "the dead credential mints nothing")
@@ -150,7 +150,7 @@ func TestLoginPasswordUniform401(t *testing.T) {
 	} {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, name)
 		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"), name)
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(), name)
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(), name)
 		assert.Empty(t, rec.Header().Values("Set-Cookie"), name+" must never write a cookie")
 	}
 	assert.Len(t, r.q.authFinds, 3, "every attempt paid the same credential lookup")
@@ -190,7 +190,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":null}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		assert.Empty(t, r.q.outboxCreates, "null must not become a magic link")
 		assert.Empty(t, r.q.authFinds, "null is not a password attempt")
 	})
@@ -200,7 +200,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":""}`)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 		assert.Len(t, r.q.authFinds, 1, "the credential lookup ran")
 		assert.Empty(t, r.q.outboxCreates)
 	})
@@ -223,7 +223,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":123}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		assert.Empty(t, r.q.outboxCreates)
 		assert.Empty(t, r.q.authFinds)
 	})
@@ -233,7 +233,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":{}}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		assert.Empty(t, r.q.outboxCreates)
 		assert.Empty(t, r.q.authFinds)
 	})
@@ -249,7 +249,7 @@ func TestLoginPasswordEmptyStringRoutesToPasswordPath(t *testing.T) {
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":""}`)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, r.q.outboxCreates, "a password attempt never stages a magic-link send")
 	assert.Empty(t, r.enq.ids)
 }
@@ -268,7 +268,7 @@ func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"rate_limited","message":"too many requests — retry later"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Len(t, r.q.authFinds, 1, "a denied attempt never reaches the credential lookup")
 
@@ -285,7 +285,7 @@ func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 }
 
 // TestLoginPasswordFailuresAreUniform500 pins the credential path's driver
-// failures to the same {"error":"internal"} every other route emits — a
+// failures to the same {"error":"internal","message":…} every other route emits — a
 // server fault is not an enumeration signal, and no cookie may leak.
 func TestLoginPasswordFailuresAreUniform500(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
@@ -294,6 +294,6 @@ func TestLoginPasswordFailuresAreUniform500(t *testing.T) {
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 }

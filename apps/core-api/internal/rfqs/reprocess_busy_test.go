@@ -155,6 +155,7 @@ func (f busyFixture) assertBusy409(t *testing.T, wantStatus string) {
 	var body authapi.ReprocessConflict
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, authapi.ErrorCodeRfqBusy, body.Error)
+	assert.NotEmpty(t, body.Message, "issue #61: every error body carries display text")
 	assert.Equal(t, wantStatus, body.Status)
 	assert.Empty(t, stagedJobs(t, f.db, f.rfq), "a busy refusal enqueues nothing")
 }

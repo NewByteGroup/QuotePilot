@@ -25,12 +25,12 @@ func (e *Endpoints) ListInboxQuotes(ctx context.Context, req authapi.ListInboxQu
 	orgID, ok := platform.OrgID(ctx)
 	if !ok {
 		return authapi.ListInboxQuotes401JSONResponse{
-			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+			UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 		}, nil
 	}
 	if req.Params.Status != nil && !req.Params.Status.Valid() {
 		return authapi.ListInboxQuotes400JSONResponse{
-			BadRequestJSONResponse: authapi.BadRequestJSONResponse{Error: authapi.ErrorCodeBadRequest},
+			BadRequestJSONResponse: authapi.BadRequestJSONResponse(authapi.NewError(authapi.ErrorCodeBadRequest)),
 		}, nil
 	}
 	var page authapi.InboxQuotePage
