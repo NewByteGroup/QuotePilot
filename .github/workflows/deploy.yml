@@ -80,11 +80,11 @@ jobs:
           docker push "$AI_IMAGE:${{ env.ENV_TAG }}"
 
   deploy:
-    name: deploy-${{ env.ENV_TAG }}
+    name: deploy-${{ github.ref_name == 'main' && 'staging' || 'dev' }}
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: ${{ env.ENV_TAG }}
+    environment: ${{ github.ref_name == 'main' && 'staging' || 'dev' }}
     steps:
       - name: Check deploy credentials
         id: gate
