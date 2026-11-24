@@ -5,10 +5,11 @@
 # are to be folded into it with Pedro as each one lands. This file is written
 # as OpenAPI 3.0.3, per ADR-002.
 #
-# Casing boundary (issue #61): auth/session token envelopes intentionally
-# use snake_case — the RFC 6749-style vocabulary (access_token, expires_in,
-# refresh_token) the core auth surface already speaks; domain models use
-# camelCase. New fields follow the side of the boundary they land on.
+# Casing boundary (issue #61): the auth/session surface keeps its
+# snake_case field names — the profile/membership vocabulary core-api
+# already emits on the wire (full_name, user_id, approved_by_user_id);
+# web-v1 domain models use camelCase. New fields follow the side of the
+# boundary they land on.
 openapi: 3.0.3
 info:
   title: QuotePilot web API (mock contract)
@@ -519,7 +520,7 @@ components:
             vocabulary. Named `error` (issue #61): the mock-era `code`
             member is gone so the browser reads the field the wire
             actually sends.
-          example: invalid_parameter
+          example: bad_request
         message:
           type: string
           description: Human-readable failure detail safe to display.

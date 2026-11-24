@@ -183,12 +183,12 @@ export const handlers = [
   http.patch('/v1/me/preferences', async ({ request, response }) => {
     const { name, language } = await request.json()
     if (language !== undefined && !USER_LANGUAGES.includes(language)) {
-      return response(400).json({ error: 'invalid_request', message: 'Unsupported language.' })
+      return response(400).json({ error: 'bad_request', message: 'Unsupported language.' })
     }
     const trimmedName = name?.trim()
     if (trimmedName !== undefined && (trimmedName.length === 0 || trimmedName.length > 120)) {
       return response(400).json({
-        error: 'invalid_request',
+        error: 'bad_request',
         message: 'Name must have 1–120 chars.',
       })
     }
@@ -254,7 +254,7 @@ export const handlers = [
   http.patch('/v1/organization/identity', async ({ request, response }) => {
     const result = applyIdentityUpdate(current().companyIdentity, await request.json())
     if ('error' in result) {
-      return response(400).json({ error: 'invalid_request', message: result.error })
+      return response(400).json({ error: 'bad_request', message: result.error })
     }
     setCompanyIdentity(result.identity)
     return response(200).json(current().companyIdentity)
@@ -262,11 +262,11 @@ export const handlers = [
   http.put('/v1/organization/identity/letterhead-logo', async ({ request, response }) => {
     const file = (await request.formData()).get('file')
     if (!file || typeof file === 'string') {
-      return response(400).json({ error: 'invalid_request', message: 'file is required' })
+      return response(400).json({ error: 'bad_request', message: 'file is required' })
     }
     if (!LETTERHEAD_LOGO_TYPES.includes(file.type) || file.size > LETTERHEAD_LOGO_MAX_BYTES) {
       return response(400).json({
-        error: 'invalid_request',
+        error: 'bad_request',
         message: 'PNG, JPEG or SVG up to 2 MB',
       })
     }

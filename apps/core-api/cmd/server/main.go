@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/aiengine"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/fx"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
@@ -372,7 +374,25 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}
+	// Anything the patterns miss — unknown paths and wrong methods alike —
+	// answers in the contract's {error, message} shape too (issue #61):
+	// the router's plain-text 404/405 would be the only non-contract
+	// payload left on the surface.
+	mux.Handle("/", platform.Correlation(http.HandlerFunc(notFoundJSON)))
 	return mux
+}
+
+// notFoundJSON is the mux's catch-all — route misses and wrong methods
+// land here and answer the contract's {error, message} body instead of
+// the standard library's plain-text default.
+func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	body, err := json.Marshal(authapi.NewError(authapi.ErrorCodeNotFound))
+	if err != nil {
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 // startJobs builds the River client over the qp_app pool — the driver

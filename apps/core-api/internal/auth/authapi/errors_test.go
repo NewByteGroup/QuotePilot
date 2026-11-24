@@ -7,26 +7,30 @@ package authapi
 // without its default text — the drift this file exists to prevent.
 
 import (
+	"os"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// allErrorCodes is the contract's ErrorCode vocabulary, pinned
-// explicitly: a new member added to the enum without map copy fails
-// TestErrorMessagesCoverEveryCode's length check, not by accident.
-var allErrorCodes = []ErrorCode{
-	ErrorCodeBadRequest,
-	ErrorCodeUnauthenticated,
-	ErrorCodeMissingOrganization,
-	ErrorCodeNotFound,
-	ErrorCodeForbidden,
-	ErrorCodeRateLimited,
-	ErrorCodeInternal,
-	ErrorCodeQuoteSuperseded,
-	ErrorCodeNegativeMargin,
-	ErrorCodeRfqNotParked,
-	ErrorCodeRfqBusy,
+// declaredErrorCodes reads the enum straight out of authapi.gen.go — the
+// constants the contract itself declares. A handwritten list would let a
+// new ErrorCode member land without map copy and stay green (the list
+// and the map would both be stale); reading the generated declarations
+// makes the coverage check self-updating.
+func declaredErrorCodes(t *testing.T) []ErrorCode {
+	t.Helper()
+	src, err := os.ReadFile("authapi.gen.go")
+	require.NoError(t, err)
+	decls := regexp.MustCompile(`ErrorCode\w+\s+ErrorCode = "(\w+)"`).FindAllStringSubmatch(string(src), -1)
+	require.NotEmpty(t, decls, "no ErrorCode declarations found in authapi.gen.go")
+	codes := make([]ErrorCode, len(decls))
+	for i, d := range decls {
+		codes[i] = ErrorCode(d[1])
+	}
+	return codes
 }
 
 // TestErrorMessagesCoverEveryCode is the issue #61 guarantee: every
@@ -35,14 +39,15 @@ var allErrorCodes = []ErrorCode{
 // key could never be emitted anyway — it would not compile — but the
 // check keeps the table honest).
 func TestErrorMessagesCoverEveryCode(t *testing.T) {
-	for _, code := range allErrorCodes {
+	declared := declaredErrorCodes(t)
+	for _, code := range declared {
 		assert.NotEmpty(t, errorMessages[code], "%s must carry default display copy", code)
 		assert.True(t, code.Valid(), "%q is not an ErrorCode member", code)
 	}
 	for code := range errorMessages {
 		assert.True(t, code.Valid(), "map key %q is not an ErrorCode member", code)
 	}
-	assert.Len(t, errorMessages, len(allErrorCodes),
+	assert.Len(t, errorMessages, len(declared),
 		"every ErrorCode needs a default message — add copy for a new enum member")
 }
 

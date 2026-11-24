@@ -306,7 +306,7 @@ export interface components {
              *     vocabulary. Named `error` (issue #61): the mock-era `code`
              *     member is gone so the browser reads the field the wire
              *     actually sends.
-             * @example invalid_parameter
+             * @example bad_request
              */
             error: string;
             /** @description Human-readable failure detail safe to display. */
