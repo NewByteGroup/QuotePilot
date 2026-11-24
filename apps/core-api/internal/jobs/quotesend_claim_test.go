@@ -239,12 +239,17 @@ func TestQuoteSendRefusalDropsClaim(t *testing.T) {
 // blockingSender is a resend.Sender that parks inside Send until the test
 // releases it — the way to prove the provider phase holds no quote lock.
 type blockingSender struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 }
 
 var _ resend.Sender = (*blockingSender)(nil)
+
+// Release unparks Send — idempotent so a failed assertion mid-test can
+// never strand the worker goroutine.
+func (b *blockingSender) Release() { b.releaseOnce.Do(func() { close(b.release) }) }
 
 func (b *blockingSender) Send(ctx context.Context, _ resend.SendRequest) (string, error) {
 	b.once.Do(func() { close(b.started) })
@@ -266,6 +271,7 @@ func TestQuoteSendQuoteLockFreeDuringProvider(t *testing.T) {
 	storage := platform.NewFakeStorage()
 	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
 	blocker := &blockingSender{started: make(chan struct{}), release: make(chan struct{})}
+	defer blocker.Release() // a failed probe must not strand the worker goroutine
 	worker := jobs.NewQuoteSendWorker(db, blocker, storage, rigOutboundFrom)
 
 	done := make(chan error, 1)
@@ -285,7 +291,7 @@ func TestQuoteSendQuoteLockFreeDuringProvider(t *testing.T) {
 	_, held := claimHolder(t, db, f)
 	assert.True(t, held, "the claim, not the lock, excludes rivals mid-send")
 
-	close(blocker.release)
+	blocker.Release()
 	require.NoError(t, <-done)
 	s := loadSendState(t, db, f)
 	assert.Equal(t, "APPROVED_SENT", s.Status)
@@ -304,7 +310,7 @@ func TestQuoteSendLastAttemptLiveClaimKeepsRfq(t *testing.T) {
 	rig := newSendRig(db, sender, platform.NewFakeStorage())
 
 	job := sendJobAs(f.org, f.quote, deadJobID+1)
-	job.JobRow.Attempt = job.JobRow.MaxAttempts // final attempt: dead-letter path
+	job.Attempt = job.MaxAttempts // final attempt: dead-letter path
 	err := rig.worker.Work(context.Background(), job)
 	require.Error(t, err)
 
