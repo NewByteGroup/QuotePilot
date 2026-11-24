@@ -831,6 +831,13 @@ type AppQuoteLineItem struct {
 	CreatedAt        pgtype.Timestamptz
 }
 
+type AppQuoteSendClaim struct {
+	QuoteID        pgtype.UUID
+	OrganizationID pgtype.UUID
+	ClaimedBy      int64
+	ClaimedAt      pgtype.Timestamptz
+}
+
 type AppRfqAttachment struct {
 	ID             pgtype.UUID
 	OrganizationID pgtype.UUID
