@@ -676,6 +676,18 @@ type AppInboundMessage struct {
 	ReceivedAt       pgtype.Timestamptz
 }
 
+type AppInboundQuarantine struct {
+	ID              pgtype.UUID
+	ResendMessageID string
+	Reason          string
+	Recipients      []byte
+	MatchedOrgIds   []pgtype.UUID
+	Subject         string
+	FromAddr        string
+	ReceivedAt      pgtype.Timestamptz
+	QuarantinedAt   pgtype.Timestamptz
+}
+
 type AppOrgQuoteCounter struct {
 	OrganizationID pgtype.UUID
 	NextSeq        int32
@@ -713,6 +725,12 @@ type AppOrganizationMembership struct {
 	UserID         pgtype.UUID
 	Role           AppMembershipRole
 	CreatedAt      pgtype.Timestamptz
+}
+
+type AppPlatformCounter struct {
+	Key       string
+	Value     int64
+	UpdatedAt pgtype.Timestamptz
 }
 
 type AppPricingRule struct {
