@@ -139,7 +139,8 @@ BEGIN
     ('app.consume_password_reset_token(text)'),
     ('app.set_user_password(uuid, text)'),
     ('app.revoke_user_sessions(uuid)'),
-    ('app.revoke_user_pending_tokens(uuid)')
+    ('app.revoke_user_pending_tokens(uuid)'),
+    ('app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)')
   ) AS f(fn)
   WHERE to_regprocedure(f.fn) IS NOT NULL
     AND NOT has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
@@ -177,7 +178,8 @@ BEGIN
         ('app.consume_password_reset_token(text)'),
         ('app.set_user_password(uuid, text)'),
         ('app.revoke_user_sessions(uuid)'),
-        ('app.revoke_user_pending_tokens(uuid)')
+        ('app.revoke_user_pending_tokens(uuid)'),
+        ('app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)')
       ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_app EXECUTE surface in app must equal the tenant-function allowlist; extra: %', bad;
@@ -193,7 +195,9 @@ BEGIN
     ('app.organization_memberships'),
     ('app.auth_login_tokens'),
     ('app.auth_sessions'),
-    ('app.auth_mail_outbox')
+    ('app.auth_mail_outbox'),
+    ('app.inbound_quarantine'),
+    ('app.platform_counters')
   ) AS t(tbl)
   CROSS JOIN (VALUES ('SELECT'),('INSERT'),('UPDATE'),('DELETE')) AS p(priv)
   WHERE to_regclass(t.tbl) IS NOT NULL

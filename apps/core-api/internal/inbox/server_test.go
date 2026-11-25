@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 )
 
 // resolverFunc adapts a function to the OrgResolver seam so each test pins
@@ -50,18 +51,38 @@ func (r *spyRunner) InTenantReadTx(_ context.Context, _ uuid.UUID, _ func(contex
 	return nil
 }
 
-// post fires a body at a fresh server built on the given resolver and
-// returns the recorder plus the runner spy for assertions. The enqueue seam
-// stays nil — unit tests pin routing and drops; the in-transaction chain
-// itself is integration-tested against real Postgres.
-func post(t *testing.T, resolver inbox.OrgResolver, body string) (*httptest.ResponseRecorder, *spyRunner) {
+// quarantineSpy records every drop record the handler writes; err forces
+// the writer-failure path drop() must still abort cleanly on.
+type quarantineSpy struct {
+	drops []platform.InboundQuarantineDrop
+	err   error
+}
+
+func (q *quarantineSpy) RecordInboundQuarantine(_ context.Context, d platform.InboundQuarantineDrop) (bool, error) {
+	q.drops = append(q.drops, d)
+	return true, q.err
+}
+
+// post fires a body at a fresh server built on the given resolver and a
+// clean quarantine spy, returning the recorder plus both spies for
+// assertions. The enqueue seam stays nil — unit tests pin routing and
+// drops; the in-transaction chain itself is integration-tested against
+// real Postgres.
+func post(t *testing.T, resolver inbox.OrgResolver, body string) (*httptest.ResponseRecorder, *spyRunner, *quarantineSpy) {
+	t.Helper()
+	return postQuar(t, resolver, &quarantineSpy{}, body)
+}
+
+// postQuar is post with the caller's quarantine fake — the error-path
+// tests inject a failing writer.
+func postQuar(t *testing.T, resolver inbox.OrgResolver, quar *quarantineSpy, body string) (*httptest.ResponseRecorder, *spyRunner, *quarantineSpy) {
 	t.Helper()
 	runner := &spyRunner{}
-	srv := inbox.NewServer(runner, resolver, acceptAll{}, nil, testLogger)
+	srv := inbox.NewServer(runner, resolver, quar, acceptAll{}, nil, testLogger)
 	req := httptest.NewRequest("POST", "/webhooks/resend/inbound", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
-	return rec, runner
+	return rec, runner, quar
 }
 
 // okResolver answers the same org for every recipient.
@@ -83,7 +104,7 @@ var validBody = eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.00
 // by TestSpikeWebhook on real Postgres.
 func TestInboundSingleOrgRoutes(t *testing.T) {
 	org := uuid.New()
-	rec, runner := post(t, okResolver(org), validBody)
+	rec, runner, _ := post(t, okResolver(org), validBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called, "tenant tx must be opened for the resolved org")
 	require.Equal(t, org, runner.org)
@@ -94,7 +115,7 @@ func TestInboundSingleOrgRoutes(t *testing.T) {
 // make Svix replay an undeliverable message for ~27h.
 func TestInboundNoMatchDrops(t *testing.T) {
 	miss := func(context.Context, string) (uuid.UUID, bool, error) { return uuid.Nil, false, nil }
-	rec, runner := post(t, resolverFunc(miss), validBody)
+	rec, runner, _ := post(t, resolverFunc(miss), validBody)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.JSONEq(t, `{"inserted":false,"dropped":true}`, rec.Body.String())
 	assert.Equal(t, "abort-message", rec.Header().Get("webhook-delivery"))
@@ -109,10 +130,58 @@ func TestInboundMultiOrgDrops(t *testing.T) {
 		return orgs[r], true, nil
 	})
 	body := eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","b@in.test"]}`)
-	rec, runner := post(t, resolver, body)
+	rec, runner, _ := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "abort-message", rec.Header().Get("webhook-delivery"))
 	assert.False(t, runner.called, "a multi-tenant message must not be guessed")
+}
+
+// TestInboundNoMatchQuarantines pins the migration-0016 record: a 0-match
+// drop lands one quarantine record carrying reason no_match, the to array
+// as received, no candidates, and the payload's triage fields.
+func TestInboundNoMatchQuarantines(t *testing.T) {
+	miss := func(context.Context, string) (uuid.UUID, bool, error) { return uuid.Nil, false, nil }
+	rec, _, quar := post(t, resolverFunc(miss), validBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, quar.drops, 1, "exactly one quarantine record per drop")
+	d := quar.drops[0]
+	assert.Equal(t, "no_match", d.Reason)
+	assert.Equal(t, "m1", d.ResendMessageID)
+	assert.Equal(t, []string{"a@in.test"}, d.Recipients)
+	assert.Empty(t, d.MatchedOrgIDs)
+	assert.Equal(t, "RFQ: 20 boxes Shenzhen", d.Subject)
+	assert.Equal(t, "customer@example.com", d.FromAddr)
+	assert.False(t, d.ReceivedAt.IsZero(), "received_at rides the envelope created_at")
+}
+
+// TestInboundMultiOrgQuarantines pins the multi_match record: both
+// candidate organizations ride the record so ops can see who collided.
+func TestInboundMultiOrgQuarantines(t *testing.T) {
+	orgA, orgB := uuid.New(), uuid.New()
+	resolver := resolverFunc(func(_ context.Context, r string) (uuid.UUID, bool, error) {
+		orgs := map[string]uuid.UUID{"a@in.test": orgA, "b@in.test": orgB}
+		return orgs[r], true, nil
+	})
+	body := eventBody(`{"email_id":"m2","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","b@in.test"]}`)
+	rec, _, quar := post(t, resolver, body)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, quar.drops, 1)
+	d := quar.drops[0]
+	assert.Equal(t, "multi_match", d.Reason)
+	assert.ElementsMatch(t, []uuid.UUID{orgA, orgB}, d.MatchedOrgIDs)
+	assert.Equal(t, []string{"a@in.test", "b@in.test"}, d.Recipients)
+}
+
+// TestInboundQuarantineErrorStillAborts pins the failure contract: the
+// message is permanently undeliverable no matter what the writer says, so
+// an audit-write error must not become a non-2xx Svix would retry — the
+// drop still answers 2xx with the abort header.
+func TestInboundQuarantineErrorStillAborts(t *testing.T) {
+	miss := func(context.Context, string) (uuid.UUID, bool, error) { return uuid.Nil, false, nil }
+	rec, _, _ := postQuar(t, resolverFunc(miss), &quarantineSpy{err: errors.New("db down")}, validBody)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"inserted":false,"dropped":true}`, rec.Body.String())
+	assert.Equal(t, "abort-message", rec.Header().Get("webhook-delivery"))
 }
 
 // TestInboundSameOrgTwice dedupes at the org level: two distinct addresses
@@ -123,7 +192,7 @@ func TestInboundSameOrgTwice(t *testing.T) {
 		return org, strings.HasSuffix(r, "@in.test"), nil
 	})
 	body := eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","b@in.test"]}`)
-	rec, runner := post(t, resolver, body)
+	rec, runner, _ := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called)
 	require.Equal(t, org, runner.org)
@@ -138,7 +207,7 @@ func TestInboundPartialMatchStores(t *testing.T) {
 		return org, r == "a@in.test", nil
 	})
 	body := eventBody(`{"email_id":"m1","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test","ghost@in.test"]}`)
-	rec, runner := post(t, resolver, body)
+	rec, runner, _ := post(t, resolver, body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called)
 	require.Equal(t, org, runner.org)
@@ -150,7 +219,7 @@ func TestInboundResolverError(t *testing.T) {
 	broken := func(context.Context, string) (uuid.UUID, bool, error) {
 		return uuid.Nil, false, errors.New("pool exhausted")
 	}
-	rec, _ := post(t, resolverFunc(broken), validBody)
+	rec, _, _ := post(t, resolverFunc(broken), validBody)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -163,7 +232,7 @@ func TestInboundResolverError(t *testing.T) {
 func TestInboundMinimalPayload(t *testing.T) {
 	org := uuid.New()
 	body := `{"type":"email.received","data":{"email_id":"m-min","created_at":"2026-11-09T11:59:58.000Z","to":["a@in.test"]}}`
-	rec, runner := post(t, okResolver(org), body)
+	rec, runner, _ := post(t, okResolver(org), body)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, runner.called)
 	require.Equal(t, org, runner.org)
@@ -188,7 +257,7 @@ func TestInboundValidation(t *testing.T) {
 		"bad json":    `{nope`,
 	}
 	for name, body := range bodies {
-		rec, runner := post(t, okResolver(uuid.New()), body)
+		rec, runner, _ := post(t, okResolver(uuid.New()), body)
 		require.Equal(t, http.StatusBadRequest, rec.Code, name)
 		assert.Equal(t, "abort-message", rec.Header().Get("webhook-delivery"), name)
 		assert.False(t, runner.called, name)

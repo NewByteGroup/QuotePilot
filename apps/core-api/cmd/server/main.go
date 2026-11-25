@@ -311,7 +311,7 @@ func buildInbox(db *tenantdb.DB, store *platform.Store, enqueue inbox.EnqueueIng
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
-	return inbox.NewServer(db, store, verifier, enqueue, slog.Default()), nil
+	return inbox.NewServer(db, store, store, verifier, enqueue, slog.Default()), nil
 }
 
 // buildMux composes the surfaces with per-route middleware. Correlation is
