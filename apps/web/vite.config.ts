@@ -14,8 +14,13 @@ function resolveApiMockFlag(env: Record<string, string>): string | undefined {
   return env.CF_PAGES_BRANCH === 'main' ? 'false' : 'true'
 }
 
+// .env lives at the repo root (per .env.example), not in this package —
+// envDir and loadEnv both point up so VITE_* overrides reach the dev
+// server from the documented location.
+const rootDir = fileURLToPath(new URL('../..', import.meta.url))
+
 export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
+  const env = loadEnv(mode, rootDir, '')
   const apiMock = resolveApiMockFlag(env)
   return {
     plugins: [react(), tailwindcss()],
@@ -31,6 +36,7 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
+    envDir: rootDir,
     resolve: {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
     },

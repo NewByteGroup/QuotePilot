@@ -2,7 +2,7 @@ package auth_test
 
 // POST /auth/session proofs (spec 2026-11-10-tenant-resolution-api sections
 // 4, 7 and 8): a live magic-link token earns the cookie pair (qp_access
-// Path=/ SameSite=Lax, qp_refresh Path=/auth SameSite=Strict, both
+// Path=/ SameSite=Lax, qp_refresh Path=/ SameSite=Strict, both
 // HttpOnly+Secure) around the profile+memberships body the org switcher
 // renders. Used, expired and unknown tokens answer the same 401
 // byte-for-byte, malformed bodies the uniform 400, driver failures the
@@ -78,7 +78,7 @@ func TestSessionIssuesCookiePair(t *testing.T) {
 
 	refresh := findCookie(t, rec, "qp_refresh")
 	require.NotNil(t, refresh)
-	assert.Equal(t, "/auth", refresh.Path)
+	assert.Equal(t, "/", refresh.Path)
 	assert.Equal(t, int(r.cfg.RefreshTTL.Seconds()), refresh.MaxAge)
 	assert.True(t, refresh.HttpOnly)
 	assert.True(t, refresh.Secure)

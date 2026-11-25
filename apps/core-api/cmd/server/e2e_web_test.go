@@ -245,7 +245,7 @@ func (r *e2eRig) e2eLogin(t *testing.T, c *http.Client, email, password string) 
 	assert.True(t, access.Secure)
 	refresh := cookieNamed(resp.Cookies(), "qp_refresh")
 	require.NotNil(t, refresh, "login must set qp_refresh")
-	assert.Equal(t, "/auth", refresh.Path)
+	assert.Equal(t, "/", refresh.Path)
 	assert.Equal(t, http.SameSiteStrictMode, refresh.SameSite)
 	require.True(t, r.jarHas(t, c, "qp_access"), "the jar must carry qp_access onward")
 	return body

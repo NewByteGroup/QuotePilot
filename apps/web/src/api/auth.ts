@@ -8,15 +8,12 @@ async function fetchMe() {
   return coreClient.GET('/me')
 }
 
-// null means "not signed in". An expired access cookie is rotated once through
-// /auth/refresh before giving up (core-api.yaml: 15-minute qp_access, 30-day qp_refresh).
+// null means "not signed in". An expired access cookie is rotated by the
+// coreClient middleware (single-flight /auth/refresh + retry), so a 401
+// that survives to here really is a dead session (core-api.yaml: 15-minute
+// qp_access, 30-day qp_refresh).
 async function loadMe(): Promise<CoreSchemas['MeResponse'] | null> {
-  let result = await fetchMe()
-  if (result.response.status === 401) {
-    const refreshed = await coreClient.POST('/auth/refresh')
-    if (!refreshed.response.ok) return null
-    result = await fetchMe()
-  }
+  const result = await fetchMe()
   if (result.response.status === 401) return null
   if (!result.data)
     throw new Error(`GET /me failed: ${result.error?.error ?? result.response.status}`)

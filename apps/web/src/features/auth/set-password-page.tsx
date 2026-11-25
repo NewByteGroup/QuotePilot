@@ -9,6 +9,12 @@ import { AuthShell } from './auth-shell'
 
 const MIN_PASSWORD_LENGTH = 8 // PasswordSetRequest.password in core-api.yaml: 8..128
 
+// The server counts Unicode code points (passwordWithinPolicy); string
+// .length and native minLength count UTF-16 units — four emoji pass a
+// native "8" check but the API sees four characters. Array.from iterates
+// code points, matching the server exactly.
+const codePoints = (value: string) => Array.from(value).length
+
 const loginLink = (label: string) => (
   <Link
     to="/login"
@@ -29,10 +35,12 @@ export function SetPasswordPage() {
   const [mismatch, setMismatch] = useState(false)
   const setNewPassword = useSetPassword()
 
+  const tooShort = password.length > 0 && codePoints(password) < MIN_PASSWORD_LENGTH
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault()
     setMismatch(password !== confirm)
-    if (password !== confirm || !token) return
+    if (password !== confirm || !token || codePoints(password) < MIN_PASSWORD_LENGTH) return
     setNewPassword.mutate({ token, password })
   }
 
@@ -72,8 +80,7 @@ export function SetPasswordPage() {
             type="password"
             required
             autoFocus
-            minLength={MIN_PASSWORD_LENGTH}
-            maxLength={128}
+            aria-invalid={tooShort}
             autoComplete="new-password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
@@ -94,6 +101,11 @@ export function SetPasswordPage() {
             className="h-10"
           />
         </div>
+        {tooShort ? (
+          <p role="alert" className="text-sm text-red-700">
+            A senha precisa de pelo menos 8 caracteres.
+          </p>
+        ) : null}
         {mismatch ? (
           <p role="alert" className="text-sm text-red-700">
             As senhas não conferem.

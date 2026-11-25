@@ -27,3 +27,24 @@ export const coreClient = createClient<corePaths>({
   credentials: 'include',
   fetch: fetchPerRequest,
 })
+
+// Single-flight access rotation: the first 401 outside /auth/* posts
+// /auth/refresh once — concurrent 401s share it — and every caller retries
+// its own request afterwards. Without this, the 15-minute qp_access TTL
+// kills any protected read that is not loadMe's hand-rolled refresh.
+let refreshing: Promise<boolean> | null = null
+
+coreClient.use({
+  async onResponse({ request, response }) {
+    if (response.status !== 401) return response
+    if (request.url.includes('/auth/')) return response
+    refreshing ??= coreClient
+      .POST('/auth/refresh')
+      .then(({ response: r }) => r.ok)
+      .finally(() => {
+        refreshing = null
+      })
+    if (!(await refreshing)) return response
+    return fetchPerRequest(request)
+  },
+})

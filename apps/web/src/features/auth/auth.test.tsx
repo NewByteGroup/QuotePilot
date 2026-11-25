@@ -90,11 +90,13 @@ describe('Auth', () => {
   })
 
   it('exchanges the magic-link token and opens the app', async () => {
+    localStorage.setItem('quotepilot.mock.signed-out', 'true')
     renderApp(`/auth/exchange?token=${MOCK_LOGIN_TOKEN}`)
     expect(await screen.findByRole('heading', { name: 'Inbox de cotações' })).toBeInTheDocument()
   })
 
   it('rejects a used or unknown magic-link token', async () => {
+    localStorage.setItem('quotepilot.mock.signed-out', 'true')
     renderApp('/auth/exchange?token=stale')
     expect(
       await screen.findByRole('heading', { name: 'Link inválido ou expirado' }),
@@ -103,6 +105,13 @@ describe('Auth', () => {
       'href',
       '/login',
     )
+  })
+
+  it('asks a signed-in user to confirm before the link swaps the session', async () => {
+    renderApp(`/auth/exchange?token=${MOCK_LOGIN_TOKEN}`)
+    expect(await screen.findByRole('heading', { name: 'Trocar de conta?' })).toBeInTheDocument()
+    await userEvent.click(await screen.findByRole('button', { name: 'Entrar com o link' }))
+    expect(await screen.findByRole('heading', { name: 'Inbox de cotações' })).toBeInTheDocument()
   })
 
   it('logs out and returns to the login page', async () => {

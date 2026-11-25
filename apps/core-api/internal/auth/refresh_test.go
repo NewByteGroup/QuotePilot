@@ -2,7 +2,7 @@ package auth_test
 
 // POST /auth/refresh proofs (spec 2026-11-10-tenant-resolution-api sections
 // 4, 7 and 8): a live cookie earns the rotated pair — a fresh access JWT on
-// the successor's session id plus a new opaque refresh scoped Path=/auth —
+// the successor's session id plus a new opaque refresh on Path=/ —
 // while absent, unknown, expired, revoked and replayed cookies all answer
 // the byte-identical 401 with both cookies cleared. Reuse additionally
 // kills the whole family server-side (the committed successor dies with the
@@ -47,7 +47,7 @@ func requireClearedPair(t *testing.T, rec *httptest.ResponseRecorder) {
 	refresh := findCookie(t, rec, "qp_refresh")
 	require.NotNil(t, refresh, "a rejection must expire the refresh cookie")
 	assert.Equal(t, "", refresh.Value)
-	assert.Equal(t, "/auth", refresh.Path)
+	assert.Equal(t, "/", refresh.Path)
 	assert.True(t, refresh.HttpOnly)
 	assert.Equal(t, http.SameSiteStrictMode, refresh.SameSite)
 	assert.LessOrEqual(t, refresh.MaxAge, 0)
@@ -82,7 +82,7 @@ func TestRefreshRotatesCookiePair(t *testing.T) {
 
 	refresh := findCookie(t, rec, "qp_refresh")
 	require.NotNil(t, refresh)
-	assert.Equal(t, "/auth", refresh.Path)
+	assert.Equal(t, "/", refresh.Path)
 	assert.Equal(t, int(r.cfg.RefreshTTL.Seconds()), refresh.MaxAge)
 	assert.True(t, refresh.HttpOnly)
 	assert.True(t, refresh.Secure)
