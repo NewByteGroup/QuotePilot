@@ -290,7 +290,7 @@ func TestQuoteSendUnapprovedRefuses(t *testing.T) {
 	f := seedSend(t, db, o)
 	storage := platform.NewFakeStorage()
 	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, storage)
 
 	err := rig.worker.Work(context.Background(), sendJob(f.org, f.quote))
@@ -314,7 +314,7 @@ func TestQuoteSendEmptySenderIsJobError(t *testing.T) {
 	f := seedSend(t, db, healthyFixture())
 	storage := platform.NewFakeStorage()
 	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	worker := jobs.NewQuoteSendWorker(db, sender, storage, "   ")
 
 	err := worker.Work(context.Background(), sendJob(f.org, f.quote))
@@ -341,7 +341,7 @@ func TestQuoteSendMarginFlipRefuses(t *testing.T) {
 	f := seedSend(t, db, o)
 	storage := platform.NewFakeStorage()
 	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, storage)
 
 	err := rig.worker.Work(context.Background(), sendJob(f.org, f.quote))
@@ -365,7 +365,7 @@ func TestQuoteSendMissingRenderRefuses(t *testing.T) {
 	o := healthyFixture()
 	o.pdfKey = ""
 	f := seedSend(t, db, o)
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, platform.NewFakeStorage())
 
 	err := rig.worker.Work(context.Background(), sendJob(f.org, f.quote))
@@ -385,7 +385,7 @@ func TestQuoteSendMissingRenderRefuses(t *testing.T) {
 func TestQuoteSendMissingObjectRefuses(t *testing.T) {
 	db := testenv.Open(t)
 	f := seedSend(t, db, healthyFixture())
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, platform.NewFakeStorage()) // no bytes under the key
 
 	err := rig.worker.Work(context.Background(), sendJob(f.org, f.quote))
@@ -405,7 +405,7 @@ func TestQuoteSendSupersededRefuses(t *testing.T) {
 	f := seedSend(t, db, o)
 	storage := platform.NewFakeStorage()
 	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, storage)
 
 	err := rig.worker.Work(context.Background(), sendJob(f.org, f.quote))
@@ -495,7 +495,7 @@ func TestQuoteSendCrossTenantInvisible(t *testing.T) {
 	f := seedSend(t, db, healthyFixture())
 	other := uuid.New()
 	testenv.SeedOrganization(t, other, "send-other")
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, platform.NewFakeStorage())
 
 	err := rig.worker.Work(context.Background(), sendJob(other, f.quote))
