@@ -1,13 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 
-import { coreClient } from '@/api/client'
+import { apiClient } from '@/api/client'
 import { server } from '@/mocks/node'
 
 const API = 'http://localhost/api'
 const unauthenticated = () => HttpResponse.json({ error: 'unauthenticated' }, { status: 401 })
 
-describe('coreClient access-rotation middleware', () => {
+describe('apiClient access-rotation middleware', () => {
   it('resends the request body on the post-refresh retry', async () => {
     const bodies: string[] = []
     server.use(
@@ -20,7 +20,7 @@ describe('coreClient access-rotation middleware', () => {
       }),
     )
 
-    const { response, error } = await coreClient.POST('/v1/session/organization', {
+    const { response, error } = await apiClient.POST('/v1/session/organization', {
       body: { organizationId: '3f9a5b6e-1c2d-4e5f-8a9b-0c1d2e3f4a5b' },
     })
 
@@ -33,30 +33,31 @@ describe('coreClient access-rotation middleware', () => {
 
   it('shares one refresh across concurrent 401s', async () => {
     let refreshCalls = 0
-    const meCalls: number[] = []
+    const hits = { session: 0, inbox: 0 }
+    const once401 = (key: keyof typeof hits, ok: object) => () => {
+      hits[key] += 1
+      return hits[key] === 1 ? unauthenticated() : HttpResponse.json(ok)
+    }
     server.use(
-      http.post(`${API}/auth/refresh`, () => {
+      // Slow enough that both 401s land while this refresh is still in
+      // flight — a second call afterwards means the flight was not shared.
+      http.post(`${API}/auth/refresh`, async () => {
         refreshCalls += 1
+        await new Promise((resolve) => setTimeout(resolve, 50))
         return new HttpResponse(null, { status: 204 })
       }),
-      http.get(`${API}/me`, () => {
-        meCalls.push(1)
-        return meCalls.length <= 1
-          ? unauthenticated()
-          : HttpResponse.json({ user: {}, memberships: [] })
-      }),
-      http.get(`${API}/v1/session`, () => {
-        meCalls.push(1)
-        return meCalls.length <= 2
-          ? unauthenticated()
-          : HttpResponse.json({ user: {}, memberships: [] })
-      }),
+      http.get(`${API}/v1/session`, once401('session', {})),
+      http.get(`${API}/v1/inbox/quotes`, once401('inbox', { quotes: [] })),
     )
 
-    const [me, session] = await Promise.all([coreClient.GET('/me'), coreClient.GET('/v1/session')])
+    const [session, inbox] = await Promise.all([
+      apiClient.GET('/v1/session'),
+      apiClient.GET('/v1/inbox/quotes'),
+    ])
 
-    expect(me.response.status).toBe(200)
     expect(session.response.status).toBe(200)
+    expect(inbox.response.status).toBe(200)
+    expect(hits).toEqual({ session: 2, inbox: 2 })
     expect(refreshCalls).toBe(1)
   })
 })
