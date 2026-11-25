@@ -11,7 +11,10 @@ import { MOCK_LOGIN_TOKEN, MOCK_PASSWORD, MOCK_RESET_TOKEN } from './demo-creden
 const http = createOpenApiHttp<paths>({ baseUrl: API_BASE_URL })
 
 const STORAGE_KEY = 'quotepilot.mock.signed-out'
-const UNAUTHENTICATED = { error: 'unauthenticated' } as const
+const UNAUTHENTICATED = {
+  error: 'unauthenticated',
+  message: 'missing or invalid credentials',
+} as const
 
 // The mock has no cookies: it starts signed in and only remembers an explicit logout.
 function isSignedIn(): boolean {
@@ -48,7 +51,11 @@ export const authHandlers = [
   // a magic link. Both answer like core-api: uniform 401 or uniform 200.
   untypedHttp.post(`${API_BASE_URL}/auth/login`, async ({ request }) => {
     const { email, password } = (await request.json()) as CoreSchemas['LoginRequest']
-    if (!email?.includes('@')) return HttpResponse.json({ error: 'bad_request' }, { status: 400 })
+    if (!email?.includes('@'))
+      return HttpResponse.json(
+        { error: 'bad_request', message: 'the request is malformed or invalid' },
+        { status: 400 },
+      )
     if (password === undefined) return HttpResponse.json({ status: 'ok' })
     if (password !== MOCK_PASSWORD) return HttpResponse.json(UNAUTHENTICATED, { status: 401 })
     setSignedIn(true)
@@ -60,12 +67,20 @@ export const authHandlers = [
   }),
   http.post('/auth/password-reset', async ({ request, response }) => {
     const { email } = await request.json()
-    if (!email?.includes('@')) return response(400).json({ error: 'bad_request' })
+    if (!email?.includes('@'))
+      return response(400).json({
+        error: 'bad_request',
+        message: 'the request is malformed or invalid',
+      })
     return response(200).json({ status: 'ok' })
   }),
   http.post('/auth/password', async ({ request, response }) => {
     const { token, password } = await request.json()
-    if (password.length < 8) return response(400).json({ error: 'bad_request' })
+    if (password.length < 8)
+      return response(400).json({
+        error: 'bad_request',
+        message: 'the request is malformed or invalid',
+      })
     if (token !== MOCK_RESET_TOKEN) return response(401).json(UNAUTHENTICATED)
     return response(200).json({ status: 'ok' })
   }),

@@ -270,6 +270,181 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Current user and active organization.
+         * @description The web app's session bootstrap: `Authenticate` verifies
+         *     `qp_access`, then the handler answers the caller's profile plus
+         *     every organization they belong to. The ACTIVE organization is
+         *     resolved server-side — the `X-Organization-Id` header when an API
+         *     client sends it, else the `qp_org` cookie POST
+         *     /v1/session/organization sets, else the user's first membership
+         *     (`list_memberships_for_email` ordered by created_at), so
+         *     `organization` is always non-null. The route mounts Authenticate
+         *     only: no org context is a fallback, not a 400.
+         */
+        get: operations["getSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/session/organization": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make another of the user's organizations the active one.
+         * @description Checks live membership (`get_membership` — a non-member and a
+         *     nonexistent organization get the same byte-identical 404), then
+         *     sets the `qp_org` cookie (HttpOnly, Secure, SameSite=Lax, Path=/):
+         *     the tenant transport for browser clients that cannot send the
+         *     custom header on every call. ResolveTenant reads it only as the
+         *     fallback after the header — the cookie is transport, the
+         *     per-request membership re-check stays the security boundary.
+         */
+        post: operations["switchOrganization"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/inbox/quotes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Quotes in the inbox of the active organization.
+         * @description `Authenticate` + `ResolveTenant` — the tenant is the
+         *     `X-Organization-Id` header when present, else the `qp_org` cookie
+         *     (server behavior, not contract: the parameter stays optional so a
+         *     cookie-only client still reaches the middleware). Every read runs
+         *     inside `InTenantReadTx` under RLS.
+         */
+        get: operations["listInboxQuotes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/quotes/{quoteId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Everything needed to audit one quote (split-screen audit).
+         * @description `Authenticate` + `ResolveTenant`, same chain as /v1/inbox/quotes.
+         *     `quoteId` is the RFQ's id (`app.rfq_requests.id` — the inbox item
+         *     id, stable across quote versions), NOT a quote version id; the
+         *     latest version rides along. An unknown or other-tenant id gets the
+         *     same uniform 404 — RLS makes the row invisible.
+         */
+        get: operations["getQuoteDetail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/rfqs/{id}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint.
+         * @description `Authenticate` + `ResolveTenant` +
+         *     `RequireRole(OWNER, ADMIN, PRICING_ANALYST)` — the review queue's
+         *     release action (spec 2026-11-11 section 4 "Reprocess"). For an
+         *     RFQ parked in `NEEDS_REVIEW` or `FAILED`, one tenant transaction
+         *     row-locks the RFQ, clears `review_reason`/`failure_reason`,
+         *     moves `status` back to the resumed stage's active status, writes
+         *     the `rfq.reprocessed` audit row (actor, cleared reason, resumed
+         *     stage) and enqueues the stage's job — one commit, nothing
+         *     enqueued or written outside it.
+         *
+         *     The resume point is the earliest missing checkpoint, so the paid
+         *     extraction and a completed carrier fetch are never repeated:
+         *     (0) both body columns NULL, zero `rfq_attachments` rows and no
+         *     persisted extraction is the S1 dead-letter shell (permanent
+         *     Resend fetch failure — an attachment-only ingest keeps its
+         *     bodies NULL too, but always stores attachments) — `rfq_ingest`
+         *     re-runs for the resolved `inbound_messages` receipt and promotes
+         *     the shell in place, or `rfq_extract` when no receipt exists to
+         *     resurrect; (1) a usable extraction — `extracted_payload_json` and
+         *     `extraction_confidence` are the pair S2 commits together — else
+         *     `rfq_extract` re-runs (`NO_USABLE_TEXT`, `INVALID_EXTRACTION`,
+         *     `TARIFF_UPDATE` parks and dead-lettered `FAILED` shells land
+         *     here); (2) a `DRAFT` quote — its existence proves the S3a
+         *     checkpoint committed, so the time-dependent `request_hash`
+         *     recompute never runs for a priced RFQ — with NULL
+         *     `pdf_storage_key` means `rfq_render` re-runs (the RFQ is already
+         *     `READY` past pricing), and a rendered `DRAFT` means `rfq_price`
+         *     supersedes it into a new version; (3) only with no `DRAFT` does
+         *     the S3a owed gate recompute off the stored extraction — FCL +
+         *     derived IMPORT + `OwesImportFreight` — where no `carrier_offers`
+         *     row for the recomputed `request_hash` means `rfq_fetch_rates`
+         *     re-runs (any recorded outcome, even `NOT_APPLICABLE`/
+         *     `FETCH_FAILED`, counts as completed), else `rfq_price`. The human
+         *     reprocess IS the review-gate override: `LOW_CONFIDENCE`,
+         *     `MISSING_TARIFF`, `REQUIRED_FIELD_MISSING` and the other
+         *     business parks keep their persisted extraction and resume at
+         *     pricing. Every other `app.rfq_status` — `RECEIVED`, `PARSING`,
+         *     `PRICING`, `READY`, `APPROVED_SENT`, `IGNORED` — answers 409,
+         *     except `READY` while its `DRAFT` quote awaits its first render
+         *     (a dead-lettered `rfq_render` leaves exactly that shape);
+         *     `IGNORED` is intentionally terminal.
+         *
+         *     `REPROCESS_MIN_INTERVAL` (default 60s) bounds one reprocess per
+         *     RFQ: a repeat call inside the interval answers 429 with
+         *     `Retry-After` and enqueues nothing — a double click or retry
+         *     loop cannot fan out jobs or carrier calls. The last reprocess
+         *     time is read off the audit log, so no column is added. The
+         *     interval check runs BEFORE the status gate, so the 429 answers
+         *     for any repeat of the same RFQ inside the interval regardless
+         *     of its current `app.rfq_status` — an RFQ mid-resume still gets
+         *     429 + `Retry-After`, not 409. Only a call past the interval (or
+         *     the first ever) reaches the status gate: a resume still running
+         *     then answers 409 with the stage's active status
+         *     (`RECEIVED`/`PARSING`/`PRICING`/`READY`).
+         */
+        post: operations["reprocessRfq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -281,12 +456,26 @@ export interface components {
          *     malformed bodies and `rate_limited` the login bucket (spec section
          *     8.1 leaves the code unpinned — this contract fixes it).
          *     `quote_superseded` and `negative_margin` are the two conflict
-         *     refusals of quote approval (spec 2026-11-11 section 4).
+         *     refusals of quote approval (spec 2026-11-11 section 4);
+         *     `rfq_not_parked` is the permanent conflict refusal of RFQ
+         *     reprocess — the RFQ is not in a reprocessable state (its
+         *     current status rides the 409 body alongside the code).
+         *     `rfq_busy` is the transient one — a live worker holds the
+         *     DRAFT quote's row lock, so retry shortly even when `status`
+         *     still reads parked.
          * @enum {string}
          */
-        ErrorCode: "bad_request" | "unauthenticated" | "missing_organization" | "not_found" | "forbidden" | "rate_limited" | "internal" | "quote_superseded" | "negative_margin";
+        ErrorCode: "bad_request" | "unauthenticated" | "missing_organization" | "not_found" | "forbidden" | "rate_limited" | "internal" | "quote_superseded" | "negative_margin" | "rfq_not_parked" | "rfq_busy";
         Error: {
             error: components["schemas"]["ErrorCode"];
+            /**
+             * @description Human-readable failure detail safe to display (issue #61 —
+             *     the converged `{error, message}` body: the code for machines,
+             *     this string for people). The server fills it from a per-code
+             *     default; a handler may override it with contextual text, but
+             *     it is never empty.
+             */
+            message: string;
         };
         /**
          * @description Mirrors the `app.membership_role` enum (migration 0002).
@@ -390,6 +579,38 @@ export interface components {
             approved_at: string;
             /** @description User UUID of the approving analyst. */
             approved_by_user_id: string;
+        };
+        /**
+         * @description River job kind of the pipeline stage a reprocess resumed — the
+         *     `resumed_stage` vocabulary of POST /v1/rfqs/{id}/reprocess.
+         * @enum {string}
+         */
+        ReprocessStage: "rfq_ingest" | "rfq_extract" | "rfq_fetch_rates" | "rfq_price" | "rfq_render";
+        ReprocessRfqResponse: {
+            /**
+             * @description Always `accepted` — the stage job is staged inside the
+             *     transaction, not completed (the pipeline runs async).
+             * @enum {string}
+             */
+            status: "accepted";
+            resumed_stage: components["schemas"]["ReprocessStage"];
+        };
+        ReprocessConflict: {
+            error: components["schemas"]["ErrorCode"];
+            /**
+             * @description Human-readable failure detail safe to display — the same
+             *     `message` member the plain Error body carries (issue #61).
+             */
+            message: string;
+            /**
+             * @description The RFQ's current `app.rfq_status` — `RECEIVED`, `PARSING`,
+             *     `PRICING`, `READY`, `APPROVED_SENT` or `IGNORED`
+             *     (`NEEDS_REVIEW`/`FAILED` are reprocessable and never appear
+             *     here). Plain string, not an enum: the vocabulary lives in
+             *     the database, and a drifted value must reach the client
+             *     verbatim instead of failing decode.
+             */
+            status: string;
         };
         OrganizationResponse: {
             /** @description Organization UUID. */
@@ -497,6 +718,208 @@ export interface components {
              *     (e.g. `img001` for `<img src="cid:img001">`).
              */
             content_id?: string;
+        };
+        Session: {
+            user: components["schemas"]["SessionUser"];
+            /** @description Active organization; all organization-scoped endpoints answer for it. */
+            organization: components["schemas"]["SessionOrganization"];
+            /** @description Every organization the user belongs to, including the active one. */
+            organizations: components["schemas"]["SessionOrganization"][];
+        };
+        SwitchOrganizationRequest: {
+            /** Format: uuid */
+            organizationId: string;
+        };
+        SessionUser: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            /**
+             * Format: email
+             * @description Synced from the identity provider; not editable in web.
+             */
+            readonly email: string;
+            /** @enum {string} */
+            role: "admin" | "operator";
+            organizationCount: number;
+            language: components["schemas"]["UserLanguage"];
+        };
+        /**
+         * @description Language core-api uses for the texts it sends to this user.
+         * @enum {string}
+         */
+        UserLanguage: "pt" | "en" | "es";
+        SessionOrganization: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+            planName: string;
+            /**
+             * Format: email
+             * @description Address that receives RFQ emails for this organization.
+             */
+            inboundAddress: string;
+        };
+        /**
+         * @description The web-facing quote status (web-api.yaml's QuoteStatus, renamed —
+         *     see the fold comment above): a coarser rollup of `app.rfq_status`
+         *     for the inbox list.
+         * @enum {string}
+         */
+        InboxQuoteStatus: "processing" | "awaiting_review" | "ready_to_send" | "sent";
+        /** @enum {string} */
+        Equipment: "fcl_20dv" | "fcl_40hc" | "lcl" | "air";
+        /** @example BRSSZ */
+        UnLocode: string;
+        Route: {
+            origin: components["schemas"]["UnLocode"];
+            destination: components["schemas"]["UnLocode"];
+        };
+        Money: {
+            /**
+             * @description Decimal amount as a string (no floats).
+             * @example 23260.55
+             */
+            amount: string;
+            /** @example BRL */
+            currency: string;
+        };
+        InboxQuote: {
+            /**
+             * Format: uuid
+             * @description The RFQ's id (`app.rfq_requests.id`), stable across quote versions.
+             */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The latest quote version's id (`app.quotes.id`) — the path
+             *     parameter of `POST /quotes/{id}/approve`. Null while no quote
+             *     version exists.
+             */
+            quoteVersionId?: string | null;
+            rfqNumber: number;
+            customerName: string;
+            subject: string;
+            /** @description Null until the extraction agent resolves the lane. */
+            route: components["schemas"]["Route"] | null;
+            /** @description Null until the extraction agent resolves the modal. */
+            equipment: (string & components["schemas"]["Equipment"]) | null;
+            status: components["schemas"]["InboxQuoteStatus"];
+            /** @description Null while the quote is still processing. */
+            estimatedTotal: components["schemas"]["Money"] | null;
+            /** @description Deterministic extraction confidence (RFC-004). Null while processing. */
+            confidencePercent: number | null;
+            /**
+             * Format: date-time
+             * @description Deadline to answer the customer. Null once the quote is sent.
+             */
+            slaDueAt: string | null;
+            slaAtRisk: boolean;
+            /** Format: date-time */
+            receivedAt: string;
+        };
+        InboxStatusCounts: {
+            all: number;
+            processing: number;
+            awaiting_review: number;
+            ready_to_send: number;
+            sent: number;
+        };
+        SlaRiskHighlight: {
+            customerName: string;
+            /** Format: date-time */
+            slaDueAt: string;
+        };
+        InboxSummary: {
+            receivedToday: number;
+            receivedYesterday: number;
+            readyToSend: number;
+            autoApproveConfidencePercent: number;
+            avgResponseMinutes: number;
+            responseTargetMinutes: number;
+            slaAtRiskCount: number;
+            mostUrgentSlaRisk: components["schemas"]["SlaRiskHighlight"] | null;
+        };
+        InboxQuotePage: {
+            items: components["schemas"]["InboxQuote"][];
+            summary: components["schemas"]["InboxSummary"];
+            statusCounts: components["schemas"]["InboxStatusCounts"];
+            /** Format: date-time */
+            refreshedAt: string;
+        };
+        QuoteDetail: {
+            quote: components["schemas"]["InboxQuote"];
+            email: components["schemas"]["QuoteEmail"];
+            /** @description Fields the agent extracted (or inferred) from the email. */
+            extraction: components["schemas"]["ExtractedField"][];
+            /** @description Null while the quote is still processing. */
+            pricing: components["schemas"]["PriceComposition"] | null;
+        };
+        QuoteEmail: {
+            /** Format: email */
+            from: string;
+            /** Format: email */
+            to: string;
+            /** Format: date-time */
+            receivedAt: string;
+            /** @description Email body split into paragraphs of segments, so extracted spans can be highlighted. */
+            paragraphs: components["schemas"]["EmailSegment"][][];
+            attachments: components["schemas"]["EmailAttachment"][];
+        };
+        EmailSegment: {
+            text: string;
+            /** @enum {string} */
+            highlight: "none" | "extracted" | "inferred";
+        };
+        EmailAttachment: {
+            fileName: string;
+            sizeBytes: number;
+        };
+        ExtractedField: {
+            label: string;
+            value: string;
+            /** @description True when the value was assumed, not read from the email. */
+            inferred: boolean;
+        };
+        PriceComposition: {
+            sections: components["schemas"]["PriceSection"][];
+            totalCost: components["schemas"]["Money"];
+            /** @description Target margin as a decimal string (no floats). */
+            marginPercent: string;
+            margin: components["schemas"]["Money"];
+            proposalTotal: components["schemas"]["Money"];
+            confidencePercent: number;
+            /** @description First applied FX rate; null when nothing was converted. */
+            fx: components["schemas"]["AppliedFxRate"] | null;
+            validityHours: number;
+            recalcFxThresholdPercent: components["schemas"]["DecimalPercent"];
+        };
+        PriceSection: {
+            title: string;
+            source: components["schemas"]["PriceSource"] | null;
+            items: components["schemas"]["PriceItem"][];
+            note: string | null;
+        };
+        PriceSource: {
+            label: string;
+            /** @enum {string} */
+            kind: "private_rate" | "public_snapshot";
+        };
+        PriceItem: {
+            label: string;
+            detail: string | null;
+            amount: components["schemas"]["Money"];
+            inferred: boolean;
+        };
+        /** @description Percentage as a decimal string (no floats), e.g. "12.0". */
+        DecimalPercent: string;
+        AppliedFxRate: {
+            /** @description Rate used to price, e.g. "dólar armador". */
+            label: string;
+            rate: string;
+            /** @description Reference rate shown for comparison, e.g. "PTAX". */
+            referenceLabel: string;
+            referenceRate: string;
         };
     };
     responses: {
@@ -854,9 +1277,12 @@ export interface operations {
         requestBody?: never;
         responses: {
             /**
-             * @description The approved version's status and stored approval stamp —
-             *     identical on a re-approve (the no-op returns what the first
-             *     approval wrote).
+             * @description The version's current `app.quote_status` plus its stored
+             *     approval stamp — the stamp (`approved_at`,
+             *     `approved_by_user_id`) is what a re-approve no-op preserves;
+             *     `status` reports the live value, so a sent quote answers
+             *     `APPROVED_SENT` on retry rather than the first response's
+             *     `DRAFT`.
              */
             200: {
                 headers: {
@@ -871,6 +1297,232 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Session of the signed-in user. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            /**
+             * @description A malformed `X-Organization-Id` header —
+             *     `{"error":"missing_organization"}` like ResolveTenant emits.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    switchOrganization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchOrganizationRequest"];
+            };
+        };
+        responses: {
+            /** @description Session with the new active organization. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listInboxQuotes: {
+        parameters: {
+            query?: {
+                /** @description Only quotes in this status. Omit for all. */
+                status?: components["schemas"]["InboxQuoteStatus"];
+                /** @description Case-insensitive match on RFQ number, customer name or subject. */
+                q?: string;
+            };
+            header?: {
+                /**
+                 * @description Organization the request scopes to — required by the middleware, not
+                 *     the binding layer (an absent value reaches ResolveTenant as empty and
+                 *     gets the 400 {"error":"missing_organization"} only after
+                 *     authentication). Also part of the CSRF posture, since a cross-site
+                 *     form cannot set headers (ADR-005 section 4).
+                 */
+                "X-Organization-Id"?: components["parameters"]["OrganizationIdHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Inbox page with summary counters. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxQuotePage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getQuoteDetail: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description Organization the request scopes to — required by the middleware, not
+                 *     the binding layer (an absent value reaches ResolveTenant as empty and
+                 *     gets the 400 {"error":"missing_organization"} only after
+                 *     authentication). Also part of the CSRF posture, since a cross-site
+                 *     form cannot set headers (ADR-005 section 4).
+                 */
+                "X-Organization-Id"?: components["parameters"]["OrganizationIdHeader"];
+            };
+            path: {
+                /** @description RFQ UUID (`app.rfq_requests.id` — see operation description). */
+                quoteId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Quote with the original email, agent extraction and price composition. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuoteDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    reprocessRfq: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description Organization the request scopes to — required by the middleware, not
+                 *     the binding layer (an absent value reaches ResolveTenant as empty and
+                 *     gets the 400 {"error":"missing_organization"} only after
+                 *     authentication). Also part of the CSRF posture, since a cross-site
+                 *     form cannot set headers (ADR-005 section 4).
+                 */
+                "X-Organization-Id"?: components["parameters"]["OrganizationIdHeader"];
+            };
+            path: {
+                /** @description RFQ UUID (`app.rfq_requests.id`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description Reprocess accepted — the resumed stage's job is already
+             *     staged inside the committed transaction. `resumed_stage`
+             *     names the River job kind the pipeline resumes at.
+             */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessRfqResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /**
+             * @description Two refusals share this status, distinguished by `error`.
+             *     `{"error":"rfq_not_parked","status":"<app.rfq_status>"}` is
+             *     the permanent one: the RFQ is not in a reprocessable state
+             *     (only `NEEDS_REVIEW`/`FAILED`, or `READY` with a `DRAFT`
+             *     quote still awaiting its first render, are); `status`
+             *     reports its current `app.rfq_status` value so the client
+             *     can refresh its row — including the active status an
+             *     accepted resume is still running under.
+             *     `{"error":"rfq_busy","status":"<app.rfq_status>"}` is the
+             *     transient one: a live worker holds the `DRAFT` quote's row
+             *     lock (the NOWAIT probe found it), so a worker owns
+             *     downstream state for now — retry shortly. It can carry a
+             *     parked-looking `status` (`NEEDS_REVIEW`/`FAILED` still on
+             *     the row), which is why the code, not the status, says which
+             *     refusal it is. A reprocess inside `REPROCESS_MIN_INTERVAL`
+             *     of an accepted one answers 429, not 409 — the interval
+             *     check runs before the status gate and answers
+             *     unconditionally, whatever the RFQ's current status.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessConflict"];
+                };
+            };
+            /**
+             * @description `{"error":"rate_limited"}` — the newest `rfq.reprocessed`
+             *     audit row for this RFQ is younger than
+             *     `REPROCESS_MIN_INTERVAL`; nothing was written or enqueued.
+             *     `Retry-After` carries the remaining wait in seconds. The
+             *     interval check runs before the status gate, so this answers
+             *     for ANY repeat of the same RFQ inside the interval,
+             *     whatever `app.rfq_status` currently reads — an RFQ still
+             *     mid-resume gets 429 + `Retry-After`, not the 409 its active
+             *     status would otherwise mean.
+             */
+            429: {
+                headers: {
+                    /** @description Seconds until the next reprocess of this RFQ is accepted. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };
