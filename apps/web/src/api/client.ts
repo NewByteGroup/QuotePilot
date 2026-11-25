@@ -34,7 +34,16 @@ export const coreClient = createClient<corePaths>({
 // kills any protected read that is not loadMe's hand-rolled refresh.
 let refreshing: Promise<boolean> | null = null
 
+// A fetch consumes the Request's body stream, so the retry cannot resend the
+// same object — a POST would die with TypeError right after the refresh it
+// needed. onRequest stashes an undisturbed clone per call for the retry.
+const retriable = new WeakMap<Request, Request>()
+
 coreClient.use({
+  onRequest({ request }) {
+    retriable.set(request, request.clone())
+    return request
+  },
   async onResponse({ request, response }) {
     if (response.status !== 401) return response
     if (request.url.includes('/auth/')) return response
@@ -45,6 +54,8 @@ coreClient.use({
         refreshing = null
       })
     if (!(await refreshing)) return response
-    return fetchPerRequest(request)
+    const retry = retriable.get(request) ?? request
+    retriable.delete(request)
+    return fetchPerRequest(retry)
   },
 })
