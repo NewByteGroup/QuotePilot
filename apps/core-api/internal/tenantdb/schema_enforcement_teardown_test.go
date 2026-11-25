@@ -103,16 +103,21 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 	require.NoError(t, err)
 	// Backstop only: the happy path unlocks and releases right after the
 	// insert — holding the conn for the rest of the test would starve the
-	// small migrator pool (Devin Review). pgx Release is idempotent, so
-	// this cleanup is a no-op once the conn is already back.
+	// small migrator pool (Devin Review). Exec on a released conn panics,
+	// so the cleanup only unlocks while the lock is actually held;
+	// Release itself is idempotent.
+	locked := false
 	t.Cleanup(func() {
-		_, _ = quarConn.Exec(context.Background(),
-			`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+		if locked {
+			_, _ = quarConn.Exec(context.Background(),
+				`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+		}
 		quarConn.Release()
 	})
 	_, err = quarConn.Exec(ctx,
 		`SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
 	require.NoError(t, err)
+	locked = true
 	quarMsg := "teardown-quar-" + uuid.NewString()
 	var recorded bool
 	require.NoError(t, db.Pool().QueryRow(ctx,
@@ -122,6 +127,7 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 	_, err = quarConn.Exec(ctx,
 		`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
 	require.NoError(t, err)
+	locked = false
 	quarConn.Release()
 
 	// The teardown call itself runs as qp_admin — the only role with EXECUTE —
