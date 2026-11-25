@@ -13,9 +13,10 @@ import (
 )
 
 // The spec section 4 cookie pair. qp_access carries the JWT to every route —
-// Authenticate reads it; qp_refresh is scoped to Path=/auth so it only ever
-// travels to the session endpoints, and SameSite=Strict keeps it off
-// cross-site requests entirely.
+// Authenticate reads it; qp_refresh rides Path=/ too, because the browser
+// matches the path attribute against its own prefixed request URL
+// (/api/auth/...) — SameSite=Strict keeps it off cross-site requests
+// entirely.
 const (
 	accessCookieName  = "qp_access"
 	refreshCookieName = "qp_refresh"
@@ -227,16 +228,20 @@ func (e *Endpoints) accessCookie(value string) *http.Cookie {
 	}
 }
 
-// refreshCookie builds the scoped transport: Path=/auth delivers it only to
-// the session endpoints and SameSite=Strict pins it to first-party requests
-// (spec section 4's tightening over ADR-005).
+// refreshCookie builds the scoped transport: Path=/ because the browser
+// applies cookie paths to ITS request URL, and under the same-origin /api
+// prefix (Vite proxy in dev, the deployment's own edge in prod) that URL
+// is /api/auth/refresh — a Path=/auth cookie would never travel there and
+// every session would die at the access TTL. The value is still only
+// usable at POST /auth/refresh, and SameSite=Strict pins it to first-party
+// requests (spec section 4's tightening over ADR-005).
 func (e *Endpoints) refreshCookie(value string) *http.Cookie {
 	// #nosec G124 -- same contract as accessCookie: HttpOnly/SameSite are
 	// literal, Secure follows CookieSecure, and tests pin the exact flags.
 	return &http.Cookie{
 		Name:     refreshCookieName,
 		Value:    value,
-		Path:     "/auth",
+		Path:     "/",
 		MaxAge:   int(e.cfg.RefreshTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   e.cfg.CookieSecure,

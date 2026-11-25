@@ -86,7 +86,7 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 	assert.Equal(t, http.SameSiteLaxMode, access.SameSite)
 	refresh := findCookie(t, rec, "qp_refresh")
 	require.NotNil(t, refresh)
-	assert.Equal(t, "/auth", refresh.Path)
+	assert.Equal(t, "/", refresh.Path)
 	assert.True(t, refresh.HttpOnly)
 	assert.True(t, refresh.Secure)
 	assert.Equal(t, http.SameSiteStrictMode, refresh.SameSite)

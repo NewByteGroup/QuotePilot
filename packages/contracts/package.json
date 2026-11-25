@@ -4,10 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
+    "./core-api": "./generated/ts/core-api.ts",
     "./web-api": "./generated/ts/web-api.ts"
   },
   "scripts": {
-    "generate": "openapi-typescript openapi/web-api.yaml -o generated/ts/web-api.ts",
+    "generate": "openapi-typescript openapi/core-api.yaml -o generated/ts/core-api.ts && openapi-typescript openapi/web-api.yaml -o generated/ts/web-api.ts",
     "lint": "redocly lint openapi/web-api.yaml"
   },
   "devDependencies": {

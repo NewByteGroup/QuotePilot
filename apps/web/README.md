@@ -30,4 +30,7 @@ Requires Node 22 (`.nvmrc`) and pnpm (`corepack enable`). Run `pnpm install` fro
   `main` (injected by `vite.config.ts` via `CF_PAGES_BRANCH`), off for
   production builds. Set `VITE_API_MOCK=true` to opt a production build into
   the mock, `false` to call a real `core-api`.
+- `VITE_CORE_API_MOCK` (`'true' | 'false'`): with the mock on, `false` sends the endpoints
+  core-api already serves (`/auth/*`, `/me`) through the `/api` proxy to `CORE_API_URL`
+  (default `http://localhost:8080`) while the rest stays mocked.
 - `VITE_API_BASE_URL`: API base URL (default `/api`).
