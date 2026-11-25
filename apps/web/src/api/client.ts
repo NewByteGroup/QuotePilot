@@ -32,8 +32,6 @@ export const coreClient = createClient<corePaths>({
 // /auth/refresh once — concurrent 401s share it — and every caller retries
 // its own request afterwards. Without this, the 15-minute qp_access TTL
 // kills any protected read that is not loadMe's hand-rolled refresh.
-// Shared by both clients: one cookie pair means one refresh in flight at
-// most, whether the 401 came from apiClient or coreClient.
 let refreshing: Promise<boolean> | null = null
 
 // A fetch consumes the Request's body stream, so the retry cannot resend the
@@ -41,12 +39,12 @@ let refreshing: Promise<boolean> | null = null
 // needed. onRequest stashes an undisturbed clone per call for the retry.
 const retriable = new WeakMap<Request, Request>()
 
-const refreshRetry = {
-  onRequest({ request }: { request: Request }) {
+coreClient.use({
+  onRequest({ request }) {
     retriable.set(request, request.clone())
     return request
   },
-  async onResponse({ request, response }: { request: Request; response: Response }) {
+  async onResponse({ request, response }) {
     if (response.status !== 401) return response
     if (request.url.includes('/auth/')) return response
     refreshing ??= coreClient
@@ -60,7 +58,4 @@ const refreshRetry = {
     retriable.delete(request)
     return fetchPerRequest(retry)
   },
-}
-
-apiClient.use(refreshRetry)
-coreClient.use(refreshRetry)
+})

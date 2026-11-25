@@ -1,13 +1,13 @@
 import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 
-import { apiClient } from '@/api/client'
+import { coreClient } from '@/api/client'
 import { server } from '@/mocks/node'
 
 const API = 'http://localhost/api'
 const unauthenticated = () => HttpResponse.json({ error: 'unauthenticated' }, { status: 401 })
 
-describe('apiClient access-rotation middleware', () => {
+describe('coreClient access-rotation middleware', () => {
   it('resends the request body on the post-refresh retry', async () => {
     const bodies: string[] = []
     server.use(
@@ -20,7 +20,7 @@ describe('apiClient access-rotation middleware', () => {
       }),
     )
 
-    const { response, error } = await apiClient.POST('/v1/session/organization', {
+    const { response, error } = await coreClient.POST('/v1/session/organization', {
       body: { organizationId: '3f9a5b6e-1c2d-4e5f-8a9b-0c1d2e3f4a5b' },
     })
 
@@ -33,7 +33,7 @@ describe('apiClient access-rotation middleware', () => {
 
   it('shares one refresh across concurrent 401s', async () => {
     let refreshCalls = 0
-    const hits = { session: 0, inbox: 0 }
+    const hits = { me: 0, session: 0 }
     const once401 = (key: keyof typeof hits, ok: object) => () => {
       hits[key] += 1
       return hits[key] === 1 ? unauthenticated() : HttpResponse.json(ok)
@@ -46,18 +46,15 @@ describe('apiClient access-rotation middleware', () => {
         await new Promise((resolve) => setTimeout(resolve, 50))
         return new HttpResponse(null, { status: 204 })
       }),
+      http.get(`${API}/me`, once401('me', {})),
       http.get(`${API}/v1/session`, once401('session', {})),
-      http.get(`${API}/v1/inbox/quotes`, once401('inbox', { quotes: [] })),
     )
 
-    const [session, inbox] = await Promise.all([
-      apiClient.GET('/v1/session'),
-      apiClient.GET('/v1/inbox/quotes'),
-    ])
+    const [me, session] = await Promise.all([coreClient.GET('/me'), coreClient.GET('/v1/session')])
 
+    expect(me.response.status).toBe(200)
     expect(session.response.status).toBe(200)
-    expect(inbox.response.status).toBe(200)
-    expect(hits).toEqual({ session: 2, inbox: 2 })
+    expect(hits).toEqual({ me: 2, session: 2 })
     expect(refreshCalls).toBe(1)
   })
 })
