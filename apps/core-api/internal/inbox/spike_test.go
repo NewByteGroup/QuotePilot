@@ -92,7 +92,8 @@ func TestSpikeWebhook(t *testing.T) {
 	org := uuid.New()
 	alias := testenv.SeedOrganization(t, org, "inbox-webhook") + "@in.test"
 
-	srv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier, nil, testLogger))
+	store := platform.NewStore(db.Pool())
+	srv := httptest.NewServer(inbox.NewServer(db, store, store, verifier, nil, testLogger))
 	defer srv.Close()
 
 	// The documented email.received envelope
@@ -189,7 +190,8 @@ func TestWebhookChainsIngest(t *testing.T) {
 		return err
 	})
 
-	srv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier, enqueue, testLogger))
+	store := platform.NewStore(db.Pool())
+	srv := httptest.NewServer(inbox.NewServer(db, store, store, verifier, enqueue, testLogger))
 	defer srv.Close()
 
 	payload, err := json.Marshal(map[string]any{
@@ -245,7 +247,8 @@ func TestWebhookChainsIngest(t *testing.T) {
 
 	// Atomicity: a failing enqueue aborts the tx — the webhook surfaces 5xx
 	// (Svix retries) and neither the receipt nor the job persists.
-	failSrv := httptest.NewServer(inbox.NewServer(db, platform.NewStore(db.Pool()), verifier,
+	failStore := platform.NewStore(db.Pool())
+	failSrv := httptest.NewServer(inbox.NewServer(db, failStore, failStore, verifier,
 		inbox.EnqueueIngestFunc(func(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID) error {
 			return errors.New("river insert failed")
 		}), testLogger))

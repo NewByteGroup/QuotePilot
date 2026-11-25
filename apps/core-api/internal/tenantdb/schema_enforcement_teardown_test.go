@@ -92,6 +92,44 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		return nil
 	}))
 
+	// The 0016 quarantine tables are platform-level by design — no
+	// organization_id to cascade on (a no_match drop has no org to point at),
+	// so org teardown must leave them alone. Seed one row as qp_app through
+	// the function; it must still be there after the org is gone. The insert
+	// rides the shared counter advisory lock — the platform suite's delta
+	// assertions hold the same key, and an interleaved bump would be
+	// miscounted as theirs.
+	quarConn, err := migrator.Acquire(ctx)
+	require.NoError(t, err)
+	// Backstop only: the happy path unlocks and releases right after the
+	// insert — holding the conn for the rest of the test would starve the
+	// small migrator pool (Devin Review). Exec on a released conn panics,
+	// so the cleanup only unlocks while the lock is actually held;
+	// Release itself is idempotent.
+	locked := false
+	t.Cleanup(func() {
+		if locked {
+			_, _ = quarConn.Exec(context.Background(),
+				`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+		}
+		quarConn.Release()
+	})
+	_, err = quarConn.Exec(ctx,
+		`SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+	require.NoError(t, err)
+	locked = true
+	quarMsg := "teardown-quar-" + uuid.NewString()
+	var recorded bool
+	require.NoError(t, db.Pool().QueryRow(ctx,
+		`SELECT app.record_inbound_quarantine($1, 'no_match', '["gone@in.test"]'::jsonb, '{}'::uuid[], 'RFQ', 'c@example.com', now())`,
+		quarMsg).Scan(&recorded))
+	require.True(t, recorded)
+	_, err = quarConn.Exec(ctx,
+		`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+	require.NoError(t, err)
+	locked = false
+	quarConn.Release()
+
 	// The teardown call itself runs as qp_admin — the only role with EXECUTE —
 	// inside InTenantTx for the org being deleted: the function's scope guard
 	// refuses anything else (Devin Review). Passing proves the triggers saw
@@ -128,6 +166,17 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 			org.String()).Scan(&n))
 		assert.Zero(t, n, "app.%s must be empty after teardown", table)
 	}
+
+	// The seeded quarantine row and the counter it bumped are org-less
+	// platform audit — teardown must not have reached either.
+	var quarRows int
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT count(*) FROM app.inbound_quarantine WHERE resend_message_id = $1`, quarMsg).Scan(&quarRows))
+	assert.Equal(t, 1, quarRows, "org teardown must leave platform quarantine rows alone")
+	var counterRows int
+	require.NoError(t, migrator.QueryRow(ctx,
+		`SELECT count(*) FROM app.platform_counters WHERE key = 'inbound_unmatched_total'`).Scan(&counterRows))
+	assert.Equal(t, 1, counterRows, "the unmatched counter must survive org teardown")
 
 	// The user row survives — memberships were org-scoped, identities are not.
 	var userRows int

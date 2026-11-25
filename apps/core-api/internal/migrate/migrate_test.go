@@ -79,9 +79,10 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands (0015 adds
-	// app.quote_send_claims, the quote_send claim row of issue #65).
-	assert.Equal(t, int64(15), version)
+	// Head version: bump when a migration lands (0016 adds
+	// app.inbound_quarantine + app.platform_counters, the RFC-002
+	// unmatched-mail audit trail).
+	assert.Equal(t, int64(16), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
 }
 

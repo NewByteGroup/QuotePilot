@@ -20,6 +20,7 @@ import (
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox/inboxdb"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
 )
 
@@ -47,6 +48,15 @@ type OrgResolver interface {
 	ResolveInboundOrg(ctx context.Context, recipient string) (uuid.UUID, bool, error)
 }
 
+// QuarantineWriter is the seam through which drop() persists an
+// undeliverable message to the platform quarantine (migration 0016) —
+// platform.Store in production, a fake in tests. The boolean reports
+// whether the row was new; the handler logs either way and never branches
+// on it.
+type QuarantineWriter interface {
+	RecordInboundQuarantine(ctx context.Context, d platform.InboundQuarantineDrop) (bool, error)
+}
+
 // EnqueueIngestFunc stages the rfq_ingest job inside the receipt's tenant
 // transaction (ADR-004: row and job commit or roll back together) — the
 // same shape as auth.EnqueueMailFunc. main adapts river's InsertTx to it.
@@ -54,20 +64,22 @@ type EnqueueIngestFunc func(ctx context.Context, tx pgx.Tx, organizationID, corr
 
 // Server serves the inbox HTTP surface on a stdlib ServeMux (ADR-002: no router).
 type Server struct {
-	mux      *http.ServeMux
-	runner   tenantdb.TenantRunner
-	resolver OrgResolver
-	verifier SignatureVerifier
-	enqueue  EnqueueIngestFunc
-	logger   *slog.Logger
+	mux        *http.ServeMux
+	runner     tenantdb.TenantRunner
+	resolver   OrgResolver
+	quarantine QuarantineWriter
+	verifier   SignatureVerifier
+	enqueue    EnqueueIngestFunc
+	logger     *slog.Logger
 }
 
 // NewServer wires the inbox endpoints. Dependencies are injected so tests can
-// supply a fake verifier, resolver, runner or enqueue.
+// supply a fake verifier, resolver, quarantine writer, runner or enqueue.
+// Production passes the same *platform.Store as resolver and quarantine.
 //
-//	http.ListenAndServe(addr, inbox.NewServer(db, store, verifier, enqueue, logger))
-func NewServer(runner tenantdb.TenantRunner, resolver OrgResolver, verifier SignatureVerifier, enqueue EnqueueIngestFunc, logger *slog.Logger) *Server {
-	s := &Server{mux: http.NewServeMux(), runner: runner, resolver: resolver, verifier: verifier, enqueue: enqueue, logger: logger}
+//	http.ListenAndServe(addr, inbox.NewServer(db, store, store, verifier, enqueue, logger))
+func NewServer(runner tenantdb.TenantRunner, resolver OrgResolver, quarantine QuarantineWriter, verifier SignatureVerifier, enqueue EnqueueIngestFunc, logger *slog.Logger) *Server {
+	s := &Server{mux: http.NewServeMux(), runner: runner, resolver: resolver, quarantine: quarantine, verifier: verifier, enqueue: enqueue, logger: logger}
 	s.mux.HandleFunc("POST /webhooks/resend/inbound", s.handleResendInbound)
 	return s
 }
@@ -83,13 +95,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // hand-mounted because Svix verifies the RAW body before any binding). The
 // tenant never arrives in it: `data.to` is resolved through
 // resolve_inbound_org (ADR-005 section 7), so a signed or forged caller
-// cannot pick an organization. MVP gaps tracked in docs/adr-rfc-plan.md
-// under RFC-002: unmatched and multi-org messages are logged, not yet
-// persisted in a platform quarantine/counter; body, headers and attachment
-// bytes are fetched through the Receiving/Attachments APIs by the ingest
-// job (the webhook is metadata only). `data.created_at` persists as
-// inbound_messages.received_at — the audit trail records Resend's receipt
-// time, not our processing time.
+// cannot pick an organization. Unmatched and multi-org messages are
+// dropped — acknowledged with the abort-delivery header — and recorded in
+// app.inbound_quarantine plus the inbound_unmatched_total platform counter
+// through record_inbound_quarantine (migration 0016); a redelivery dedupes
+// on resend_message_id and neither re-rows nor re-counts. Remaining MVP
+// gaps tracked in docs/adr-rfc-plan.md under RFC-002: body, headers and
+// attachment bytes are fetched through the Receiving/Attachments APIs by
+// the ingest job (the webhook is metadata only). `data.created_at`
+// persists as received_at on the receipt and the quarantine row alike —
+// the audit trail records Resend's receipt time, not our processing time.
 
 // handleResendInbound runs the ADR-005 section 7 pipeline: verify, resolve
 // tenants from the recipients, then either store under the single matched
@@ -173,16 +188,52 @@ func (s *Server) resolveOrgs(ctx context.Context, recipients []string) ([]uuid.U
 // no tenant, or to several, is undeliverable here — a non-2xx would make
 // Svix replay it eight times over ~27h for nothing, so the documented
 // abort-message response header marks it dead at once (ADR-005 section 7).
-// Recipients and match count are logged for ops; the quarantine row and
-// unmatched counter the ADR reserves need schema and are tracked under
-// RFC-002.
+// The drop is also quarantined: recordDrop writes the audit row and bumps
+// the unmatched counter (migration 0016). A write failure is logged, never
+// surfaced — the message is permanently undeliverable regardless, so a
+// lost audit row must not turn into eight pointless retries.
 func (s *Server) drop(w http.ResponseWriter, r *http.Request, p authapi.ResendEmailReceived, orgs []uuid.UUID) {
 	s.logger.WarnContext(r.Context(), "inbound message dropped — no unique tenant match",
 		"correlation_id", p.Data.EmailID,
 		"recipients", p.Data.To,
 		"matched_orgs", len(orgs))
+	if err := s.recordDrop(r.Context(), p, orgs); err != nil {
+		s.logger.ErrorContext(r.Context(), "inbound quarantine write failed",
+			"correlation_id", p.Data.EmailID, "error", err)
+	}
 	w.Header().Set(abortDeliveryHeader, abortDeliveryValue)
 	s.writeResult(w, r, p, `{"inserted":false,"dropped":true}`)
+}
+
+// dropReason values feed app.inbound_quarantine's CHECK — the two ways
+// resolution can fail to produce a unique tenant (migration 0016).
+const (
+	dropReasonNoMatch    = "no_match"
+	dropReasonMultiMatch = "multi_match"
+)
+
+// recordDrop maps the payload onto the quarantine record and writes it
+// through the platform seam. A nil writer — a miswired server — returns an
+// error so drop() logs it like any other write failure instead of
+// panicking the request into a 500 Svix would retry.
+func (s *Server) recordDrop(ctx context.Context, p authapi.ResendEmailReceived, orgs []uuid.UUID) error {
+	if s.quarantine == nil {
+		return errors.New("inbox: quarantine writer not configured")
+	}
+	reason := dropReasonNoMatch
+	if len(orgs) > 1 {
+		reason = dropReasonMultiMatch
+	}
+	_, err := s.quarantine.RecordInboundQuarantine(ctx, platform.InboundQuarantineDrop{
+		ResendMessageID: p.Data.EmailID,
+		Reason:          reason,
+		Recipients:      p.Data.To,
+		MatchedOrgIDs:   orgs,
+		Subject:         p.Data.Subject,
+		FromAddr:        p.Data.From,
+		ReceivedAt:      p.Data.CreatedAt,
+	})
+	return err
 }
 
 // store performs the idempotent insert inside the tenant transaction and

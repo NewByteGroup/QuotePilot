@@ -42,8 +42,10 @@ var platformTablesNoRLS = []string{
 	"fx_rates",
 	"goose_db_version",
 	"healing_sessions",
+	"inbound_quarantine",
 	"organization_memberships",
 	"organizations",
+	"platform_counters",
 	"public_snapshots",
 	"users",
 }
@@ -53,6 +55,7 @@ var platformTablesNoRLS = []string{
 var layerATables = []string{
 	"organizations", "users", "organization_memberships",
 	"auth_login_tokens", "auth_sessions", "auth_mail_outbox",
+	"inbound_quarantine", "platform_counters",
 }
 
 // layerCTables keep SELECT but no writes for qp_app (spec section 5).
@@ -90,6 +93,7 @@ var tenantFunctions = []string{
 	"app.set_user_password(uuid, text)",
 	"app.revoke_user_sessions(uuid)",
 	"app.revoke_user_pending_tokens(uuid)",
+	"app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;
