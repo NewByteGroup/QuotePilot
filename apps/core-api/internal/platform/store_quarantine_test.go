@@ -38,18 +38,20 @@ func unmatchedCounter(t *testing.T, conn *pgxpool.Conn) int64 {
 // test bumps the same counter under the same key — the auth_mail_sweep
 // pair set the precedent). Released on cleanup; the lock is
 // session-scoped, so it must ride one acquired connection, not the pool.
+// The release is registered before any fallible step: a failed require
+// must never strand the connection MigratorPool's cleanup waits on.
 func lockQuarantineCounter(t *testing.T) *pgxpool.Conn {
 	t.Helper()
 	conn, err := testenv.MigratorPool(t).Acquire(context.Background())
-	require.NoError(t, err)
-	_, err = conn.Exec(context.Background(),
-		`SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = conn.Exec(context.Background(),
 			`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
 		conn.Release()
 	})
+	_, err = conn.Exec(context.Background(),
+		`SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+	require.NoError(t, err)
 	return conn
 }
 
@@ -65,18 +67,15 @@ func quarRow(t *testing.T, conn *pgxpool.Conn, resendMessageID string) (reason, 
 	return reason, recipients, matched, receivedAt
 }
 
-// TestStoreRecordInboundQuarantine exercises the function end to end as
-// qp_app: both drop reasons record, the counter bumps once per distinct
-// message, and redelivery dedupes — the webhook's at-least-once reality
-// must not double the audit trail.
-func TestStoreRecordInboundQuarantine(t *testing.T) {
+// TestStoreRecordInboundQuarantineNoMatch records a no_match drop as qp_app
+// and reads the row back as qp_migrator — asserting through the owner proves
+// the write landed, not merely that the call returned true.
+func TestStoreRecordInboundQuarantineNoMatch(t *testing.T) {
 	db := testenv.Open(t)
-	ctx := context.Background()
 	conn := lockQuarantineCounter(t)
 	store := platform.NewStore(db.Pool())
-	base := unmatchedCounter(t, conn)
 
-	noMatch := platform.InboundQuarantineDrop{
+	drop := platform.InboundQuarantineDrop{
 		ResendMessageID: "quar-nomatch-" + uuid.NewString(),
 		Reason:          "no_match",
 		Recipients:      []string{"ghost@in.test"},
@@ -84,76 +83,101 @@ func TestStoreRecordInboundQuarantine(t *testing.T) {
 		FromAddr:        "customer@example.com",
 		ReceivedAt:      time.Now().Add(-time.Minute).UTC(),
 	}
-	recorded, err := store.RecordInboundQuarantine(ctx, noMatch)
+	recorded, err := store.RecordInboundQuarantine(context.Background(), drop)
 	require.NoError(t, err)
 	assert.True(t, recorded, "the first delivery of a drop must record")
 
+	reason, recipients, matched, receivedAt := quarRow(t, conn, drop.ResendMessageID)
+	assert.Equal(t, "no_match", reason)
+	assert.JSONEq(t, `["ghost@in.test"]`, recipients)
+	assert.Equal(t, "{}", matched, "no_match carries no candidates")
+	assert.WithinDuration(t, drop.ReceivedAt, receivedAt, time.Second,
+		"received_at is Resend's receipt time, not processing time")
+}
+
+// TestStoreRecordInboundQuarantineMultiMatch records a multi_match drop and
+// proves both candidate orgs land in resolution order.
+func TestStoreRecordInboundQuarantineMultiMatch(t *testing.T) {
+	db := testenv.Open(t)
+	conn := lockQuarantineCounter(t)
+	store := platform.NewStore(db.Pool())
 	orgA, orgB := uuid.New(), uuid.New()
-	multiMatch := platform.InboundQuarantineDrop{
+
+	drop := platform.InboundQuarantineDrop{
 		ResendMessageID: "quar-multi-" + uuid.NewString(),
 		Reason:          "multi_match",
 		Recipients:      []string{"a@in.test", "b@in.test"},
 		MatchedOrgIDs:   []uuid.UUID{orgA, orgB},
-		FromAddr:        "customer@example.com",
 		ReceivedAt:      time.Now().Add(-time.Minute).UTC(),
 	}
-	recorded, err = store.RecordInboundQuarantine(ctx, multiMatch)
+	recorded, err := store.RecordInboundQuarantine(context.Background(), drop)
 	require.NoError(t, err)
 	assert.True(t, recorded)
 
-	assert.Equal(t, base+2, unmatchedCounter(t, conn),
-		"the counter counts distinct quarantined messages")
-
-	reason, recipients, matched, receivedAt := quarRow(t, conn, noMatch.ResendMessageID)
-	assert.Equal(t, "no_match", reason)
-	assert.JSONEq(t, `["ghost@in.test"]`, recipients)
-	assert.Equal(t, "{}", matched, "no_match carries no candidates")
-	assert.WithinDuration(t, noMatch.ReceivedAt, receivedAt, time.Second,
-		"received_at is Resend's receipt time, not processing time")
-
-	reason, recipients, matched, _ = quarRow(t, conn, multiMatch.ResendMessageID)
+	reason, recipients, matched, _ := quarRow(t, conn, drop.ResendMessageID)
 	assert.Equal(t, "multi_match", reason)
 	assert.JSONEq(t, `["a@in.test","b@in.test"]`, recipients)
 	assert.Equal(t, "{"+orgA.String()+","+orgB.String()+"}", matched,
 		"multi_match records both candidate orgs in resolution order")
+}
 
-	// Svix redelivery of the first drop: recorded=false, still one row,
-	// counter unchanged — the dedupe key is the resend_message_id.
-	recorded, err = store.RecordInboundQuarantine(ctx, noMatch)
+// TestStoreRecordInboundQuarantineDedupe proves at-least-once delivery does
+// not double the audit trail: the counter counts distinct messages once and
+// a Svix redelivery returns recorded=false with no second row.
+func TestStoreRecordInboundQuarantineDedupe(t *testing.T) {
+	db := testenv.Open(t)
+	ctx := context.Background()
+	conn := lockQuarantineCounter(t)
+	store := platform.NewStore(db.Pool())
+	base := unmatchedCounter(t, conn)
+
+	drop := platform.InboundQuarantineDrop{
+		ResendMessageID: "quar-dedupe-" + uuid.NewString(),
+		Reason:          "no_match",
+		Recipients:      []string{"ghost@in.test"},
+		ReceivedAt:      time.Now().UTC(),
+	}
+	recorded, err := store.RecordInboundQuarantine(ctx, drop)
+	require.NoError(t, err)
+	require.True(t, recorded)
+	assert.Equal(t, base+1, unmatchedCounter(t, conn),
+		"the counter counts each distinct message once")
+
+	recorded, err = store.RecordInboundQuarantine(ctx, drop)
 	require.NoError(t, err)
 	assert.False(t, recorded, "a redelivery must dedupe, not re-record")
 	var rows int
 	require.NoError(t, conn.QueryRow(ctx,
 		`SELECT count(*) FROM app.inbound_quarantine WHERE resend_message_id = $1`,
-		noMatch.ResendMessageID).Scan(&rows))
+		drop.ResendMessageID).Scan(&rows))
 	assert.Equal(t, 1, rows, "a redelivery must not write a second row")
-	assert.Equal(t, base+2, unmatchedCounter(t, conn),
-		"a redelivery must not re-count")
+	assert.Equal(t, base+1, unmatchedCounter(t, conn), "must not re-count")
 }
 
-// TestStoreRecordInboundQuarantineGuards proves the function refuses the
-// two shapes that would silently corrupt the audit trail — an empty dedupe
-// key (everything would collapse onto one row) and an unknown reason —
-// with the offending value in the error.
-func TestStoreRecordInboundQuarantineGuards(t *testing.T) {
-	db := testenv.Open(t)
-	ctx := context.Background()
-	store := platform.NewStore(db.Pool())
-
-	_, err := store.RecordInboundQuarantine(ctx, platform.InboundQuarantineDrop{
-		ResendMessageID: "",
-		Reason:          "no_match",
-		Recipients:      []string{"a@in.test"},
-		ReceivedAt:      time.Now(),
-	})
+// TestStoreRecordInboundQuarantineRejectsEmptyKey proves the function
+// refuses an empty dedupe key — every drop would collapse onto one row.
+func TestStoreRecordInboundQuarantineRejectsEmptyKey(t *testing.T) {
+	store := platform.NewStore(testenv.Open(t).Pool())
+	_, err := store.RecordInboundQuarantine(context.Background(),
+		platform.InboundQuarantineDrop{
+			Reason:     "no_match",
+			Recipients: []string{"a@in.test"},
+			ReceivedAt: time.Now(),
+		})
 	require.Error(t, err, "an empty resend_message_id must be refused")
+}
 
-	_, err = store.RecordInboundQuarantine(ctx, platform.InboundQuarantineDrop{
-		ResendMessageID: "quar-guard-" + uuid.NewString(),
-		Reason:          "bogus",
-		Recipients:      []string{"a@in.test"},
-		ReceivedAt:      time.Now(),
-	})
+// TestStoreRecordInboundQuarantineRejectsUnknownReason proves the reason
+// enum guard names the offending value in the error.
+func TestStoreRecordInboundQuarantineRejectsUnknownReason(t *testing.T) {
+	store := platform.NewStore(testenv.Open(t).Pool())
+	_, err := store.RecordInboundQuarantine(context.Background(),
+		platform.InboundQuarantineDrop{
+			ResendMessageID: "quar-guard-" + uuid.NewString(),
+			Reason:          "bogus",
+			Recipients:      []string{"a@in.test"},
+			ReceivedAt:      time.Now(),
+		})
 	require.Error(t, err, "an unknown reason must be refused")
 	assert.Contains(t, err.Error(), "bogus")
 }

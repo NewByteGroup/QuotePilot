@@ -101,6 +101,13 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 	// miscounted as theirs.
 	quarConn, err := migrator.Acquire(ctx)
 	require.NoError(t, err)
+	// Release rides cleanup, not the happy path: a failed require must not
+	// strand the connection the pool's own cleanup waits on (Devin Review).
+	t.Cleanup(func() {
+		_, _ = quarConn.Exec(context.Background(),
+			`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
+		quarConn.Release()
+	})
 	_, err = quarConn.Exec(ctx,
 		`SELECT pg_catalog.pg_advisory_lock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
 	require.NoError(t, err)
@@ -110,10 +117,6 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		`SELECT app.record_inbound_quarantine($1, 'no_match', '["gone@in.test"]'::jsonb, '{}'::uuid[], 'RFQ', 'c@example.com', now())`,
 		quarMsg).Scan(&recorded))
 	require.True(t, recorded)
-	_, err = quarConn.Exec(ctx,
-		`SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('inbound_quarantine_counter', 0))`)
-	require.NoError(t, err)
-	quarConn.Release()
 
 	// The teardown call itself runs as qp_admin — the only role with EXECUTE —
 	// inside InTenantTx for the org being deleted: the function's scope guard
