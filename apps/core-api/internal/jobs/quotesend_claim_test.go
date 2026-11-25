@@ -125,7 +125,7 @@ func TestQuoteSendRivalLiveClaimStays(t *testing.T) {
 	f := seedSend(t, db, healthyFixture())
 	storage := platform.NewFakeStorage()
 	require.NoError(t, storage.Put(context.Background(), f.pdfKey, []byte("pdf")))
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, storage)
 	rivalID := stageRiverJob(t, db, f.org)
 	seedClaim(t, db, f, rivalID)
@@ -221,7 +221,7 @@ func TestQuoteSendRefusalDropsClaim(t *testing.T) {
 	o := healthyFixture()
 	o.pdfKey = "" // missing render → refuseMissingRender
 	f := seedSend(t, db, o)
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, platform.NewFakeStorage())
 	seedClaim(t, db, f, deadJobID)
 
@@ -255,7 +255,7 @@ func (b *blockingSender) Send(ctx context.Context, _ resend.SendRequest) (string
 	b.once.Do(func() { close(b.started) })
 	select {
 	case <-b.release:
-		return "out-msg-blocked", nil
+		return "out-msg-" + uuid.NewString(), nil
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -306,7 +306,7 @@ func TestQuoteSendLastAttemptLiveClaimKeepsRfq(t *testing.T) {
 	f := seedSend(t, db, healthyFixture())
 	rivalID := stageRiverJob(t, db, f.org)
 	seedClaim(t, db, f, rivalID)
-	sender := &resend.FakeSender{MessageID: "x"}
+	sender := &resend.FakeSender{MessageID: "out-msg-" + uuid.NewString()}
 	rig := newSendRig(db, sender, platform.NewFakeStorage())
 
 	job := sendJobAs(f.org, f.quote, deadJobID+1)
