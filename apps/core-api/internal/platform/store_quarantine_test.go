@@ -96,12 +96,15 @@ func TestStoreRecordInboundQuarantineNoMatch(t *testing.T) {
 }
 
 // TestStoreRecordInboundQuarantineMultiMatch records a multi_match drop and
-// proves both candidate orgs land in resolution order.
+// proves both candidate orgs land in resolution order — and that the drop
+// counts: the counter is reason-agnostic, a multi_match is just as
+// unmatched as a no_match.
 func TestStoreRecordInboundQuarantineMultiMatch(t *testing.T) {
 	db := testenv.Open(t)
 	conn := lockQuarantineCounter(t)
 	store := platform.NewStore(db.Pool())
 	orgA, orgB := uuid.New(), uuid.New()
+	base := unmatchedCounter(t, conn)
 
 	drop := platform.InboundQuarantineDrop{
 		ResendMessageID: "quar-multi-" + uuid.NewString(),
@@ -113,6 +116,8 @@ func TestStoreRecordInboundQuarantineMultiMatch(t *testing.T) {
 	recorded, err := store.RecordInboundQuarantine(context.Background(), drop)
 	require.NoError(t, err)
 	assert.True(t, recorded)
+	assert.Equal(t, base+1, unmatchedCounter(t, conn),
+		"a multi_match drop counts the same as a no_match")
 
 	reason, recipients, matched, _ := quarRow(t, conn, drop.ResendMessageID)
 	assert.Equal(t, "multi_match", reason)
