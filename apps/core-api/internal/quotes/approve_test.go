@@ -122,8 +122,9 @@ func seedRfq(t *testing.T, db *tenantdb.DB, org uuid.UUID) uuid.UUID {
 	require.NoError(t, db.InTenantTx(context.Background(), org, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			INSERT INTO app.rfq_requests
-				(organization_id, resend_message_id, customer_email, subject, status)
-			VALUES ($1, $2, 'buyer@test.dev', 'RFQ: 2x40HQ', 'READY')
+				(organization_id, rfq_number, resend_message_id, customer_email, subject, status)
+			VALUES ($1, (SELECT coalesce(max(rfq_number),0)+1 FROM app.rfq_requests WHERE organization_id=$1),
+			        $2, 'buyer@test.dev', 'RFQ: 2x40HQ', 'READY')
 			RETURNING id`, org, "resend-"+uuid.NewString()).Scan(&id)
 	}))
 	return id
@@ -294,7 +295,7 @@ func TestApproveSupersededRefused(t *testing.T) {
 
 	rec := rig.postApprove(t, user, org, quote)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"quote_superseded"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"quote_superseded","message":"this quote version was superseded — approve the latest version"}`, rec.Body.String())
 
 	q := loadQuote(t, db, org, quote)
 	assert.Nil(t, q.ApprovedAt, "a refused approve writes nothing")
@@ -315,7 +316,7 @@ func TestApproveNegativeMarginRefused(t *testing.T) {
 
 	rec := rig.postApprove(t, user, org, quote)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"negative_margin"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"negative_margin","message":"the pinned price is below cost — reprice before approving"}`, rec.Body.String())
 
 	q := loadQuote(t, db, org, quote)
 	assert.Nil(t, q.ApprovedAt)
@@ -340,7 +341,7 @@ func TestApproveUnknownAndCrossTenant404(t *testing.T) {
 
 	rec := rig.postApprove(t, user, orgB, uuid.New())
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"error":"not_found"}`, rec.Body.String())
+	assert.JSONEq(t, `{"error":"not_found","message":"the requested resource does not exist"}`, rec.Body.String())
 
 	rec = rig.postApprove(t, user, orgB, foreignQuote)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String(),

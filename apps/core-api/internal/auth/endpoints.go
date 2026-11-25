@@ -57,6 +57,15 @@ type Endpoints struct {
 	// in-transaction send enqueue — the same post-build assignment as
 	// jobs.RfqIngestWorker.Inserter). Nil fails the call loudly.
 	Approver QuoteApprover
+	// Web serves the four /v1/* read-surface routes on this same strict
+	// surface; assigned post-build in cmd/server alongside Approver. Nil
+	// fails the call loudly.
+	Web WebAPI
+	// Reprocessor serves POST /v1/rfqs/{id}/reprocess on this same strict
+	// surface; assigned post-build in cmd/server alongside Approver (it
+	// needs the River client for the in-transaction resume enqueue). Nil
+	// fails the call loudly.
+	Reprocessor RfqReprocessor
 }
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)
@@ -100,7 +109,7 @@ func NewEndpoints(
 // the strict handler carries the ctx-planting pair (ExtractClientIP for the
 // login limiter, ExtractRefreshCookie for the refresh/logout cookie) plus
 // the two strict hooks, and the std wrapper carries the binding-failure
-// hook, so every rejection is one of the spec section 7 {"error": ...}
+// hook, so every rejection is one of the spec section 7 {error, message}
 // bodies — never http.Error text. The returned handler routes all six
 // contract paths itself and caps JSON bodies before the generated binder
 // can read them; cmd/server mounts it alongside the inbox surface.
@@ -157,10 +166,11 @@ func writeInternal(w http.ResponseWriter, _ *http.Request, _ error) {
 
 // writeError emits the contract's Error shape with the same content type the
 // generated Visit*Response writers set (platform.writeError's twin — it is
-// unexported there). The JSON encoder adds the trailing newline every
-// generated error body already carries.
+// unexported there). NewError fills the message member with the code's
+// default copy (issue #61), and the JSON encoder adds the trailing newline
+// every generated error body already carries.
 func writeError(w http.ResponseWriter, status int, code authapi.ErrorCode) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(authapi.Error{Error: code})
+	_ = json.NewEncoder(w).Encode(authapi.NewError(code))
 }

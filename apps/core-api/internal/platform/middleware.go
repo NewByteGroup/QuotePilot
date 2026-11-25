@@ -2,8 +2,8 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -12,6 +12,8 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 )
 
 // accessCookie is the spec section 4 transport for the access JWT. The
@@ -19,10 +21,18 @@ import (
 // to the session endpoints; the middleware chain never reads it.
 const accessCookie = "qp_access"
 
-// orgHeader is the tenant header ResolveTenant requires (spec section 7).
-// Demanding a custom header — never a cookie or a query param — is part of
-// the CSRF posture: a cross-site form cannot set one (ADR-005 section 4).
-const orgHeader = "X-Organization-Id"
+// OrgHeader is the tenant header ResolveTenant prefers (spec section 7).
+// Demanding a custom header — never a query param, and a cookie only as
+// the fallback below — is part of the CSRF posture: a cross-site form
+// cannot set one (ADR-005 section 4).
+const OrgHeader = "X-Organization-Id"
+
+// OrgCookie carries the browser's active-organization choice written by
+// POST /v1/session/organization (the web v1 read surface). ResolveTenant
+// reads it only when OrgHeader is absent — SameSite=Lax keeps it off
+// cross-site posts, so the header-first CSRF posture still guards every
+// state-changing route while plain GETs resolve without JS.
+const OrgCookie = "qp_org"
 
 // requestIDHeader carries the per-request correlation id in and out;
 // maxRequestIDLen bounds a client-supplied value — anything longer is
@@ -77,6 +87,19 @@ type correlationKey struct{}
 func CorrelationID(ctx context.Context) string {
 	id, _ := ctx.Value(correlationKey{}).(string)
 	return id
+}
+
+// CorrelationUUID carries the request's correlation id into a job
+// envelope as a uuid — the stored X-Request-Id when it parses, a fresh
+// one otherwise (the ingest chain roots a fresh id the same way, so a
+// non-uuid transport id never reaches river_job args).
+//
+//	cid := platform.CorrelationUUID(r.Context())
+func CorrelationUUID(ctx context.Context) uuid.UUID {
+	if id, err := uuid.Parse(CorrelationID(ctx)); err == nil {
+		return id
+	}
+	return uuid.New()
 }
 
 // UserID returns the sub claim Authenticate stored on ctx; ok=false means
@@ -187,20 +210,13 @@ func verifyAccessCookie(cfg *Config, r *http.Request) (uuid.UUID, uuid.UUID, boo
 	return userID, sessionID, true
 }
 
-// ResolveTenant resolves X-Organization-Id to a membership the authenticated
-// user holds right now — the check runs on every request and is never cached
-// (ADR-005 section 5), so removing a member takes effect on their next call.
-// An absent or non-UUID header is 400, before any lookup. A NULL from
-// get_membership covers non-member and nonexistent org indistinguishably and
-// maps to one 404 through the same writer — no "does the org exist" shortcut
-// exists for an oracle to observe (spec section 7).
-//
-//	mux.Handle("GET /me/organization",
-//		platform.Authenticate(cfg)(platform.ResolveTenant(store)(orgHandler)))
-func ResolveTenant(store *Store) func(http.Handler) http.Handler {
+// resolveTenantHandler is the shared ResolveTenant body; allowDefault
+// selects whether a hintless safe-method request may fall back to the
+// caller's first membership.
+func resolveTenantHandler(store *Store, allowDefault bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			orgID, role, ok := resolveTenant(store, w, r)
+			orgID, role, ok := resolveTenant(store, w, r, allowDefault)
 			if !ok {
 				return
 			}
@@ -211,13 +227,57 @@ func ResolveTenant(store *Store) func(http.Handler) http.Handler {
 	}
 }
 
-// resolveTenant runs the header and identity checks in order: the org header
-// is validated before any lookup, and a missing user context means the chain
-// was mis-mounted without Authenticate — answered as unauthenticated, never
-// passed through. false means the response is already written.
-func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.UUID, string, bool) {
-	orgID, err := uuid.Parse(r.Header.Get(orgHeader))
-	if err != nil {
+// ResolveTenant resolves the tenant to a membership the authenticated
+// user holds right now — the check runs on every request and is never
+// cached (ADR-005 section 5), so removing a member takes effect on their
+// next call. The tenant id comes from X-Organization-Id when present, else
+// the qp_org cookie POST /v1/session/organization sets; an absent or
+// non-UUID hint is 400 before any lookup. A NULL from get_membership
+// covers non-member and nonexistent org indistinguishably and maps to one
+// 404 through the same writer — no "does the org exist" shortcut exists
+// for an oracle to observe (spec section 7).
+//
+//	mux.Handle("GET /me/organization",
+//		platform.Authenticate(cfg)(platform.ResolveTenant(store)(orgHandler)))
+func ResolveTenant(store *Store) func(http.Handler) http.Handler {
+	return resolveTenantHandler(store, false)
+}
+
+// ResolveTenantDefault is ResolveTenant plus one fallback: a safe-method
+// request (GET/HEAD/OPTIONS) carrying no org hint at all resolves the
+// caller's first membership — the same deterministic pick GET /v1/session
+// makes — instead of answering missing_organization. The web inbox boots
+// this way: a fresh session has a valid qp_access but no qp_org yet, and
+// a 400 would dead-end the first load. The fallback only fires when no
+// hint exists; a present-but-malformed header stays a hard 400 (an
+// explicit transport must not paper over client bugs), and membership is
+// re-checked exactly as before.
+//
+//	mux.Handle("GET /v1/inbox/quotes",
+//		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv)))
+func ResolveTenantDefault(store *Store) func(http.Handler) http.Handler {
+	return resolveTenantHandler(store, true)
+}
+
+// resolveTenant runs the transport and identity checks in order: the org
+// hint is validated before any lookup, and a missing user context means
+// the chain was mis-mounted without Authenticate — answered as
+// unauthenticated, never passed through. false means the response is
+// already written.
+func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request, allowDefault bool) (uuid.UUID, string, bool) {
+	orgID, ok := orgHint(r)
+	if !ok && allowDefault {
+		var err error
+		if orgID, ok, err = defaultOrgHint(store, r); err != nil {
+			// A profile/membership read failure is a server fault, not a
+			// missing hint — a 500 must not masquerade as the client 400.
+			slog.Default().WarnContext(r.Context(), "platform: default org lookup failed",
+				"correlation_id", CorrelationID(r.Context()), "error", err)
+			writeError(r.Context(), w, http.StatusInternalServerError, errInternal)
+			return uuid.Nil, "", false
+		}
+	}
+	if !ok {
 		writeError(r.Context(), w, http.StatusBadRequest, errMissingOrg)
 		return uuid.Nil, "", false
 	}
@@ -227,6 +287,82 @@ func resolveTenant(store *Store, w http.ResponseWriter, r *http.Request) (uuid.U
 		return uuid.Nil, "", false
 	}
 	return checkMembership(store, w, r, userID, orgID)
+}
+
+// defaultOrgHint is ResolveTenantDefault's last resort: the first
+// membership of the authenticated caller. It returns ok=false — never an
+// error — when the request is not a safe method, an OrgHeader is present
+// (a malformed explicit hint stays a hard 400), the caller identity is
+// absent, the profile row is missing, or the membership list is empty;
+// only a store failure is an error. The pick is ms[0]:
+// list_memberships_for_email is created_at-ordered, the same org GET
+// /v1/session reports as active.
+func defaultOrgHint(store *Store, r *http.Request) (uuid.UUID, bool, error) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+	default:
+		return uuid.Nil, false, nil
+	}
+	if r.Header.Get(OrgHeader) != "" {
+		return uuid.Nil, false, nil
+	}
+	userID, ok := UserID(r.Context())
+	if !ok {
+		return uuid.Nil, false, nil
+	}
+	_, email, _, found, err := store.GetUserProfile(r.Context(), userID)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: default org: profile %s: %w", userID, err)
+	}
+	if !found {
+		return uuid.Nil, false, nil
+	}
+	ms, err := store.ListMembershipsForEmail(r.Context(), email)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("platform: default org: memberships %q: %w", email, err)
+	}
+	if len(ms) == 0 {
+		return uuid.Nil, false, nil
+	}
+	return ms[0].OrgID, true, nil
+}
+
+// orgHint resolves the tenant-id transport: the explicit
+// X-Organization-Id header wins (API clients); an absent header falls back
+// to the qp_org browser cookie. ok=false means both were absent or the
+// present value was not a UUID — resolveTenant answers the uniform 400.
+func orgHint(r *http.Request) (uuid.UUID, bool) {
+	if h := r.Header.Get(OrgHeader); h != "" {
+		id, err := uuid.Parse(h)
+		return id, err == nil
+	}
+	c, err := r.Cookie(OrgCookie)
+	if err != nil || c.Value == "" {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(c.Value)
+	return id, err == nil
+}
+
+// SetOrgCookie writes the qp_org transport POST /v1/session/organization
+// answers with: the same flag set as qp_access (HttpOnly, SameSite=Lax,
+// Path=/, Secure from cfg.CookieSecure) at the refresh lifetime — the org
+// choice must outlive the 15-minute access token and die with the session
+// family. Callers only ever pass a membership-proven org UUID, never raw
+// user input; ResolveTenant re-checks membership on every read.
+func SetOrgCookie(cfg *Config, w http.ResponseWriter, orgID uuid.UUID) {
+	// #nosec G124 -- HttpOnly and SameSite are literal; Secure is
+	// intentionally config-driven (CookieSecure=false only for local http),
+	// and middleware_orgcookie_test.go pins the exact flag set.
+	http.SetCookie(w, &http.Cookie{
+		Name:     OrgCookie,
+		Value:    orgID.String(),
+		Path:     "/",
+		MaxAge:   int(cfg.RefreshTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   cfg.CookieSecure,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // checkMembership is the per-request membership probe: one get_membership
@@ -311,14 +447,16 @@ func trustedOrigin(webURL string) string {
 
 // writeError is the single failure writer every middleware rejection routes
 // through (spec section 7's uniform-failure contract): a fixed
-// {"error":"<code>"} body with a fixed content type. Callers pass only the
-// status and the code — there is no parameter through which distinguishing
-// detail could leak, which is what makes a non-member and a nonexistent org
+// {"error":"<code>","message":"<text>"} body with a fixed content type — the
+// {error, message} pair of issue #61, where the message rides the per-code
+// default authapi.ErrorMessage holds. Callers pass only the status and the
+// code — there is no parameter through which distinguishing detail could
+// leak, which is what makes a non-member and a nonexistent org
 // byte-identical on the wire.
 func writeError(ctx context.Context, w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if _, err := io.WriteString(w, `{"error":"`+code+`"}`); err != nil {
+	if _, err := w.Write(errorBody(code)); err != nil {
 		// The wire contract cannot change mid-response; the only thing left
 		// is the diagnostic, logged rather than discarded. correlation_id is
 		// passed explicitly — WarnContext does not turn ctx values into
@@ -328,4 +466,20 @@ func writeError(ctx context.Context, w http.ResponseWriter, status int, code str
 			"correlation_id", CorrelationID(ctx),
 			"status", status, "code", code, "error", err)
 	}
+}
+
+// errorBody renders the middleware's half of the {error, message} contract
+// (issue #61): authapi.NewError pairs the code with its default copy, and
+// json.Marshal — not a string splice — is what keeps a future message
+// containing a quote from corrupting the body. The codes this file emits
+// are all ErrorCode members, so the cast never leaves the enum; an
+// unmapped code would still get authapi's non-empty fallback. Marshal of
+// this fixed two-string struct cannot fail; the bare-code fallback exists
+// only so the failure branch can never emit nothing.
+func errorBody(code string) []byte {
+	body, err := json.Marshal(authapi.NewError(authapi.ErrorCode(code)))
+	if err != nil {
+		return []byte(`{"error":"` + code + `"}`)
+	}
+	return body
 }

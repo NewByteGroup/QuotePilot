@@ -412,6 +412,22 @@ func (s *Store) CreateMailOutbox(ctx context.Context, tokenID uuid.UUID, link st
 	return id, nil
 }
 
+// SweepAuthMailOutbox runs the migration-0014 dead-row sweep: deletes
+// every pending send whose token is consumed (the single-use link was
+// already spent — read_mail_outbox filters it, so nothing else ever
+// removes the row) or expired (the link can never work). The count is the
+// run's whole observable output — the hourly worker logs it.
+//
+//	deleted, err := store.SweepAuthMailOutbox(ctx)
+func (s *Store) SweepAuthMailOutbox(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.q.QueryRow(ctx, `SELECT app.sweep_auth_mail_outbox()`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("platform: sweep_auth_mail_outbox: %w", err)
+	}
+	return n, nil
+}
+
 // CreatePasswordResetToken inserts one reset token and returns its id —
 // CreateLoginToken's twin for the amendment's forgot-password path
 // (migration 0007): same hash-at-rest, same caller-chosen expiry, but the

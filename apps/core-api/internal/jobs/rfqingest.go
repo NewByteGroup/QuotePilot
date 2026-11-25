@@ -88,8 +88,10 @@ func (w *RfqIngestWorker) ingest(ctx context.Context, tx pgx.Tx, args IngestArgs
 }
 
 // findReceipt loads the receipt and applies the replay check: skip=true
-// means the job is done — the receipt is gone, or an rfq_requests row
-// already holds this resend_message_id (UNIQUE collapses replays, spec S1).
+// means the job is done — the receipt is gone, or a live rfq_requests row
+// already holds this resend_message_id (UNIQUE collapses replays, spec
+// S1). A bodies-NULL row is the dead-letter shell a reprocess resurrects,
+// not a replay — the fetch must run so promoteShell can fill it.
 func (w *RfqIngestWorker) findReceipt(ctx context.Context, tx pgx.Tx, args IngestArgs) (inboundReceipt, bool, error) {
 	receipt, found, err := readReceipt(ctx, tx, args.InboundMessageID)
 	if err != nil {
@@ -98,11 +100,11 @@ func (w *RfqIngestWorker) findReceipt(ctx context.Context, tx pgx.Tx, args Inges
 	if !found {
 		return inboundReceipt{}, true, nil
 	}
-	exists, err := rfqExists(ctx, tx, receipt.ResendMessageID)
+	exists, shell, err := rfqShell(ctx, tx, receipt.ResendMessageID)
 	if err != nil {
 		return inboundReceipt{}, false, fmt.Errorf("jobs: rfq_ingest: rfq lookup %q: %w", receipt.ResendMessageID, err)
 	}
-	return receipt, exists, nil
+	return receipt, exists && !shell, nil
 }
 
 // fetchOrShell returns the fetched message; on a permanent fetch failure it
@@ -119,15 +121,26 @@ func (w *RfqIngestWorker) fetchOrShell(ctx context.Context, tx pgx.Tx, args Inge
 	return nil, fmt.Errorf("jobs: rfq_ingest: fetch %q: %w", rcpt.ResendMessageID, err)
 }
 
-// promote writes the RECEIVED row, stores the attachments, advances to
-// PARSING and chains rfq_extract — one commit behind the checkpoint.
+// promote writes the RECEIVED row — or, when the row already exists as
+// the dead-letter shell, resurrects it in place — then stores the
+// attachments, advances to PARSING and chains rfq_extract: one commit
+// behind the checkpoint.
 func (w *RfqIngestWorker) promote(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundReceipt, email *resend.InboundEmail) error {
 	rfqID, created, err := insertRfq(ctx, tx, args, rcpt, email)
 	if err != nil {
 		return err
 	}
 	if !created {
-		return nil // lost the insert race — the other copy owns the pipeline
+		// The conflict winner is either a live row (replay — nothing to
+		// do) or the ingest shell a reprocess is resurrecting: promoteShell
+		// re-checks the bodies-NULL signature, so a live row still no-ops.
+		rfqID, created, err = promoteShell(ctx, tx, args, rcpt, email)
+		if err != nil {
+			return err
+		}
+		if !created {
+			return nil // replay — the other copy owns the pipeline
+		}
 	}
 	if err := w.storeAttachments(ctx, tx, args.OrganizationID, rfqID, email.Attachments); err != nil {
 		return err
@@ -158,35 +171,99 @@ func readReceipt(ctx context.Context, tx pgx.Tx, id uuid.UUID) (inboundReceipt, 
 	return r, err == nil, err
 }
 
-// rfqExists reports whether an rfq_requests row already holds this Resend id.
-func rfqExists(ctx context.Context, tx pgx.Tx, resendID string) (bool, error) {
-	var one int
-	err := tx.QueryRow(ctx,
-		`SELECT 1 FROM app.rfq_requests WHERE resend_message_id = $1 LIMIT 1`, resendID).Scan(&one)
+// rfqShell reports whether an rfq_requests row already holds this Resend
+// id and whether that row is a fillable shell — both body columns NULL AND
+// zero rfq_attachments rows is the exact signature: insertFailedShell
+// writes no bodies and never reaches storeAttachments, the reprocess
+// resume leaves them NULL while it flips status to RECEIVED, and every
+// live row keeps at least one — including an attachment-only ingest,
+// whose bodies stay NULL but whose attachment rows keep it out of the
+// shell path (Devin Review: bodies-NULL alone misdetected it, and
+// promoteShell + storeAttachments then duplicated the attachment rows
+// and storage puts).
+func rfqShell(ctx context.Context, tx pgx.Tx, resendID string) (exists, shell bool, err error) {
+	var fillable bool
+	err = tx.QueryRow(ctx, `
+		SELECT raw_text_body IS NULL AND raw_html_body IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM app.rfq_attachments a
+		                   WHERE a.rfq_id = rfq_requests.id)
+		FROM app.rfq_requests WHERE resend_message_id = $1 LIMIT 1`, resendID).Scan(&fillable)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, false, err
+	}
+	return true, fillable, nil
+}
+
+// allocRfqNumber is the org_rfq_counters upsert every rfq_requests insert
+// runs as its CTE (migration 0009): one row-lock inside the tenant
+// transaction serializes allocation per org, so concurrent ingests get
+// sequential numbers. A replay that loses the INSERT race still burns its
+// allocated number — gaps in rfq_number are the documented cost of the
+// conflict-tolerant promotion path, exactly like quote_number.
+const allocRfqNumber = `
+	WITH alloc AS (
+		INSERT INTO app.org_rfq_counters (organization_id, next_seq)
+		VALUES ($1, 2)
+		ON CONFLICT (organization_id) DO UPDATE
+			SET next_seq = org_rfq_counters.next_seq + 1
+		RETURNING next_seq - 1 AS n
+	)`
+
+// emailValues is the rfq_requests column mapping insertRfq and promoteShell
+// both derive from one fetched message — parsed once here so the insert
+// and the in-place resurrection can never drift on the same fields (the
+// repo's no-duplication rule).
+type emailValues struct {
+	rfcMessageID  string
+	threadHeaders json.RawMessage
+	customerEmail string
+	customerName  string
+	text          string
+	html          string
+}
+
+// mapEmail derives the shared email fields: parseFrom splits the From
+// header, threadHeaders builds the thread/auth JSON, rfcMessageID picks
+// the RFC 5322 id. The bodies pass through verbatim — the SQL layer's
+// NULLIF turns Resend's empty strings into the NULL the shell signature
+// reads.
+func mapEmail(em *resend.InboundEmail) (emailValues, error) {
+	customerEmail, customerName := parseFrom(em.From)
+	threadJSON, err := threadHeaders(em)
+	if err != nil {
+		return emailValues{}, fmt.Errorf("jobs: rfq_ingest: thread headers: %w", err)
+	}
+	return emailValues{
+		rfcMessageID:  rfcMessageID(em),
+		threadHeaders: threadJSON,
+		customerEmail: customerEmail,
+		customerName:  customerName,
+		text:          em.Text,
+		html:          em.HTML,
+	}, nil
 }
 
 // insertRfq writes the RECEIVED checkpoint row; ON CONFLICT DO NOTHING keeps
 // the (org, resend_message_id) race idempotent — created=false means replay.
 func insertRfq(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundReceipt, em *resend.InboundEmail) (uuid.UUID, bool, error) {
-	customerEmail, customerName := parseFrom(em.From)
-	threadJSON, err := threadHeaders(em)
+	v, err := mapEmail(em)
 	if err != nil {
-		return uuid.Nil, false, fmt.Errorf("jobs: rfq_ingest: thread headers: %w", err)
+		return uuid.Nil, false, err
 	}
 	var id uuid.UUID
-	err = tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, allocRfqNumber+`
 		INSERT INTO app.rfq_requests
-			(organization_id, resend_message_id, rfc_message_id, thread_headers_json,
+			(organization_id, rfq_number, resend_message_id, rfc_message_id, thread_headers_json,
 			 customer_email, customer_name, subject, received_at, raw_text_body, raw_html_body)
-		VALUES ($1, $2, NULLIF($3,''), $4, $5, NULLIF($6,''), $7, $8, NULLIF($9,''), NULLIF($10,''))
+		SELECT $1, alloc.n, $2, NULLIF($3,''), $4, $5, NULLIF($6,''), $7, $8, NULLIF($9,''), NULLIF($10,'')
+		FROM alloc
 		ON CONFLICT (organization_id, resend_message_id) DO NOTHING
 		RETURNING id`,
-		args.OrganizationID, rcpt.ResendMessageID, rfcMessageID(em), threadJSON,
-		customerEmail, customerName, rcpt.Subject, rcpt.ReceivedAt, em.Text, em.HTML,
+		args.OrganizationID, rcpt.ResendMessageID, v.rfcMessageID, v.threadHeaders,
+		v.customerEmail, v.customerName, rcpt.Subject, rcpt.ReceivedAt, v.text, v.html,
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, false, nil
@@ -201,15 +278,53 @@ func insertRfq(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundRece
 // failure_reason so a permanently-unfetchable message stays visible.
 func insertFailedShell(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundReceipt, cause error) error {
 	reason := truncate("rfq_ingest: "+cause.Error(), maxFailureReason)
-	if _, err := tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, allocRfqNumber+`
 		INSERT INTO app.rfq_requests
-			(organization_id, resend_message_id, customer_email, subject, received_at, status, failure_reason)
-		VALUES ($1, $2, '', $3, $4, 'FAILED', $5)
+			(organization_id, rfq_number, resend_message_id, customer_email, subject, received_at, status, failure_reason)
+		SELECT $1, alloc.n, $2, '', $3, $4, 'FAILED', $5
+		FROM alloc
 		ON CONFLICT (organization_id, resend_message_id) DO NOTHING`,
 		args.OrganizationID, rcpt.ResendMessageID, rcpt.Subject, rcpt.ReceivedAt, reason); err != nil {
 		return fmt.Errorf("jobs: rfq_ingest: insert failed shell: %w", err)
 	}
 	return nil
+}
+
+// promoteShell resurrects a bodies-NULL shell in place — the row keeps
+// its id and rfq_number, takes the message content and clears
+// failure_reason (status goes back to RECEIVED for setStatusParsing to
+// advance). The WHERE re-checks the full shell signature — bodies NULL
+// AND zero rfq_attachments rows, the same rfqShell reads: an empty
+// RETURNING means a live row won the race — the same no-op insertRfq's
+// conflict already gives replays — and an attachment-carrying row can
+// never be overwritten or re-attachmented (Devin Review).
+func promoteShell(ctx context.Context, tx pgx.Tx, args IngestArgs, rcpt inboundReceipt, em *resend.InboundEmail) (uuid.UUID, bool, error) {
+	v, err := mapEmail(em)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	var id uuid.UUID
+	err = tx.QueryRow(ctx, `
+		UPDATE app.rfq_requests
+		SET rfc_message_id = NULLIF($3,''), thread_headers_json = $4,
+		    customer_email = $5, customer_name = NULLIF($6,''),
+		    raw_text_body = NULLIF($7,''), raw_html_body = NULLIF($8,''),
+		    status = 'RECEIVED', failure_reason = NULL, updated_at = now()
+		WHERE organization_id = $1 AND resend_message_id = $2
+		  AND raw_text_body IS NULL AND raw_html_body IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM app.rfq_attachments a
+		                  WHERE a.rfq_id = rfq_requests.id)
+		RETURNING id`,
+		args.OrganizationID, rcpt.ResendMessageID, v.rfcMessageID, v.threadHeaders,
+		v.customerEmail, v.customerName, v.text, v.html,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("jobs: rfq_ingest: promote shell: %w", err)
+	}
+	return id, true, nil
 }
 
 // storeAttachments downloads each attachment, pushes it to storage under

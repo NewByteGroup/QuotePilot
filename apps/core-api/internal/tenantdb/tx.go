@@ -45,9 +45,17 @@ func (d *DB) InTenantTx(ctx context.Context, org uuid.UUID, fn func(ctx context.
 }
 
 // InTenantReadTx is InTenantTx in a read-only transaction plus a
-// transaction-local statement_timeout (ADR-002 section 3 rule 4).
+// transaction-local statement_timeout (ADR-002 section 3 rule 4), plus a
+// repeatable-read snapshot so multi-statement reads — the inbox page, the
+// quote audit — see one committed state: under READ COMMITTED each
+// statement would observe a different commit mid-pipeline, and items,
+// counts and summary could disagree. A read-only tx cannot hit
+// serialization failures; RepeatableRead only pins the snapshot.
 func (d *DB) InTenantReadTx(ctx context.Context, org uuid.UUID, fn func(ctx context.Context, tx pgx.Tx) error) error {
-	return d.tenantTx(ctx, org, pgx.TxOptions{AccessMode: pgx.ReadOnly}, readTxStatementTimeout, fn)
+	return d.tenantTx(ctx, org, pgx.TxOptions{
+		AccessMode: pgx.ReadOnly,
+		IsoLevel:   pgx.RepeatableRead,
+	}, readTxStatementTimeout, fn)
 }
 
 // tenantTx implements the normative InTenantTx sequence of ADR-002 section 3:

@@ -132,7 +132,7 @@ func TestPasswordResetEndToEnd(t *testing.T) {
 	rec = postAuthTo(t, handler, "/auth/password",
 		`{"token":"`+token+`","password":"other-pass-99"}`)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 }
 
 // TestTokenPurposesDoNotExchangePostgres is the migration-0007 invariant
@@ -153,7 +153,7 @@ func TestTokenPurposesDoNotExchangePostgres(t *testing.T) {
 	resetToken, _ := plantResetToken(t, store, userID)
 	rec := postAuthTo(t, handler, "/auth/session", `{"token":"`+resetToken+`"}`)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	var sessions int
 	require.NoError(t, migrator.QueryRow(ctx,
@@ -166,7 +166,7 @@ func TestTokenPurposesDoNotExchangePostgres(t *testing.T) {
 	rec = postAuthTo(t, handler, "/auth/password",
 		`{"token":"`+loginToken+`","password":"n3w-pilot-pass"}`)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	var hash *string
 	require.NoError(t, migrator.QueryRow(ctx,
 		`SELECT password_hash FROM app.users WHERE id = $1`, userID).Scan(&hash))

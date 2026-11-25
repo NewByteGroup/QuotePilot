@@ -44,10 +44,10 @@ func (e *Endpoints) GetMe(
 
 // meUnauthenticated is the fail-closed answer for a request that reached
 // the handler without Authenticate's planted context — the same
-// {"error":"unauthenticated"} the middleware emits for a bad token, so a
+// {"error":"unauthenticated","message":…} the middleware emits for a bad token, so a
 // mis-mount denies rather than leaks.
 func meUnauthenticated() authapi.GetMeResponseObject {
 	return authapi.GetMe401JSONResponse{
-		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse{Error: authapi.ErrorCodeUnauthenticated},
+		UnauthorizedJSONResponse: authapi.UnauthorizedJSONResponse(authapi.NewError(authapi.ErrorCodeUnauthenticated)),
 	}
 }

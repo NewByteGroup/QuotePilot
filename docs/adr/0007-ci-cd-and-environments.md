@@ -1,8 +1,8 @@
 # ADR-007: CI/CD, environments and hosted database provisioning
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-08
-- **Revised:** 2026-11-09 (topology fixed by product spec v1.2: Railway + Supabase + Cloudflare), 2026-11-20 (Railway dev Postgres provisioned; as-built runbook added)
+- **Revised:** 2026-11-09 (topology fixed by product spec v1.2: Railway + Supabase + Cloudflare), 2026-11-20 (Railway dev Postgres provisioned; as-built runbook added), 2026-11-23 (accepted by Pedro; deploy workflow shipped in `.github/workflows/deploy.yml`; TCP proxy decision recorded below)
 - **Deciders:** Pedro (backend lead). Review requested from Marcelo and Amanda.
 - **Related:** ADR-001 (two runtimes, contracts-first), ADR-002 (Go stack, `go.mod` is the version record), ADR-003 (roles, pooler, extensions; its section 6 defines the hosted differences this runbook executes — the ADR itself is on hold pending this topology), ADR-004 (River), ADR-008 (what each CI layer proves), RFC-003 (Devin repair loop and its token/scope limits), product spec v1.2 section 4.5 (provider topology)
 
@@ -77,9 +77,11 @@ Two hosted Postgres paths exist under this topology: the **Railway dev Postgres*
 
 8. **Pool sizing.** `pgxpool` max for `core-api` plus workers stays below each database's connection limit — for Supabase, minus its reserved connections (ADR-003 section 3). Record the numbers next to each DSN in the environment config; re-check when a plan changes. Dev: `max_connections=100` (as-built runbook below).
 
-### 6. Deploy job shape (once accepted)
+### 6. Deploy job shape
 
-- `push` to `develop`: build → push `ghcr.io` images tagged `<sha>` + `dev` → deploy job with `environment: dev` → `railway up` / service redeploy on `ghcr.io/...:<sha>` per app → `cmd/migrate` as `qp_migrator` (via `railway run` or the service's pre-deploy command) before the new version takes traffic.
+Implemented in `.github/workflows/deploy.yml` (accepted 2026-11-23).
+
+- `push` to `develop`: build → push `ghcr.io` images tagged `<sha>` + `dev` → deploy job with `environment: dev` → `railway redeploy --from-source` per app (re-pulls the moved `:dev` tag) → migrations run as the service's `/app/migrate` **pre-deploy command** — inside Railway's private network where `pgvector.railway.internal` resolves; a GitHub runner cannot reach it, so `railway run` is not the mechanism. A failed migration fails the deploy before the new version takes traffic.
 - `push` to `main`: same flow against `staging`, promoting the exact image SHAs that `develop` last built (re-tag, never rebuild) so staging runs what dev proved.
 - `apps/web` publishes to Cloudflare Pages — production on `main`, preview on `develop` (a `cloudflare-workers-and-pages` check already fires on this repo; wiring is an open item).
 - Migrations always run before the new version goes live; a failed migration stops the deploy.
@@ -106,7 +108,7 @@ Product spec v1.2 fixes the topology, so these are documented fallbacks, not can
 
 - **Railway has no São Paulo region** — the closest is `us-east4` (Virginia). Railway services → Supabase `sa-east-1` therefore pay roughly **120–150 ms of RTT per query round trip**, and one pipeline stage can need several. Spec v1.2 accepted this cost; mitigation is pool sizing plus keeping per-request round trips few. **If latency proves a problem in the pilot, Fly.io `gru` (~$12/mo, same region as the database) is the documented alternative** (Alternatives, item 1).
 - The session-mode pooler now sits in the prod data path because Railway egress IPv6 is unverified — a variable the direct connection avoids. The provisioning check in section 4 decides which path prod actually runs.
-- The Railway dev Postgres's public TCP proxy carries plaintext Postgres wire protocol — the image configures no TLS (as-built runbook below); mitigation is an open item.
+- The Railway dev Postgres's public TCP proxy carries plaintext Postgres wire protocol — the image configures no TLS. **Decided 2026-11-23 (Pedro): keep the proxy enabled** — dev-only database, SCRAM protects the credential exchange (queries/results stay sniffable), the local docker-compose path is the recommended route for real-Postgres work. Re-evaluate before pilot data lands anywhere near this database.
 - R2 and Pages add a second cloud vendor's provisioning and key-rotation surface.
 - The `roles.sql` exception list can drift from hosted reality. Mitigation: every exception is named and justified in the table; re-run the check after any provider-side change.
 
@@ -115,7 +117,8 @@ Product spec v1.2 fixes the topology, so these are documented fallbacks, not can
 - **Railway details:** region confirmed `sfo` at provisioning (2026-11-20) — farther from `sa-east-1` than the `us-east4` assumption above, so the latency risk in Consequences applies even more strongly. Still open: plan sizing for two services plus the dev Postgres, and which team account owns the workspace/project. `RAILWAY_TOKEN` scoping (project vs team/workspace token) is decided when it is minted.
 - **Cloudflare Pages wiring for `apps/web`:** a `cloudflare-workers-and-pages` check already fires on this repo (the Cloudflare GitHub App is installed); build root `apps/web`, the build command, and the preview (`develop`) vs production (`main`) branch mapping still need confirming.
 - **R2 provisioning:** buckets exist on Marcelo's Cloudflare account (as-built runbook below). Still open: which account should own R2 (Pedro's account has R2 disabled; ADR-003 section 7 bus factor), and S3 API access keys for `quotepilot-dev` / `quotepilot-prod` (least-privilege per bucket where supported) into the GitHub environments.
-- **RLS runbook on the Railway dev Postgres — answered 2026-11-20:** `postgres` is a real superuser, the pinned image ships `vector` 0.8.2, and `roles.sql` passed verbatim with no exception list (as-built runbook below). New item it raised: the public TCP proxy is plaintext — decide before the demo whether to disable it or configure TLS on the Postgres service.
+- **RLS runbook on the Railway dev Postgres — answered 2026-11-20:** `postgres` is a real superuser, the pinned image ships `vector` 0.8.2, and `roles.sql` passed verbatim with no exception list (as-built runbook below). The plaintext public TCP proxy it raised is **decided 2026-11-23: kept enabled** for the dev-only database (see Consequences); re-evaluate before pilot data.
+- **ghcr pull credentials:** `GITHUB_TOKEN` publishes the images, but a Railway service pulling a private ghcr package needs a registry credential configured on the service (a fine-grained PAT with `packages:read`, or the package made org-internal). Provision when the `quotepilot` core-api service is created; the deploy workflow fails at image pull until then.
 - **Monitoring/alerting:** proposed default — a hosted free tier (Better Stack: 10 monitors, 3-minute checks, one status page, Slack/email alerts) watching both environments' health endpoints. Hosted over self-hosted Uptime Kuma on purpose, so alerts still fire when the host itself is dead.
 - Web hosting is no longer an open decision — product spec v1.2 fixes Cloudflare Pages. What remains is the wiring item above and the registrable-domain question it raises for CSRF (ADR-005 section 4).
 
@@ -133,7 +136,7 @@ The section-5 runbook executed against the Railway dev Postgres, recorded as bui
 
 **Migrations.** `MIGRATOR_DSN=postgres://qp_migrator:...@.../quotepilot go run ./cmd/migrate` applied goose v1–v5 and River successfully over the TCP proxy.
 
-**Connectivity — and a finding.** External `psql` reaches the database through the Railway TCP proxy `tramway.proxy.rlwy.net:31619` with `sslmode=disable`: the `pgvector` image configures no TLS, so the public proxy path carries plaintext Postgres wire protocol. Services therefore use the private-network endpoint `pgvector.railway.internal:5432` (the stored DSNs below do); external access should go through `railway connect` / a CLI tunnel instead of the public proxy. **Open item, not decided:** disable the TCP proxy or configure TLS before the demo.
+**Connectivity — and a finding.** External `psql` reaches the database through the Railway TCP proxy `tramway.proxy.rlwy.net:31619` with `sslmode=disable`: the `pgvector` image configures no TLS, so the public proxy path carries plaintext Postgres wire protocol. Services therefore use the private-network endpoint `pgvector.railway.internal:5432` (the stored DSNs below do); external access should go through `railway connect` / a CLI tunnel instead of the public proxy. **Decided 2026-11-23 (Pedro): keep the proxy enabled** — accepted as a dev-only risk; the re-evaluation trigger is pilot data, not the demo date.
 
 **Variables on the `pgvector` service (`dev`).** Template `POSTGRES_*`; `QP_MIGRATOR_PASSWORD`, `QP_APP_PASSWORD`, `QP_ADMIN_PASSWORD` (generated, 48-hex); and the derived private-network DSNs `MIGRATOR_DSN`, `POSTGRES_DSN`, `QP_ADMIN_DSN` pointing at `pgvector.railway.internal:5432`. Values live only in Railway — never in git (section 3).
 
@@ -148,4 +151,4 @@ The section-5 runbook executed against the Railway dev Postgres, recorded as bui
 3. Data API and `pg_graphql` disabled on Supabase; advisors report no RLS or exposure findings on `app`.
 4. From a Railway service: `psql` reaches `quotepilot-prod` over the session-mode pooler; `pgx` prepared statements and River `LISTEN/NOTIFY` work end to end; the IPv6-egress check runs and its result (direct connection usable or not) is recorded.
 5. R2 buckets `quotepilot-dev` and `quotepilot-prod` accept writes with the provisioned keys, scoped per bucket.
-6. One `dev` deploy runs end to end from a push to `develop` — build → `ghcr.io` → `railway up` → migrations — and `apps/web` publishes to Cloudflare Pages.
+6. One `dev` deploy runs end to end from a push to `develop` — build → `ghcr.io` → `railway redeploy --from-source` → migrations via the service's `/app/migrate` pre-deploy command — and `apps/web` publishes to Cloudflare Pages.

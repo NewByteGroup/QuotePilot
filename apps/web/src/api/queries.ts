@@ -11,7 +11,7 @@ type ApiResult<T> = { data?: T; error?: Schemas['Error'] }
 
 function unwrap<T>(operation: string, { data, error }: ApiResult<T>): T {
   if (error || data === undefined) {
-    throw new Error(`${operation} failed: ${error?.code} ${error?.message}`)
+    throw new Error(`${operation} failed: ${error?.error} ${error?.message}`)
   }
   return data
 }

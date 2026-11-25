@@ -1,0 +1,7 @@
+# Keep the build context to the module source — everything the Dockerfile
+# needs arrives via the two COPY steps.
+.dev-storage/
+**/*_test.go
+.env
+.env.*
+!.env.example

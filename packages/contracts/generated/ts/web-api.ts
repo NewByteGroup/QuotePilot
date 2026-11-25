@@ -235,13 +235,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/rfqs/{id}/reprocess": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reprocess a parked RFQ — resume the pipeline at its earliest missing checkpoint
+         * @description The review queue's release action. For an RFQ parked in
+         *     `NEEDS_REVIEW` or `FAILED` — or `READY` while its `DRAFT` quote
+         *     awaits its first render — the server clears the parked reason,
+         *     moves the RFQ back to the resumed stage's active status and
+         *     enqueues that stage's job in one transaction. `resumed_stage`
+         *     names the River job kind the pipeline resumes at. A repeat call
+         *     inside `REPROCESS_MIN_INTERVAL` answers 429 with `Retry-After`:
+         *     the interval check runs before the status gate, so it applies
+         *     to any repeat inside the interval regardless of the RFQ's
+         *     current status — a mid-resume RFQ gets 429, not the 409 its
+         *     active status would otherwise mean.
+         */
+        post: operations["reprocessRfq"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/quotes/{id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a quote version — releases the send job.
+         * @description The analyst's central act (spec section 4 "Approval"):
+         *     `Authenticate` + `ResolveTenant` +
+         *     `RequireRole(OWNER, ADMIN, PRICING_ANALYST)` — the same user may
+         *     prepare and approve. Inside one tenant transaction the handler
+         *     row-locks the quote, refuses a `SUPERSEDED` version (409
+         *     `quote_superseded`) and a negative-margin price (409
+         *     `negative_margin`, audited as `quote.approve_refused`), stamps
+         *     `approved_at`/`approved_by_user_id`/`approved_via='api'`, audits
+         *     `quote.approved` and enqueues the S5 `quote_send` job — one commit.
+         *     Re-approving an already-approved version is an idempotent no-op
+         *     returning the stored approval; an unknown or other-tenant quote id
+         *     gets the same uniform 404.
+         */
+        post: operations["approveQuote"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         Error: {
-            /** @example invalid_parameter */
-            code: string;
+            /**
+             * @description Machine-readable failure code — the core ErrorCode
+             *     vocabulary. Named `error` (issue #61): the mock-era `code`
+             *     member is gone so the browser reads the field the wire
+             *     actually sends.
+             * @example bad_request
+             */
+            error: string;
+            /** @description Human-readable failure detail safe to display. */
             message: string;
         };
         Session: {
@@ -311,6 +379,13 @@ export interface components {
         InboxQuote: {
             /** Format: uuid */
             id: string;
+            /**
+             * Format: uuid
+             * @description The latest quote version's id (`app.quotes.id`) — the path
+             *     parameter of `POST /quotes/{id}/approve`. Null while no quote
+             *     version exists.
+             */
+            quoteVersionId?: string | null;
             rfqNumber: number;
             customerName: string;
             subject: string;
@@ -586,6 +661,61 @@ export interface components {
             queue: components["schemas"]["RepairQueueItem"][];
             history: components["schemas"]["RepairSession"][];
         };
+        /**
+         * @description River job kind of the pipeline stage a reprocess resumed.
+         * @enum {string}
+         */
+        ReprocessStage: "rfq_ingest" | "rfq_extract" | "rfq_fetch_rates" | "rfq_price" | "rfq_render";
+        ReprocessRfqResponse: {
+            /** @enum {string} */
+            status: "accepted";
+            resumed_stage: components["schemas"]["ReprocessStage"];
+        };
+        ReprocessError: {
+            /** @description Core error code (e.g. `rate_limited`). */
+            error: string;
+            /** @description Human-readable failure detail safe to display. */
+            message: string;
+        };
+        ReprocessConflict: {
+            /**
+             * @description `rfq_not_parked` (permanent) or `rfq_busy` (a worker owns the quote — retry shortly).
+             * @enum {string}
+             */
+            error: "rfq_not_parked" | "rfq_busy";
+            /** @description Human-readable failure detail safe to display. */
+            message: string;
+            /** @description The RFQ's current `app.rfq_status` (verbatim, not an enum). */
+            status: string;
+        };
+        /**
+         * @description Mirrors the `app.quote_status` enum (migration 0002). Approval
+         *     leaves the version `DRAFT` — the send worker flips it to
+         *     `APPROVED_SENT`; `SUPERSEDED` arrives only through recalculation.
+         * @enum {string}
+         */
+        QuoteVersionStatus: "DRAFT" | "SUPERSEDED" | "APPROVED_SENT";
+        ApproveQuoteResponse: {
+            /** @description Quote version UUID. */
+            id: string;
+            status: components["schemas"]["QuoteVersionStatus"];
+            /**
+             * Format: date-time
+             * @description Timestamp the first approval stamped.
+             */
+            approved_at: string;
+            /** @description User UUID of the approving analyst. */
+            approved_by_user_id: string;
+        };
+        ApproveConflict: {
+            /**
+             * @description `quote_superseded` (a recalculation retired this version — approve the latest) or `negative_margin` (the pinned price is below cost).
+             * @enum {string}
+             */
+            error: "quote_superseded" | "negative_margin";
+            /** @description Human-readable failure detail safe to display. */
+            message: string;
+        };
     };
     responses: {
         /** @description Invalid request parameters. */
@@ -608,6 +738,24 @@ export interface components {
         };
         /** @description Resource does not exist in the active organization. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Signed-in user lacks the role this action requires. */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
+        /** @description Unexpected server failure. */
+        InternalError: {
             headers: {
                 [name: string]: unknown;
             };
@@ -980,6 +1128,110 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    reprocessRfq: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reprocess accepted — the resumed stage's job is staged. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessRfqResponse"];
+                };
+            };
+            /** @description Missing or invalid credentials. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+            /** @description RFQ does not exist in the active organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+            /** @description Two refusals, distinguished by `error`. `rfq_not_parked` is the permanent one — the RFQ is not in `NEEDS_REVIEW`/`FAILED` or `READY`-awaiting-render; `status` carries its current state. `rfq_busy` is the transient one — a live worker holds the `DRAFT` quote's row lock, so a worker owns downstream state for now and the client should retry shortly; it can carry a parked-looking `status`, which is why the code, not the status, says which refusal it is. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessConflict"];
+                };
+            };
+            /** @description Any repeat of the same RFQ inside `REPROCESS_MIN_INTERVAL` — the interval check runs before the status gate, so it answers regardless of the RFQ's current status (a mid-resume RFQ still gets 429 + `Retry-After`, not 409). */
+            429: {
+                headers: {
+                    /** @description Seconds until the next reprocess of this RFQ is accepted. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReprocessError"];
+                };
+            };
+        };
+    };
+    approveQuote: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Quote version UUID (`app.quotes.id`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description The version's current `app.quote_status` plus its stored
+             *     approval stamp — the stamp (`approved_at`,
+             *     `approved_by_user_id`) is what a re-approve no-op preserves;
+             *     `status` reports the live value, so a sent quote answers
+             *     `APPROVED_SENT` on retry rather than the first response's
+             *     `DRAFT`.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApproveQuoteResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Two refusals, distinguished by `error`. `quote_superseded` is the permanent one — this version was retired by a recalculation, so reload the quote and approve the latest version's id instead. `negative_margin` is the below-cost block (audited as `quote.approve_refused`) — the price must be repriced above cost before approval can pass. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApproveConflict"];
+                };
+            };
+            500: components["responses"]["InternalError"];
         };
     };
 }

@@ -29,8 +29,9 @@ func TestStoredReviewReasonsInClosedList(t *testing.T) {
 		for _, reason := range ReviewReasons {
 			_, err := tx.Exec(ctx,
 				`INSERT INTO app.rfq_requests
-					(organization_id, resend_message_id, customer_email, status, review_reason)
-				 VALUES ($1, $2, $3, 'NEEDS_REVIEW', $4)`,
+					(organization_id, rfq_number, resend_message_id, customer_email, status, review_reason)
+				 VALUES ($1, (SELECT coalesce(max(rfq_number),0)+1 FROM app.rfq_requests WHERE organization_id=$1),
+				         $2, $3, 'NEEDS_REVIEW', $4)`,
 				org, "review-reason-"+string(reason), "customer@example.com", string(reason))
 			require.NoError(t, err)
 		}

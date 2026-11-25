@@ -17,6 +17,7 @@ package jobs
 import (
 	"github.com/google/uuid"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // Pipeline queue names (ADR-004: queue limits are configuration, not code —
@@ -29,10 +30,46 @@ const (
 	QueueSend    = "send"
 )
 
+// liveJobStates is the dedupe window every pipeline enqueue shares: a
+// terminal job (completed/cancelled/discarded) must not block the
+// re-enqueue that the spec's "reclassify as RFQ" and reprocess actions
+// issue by entity id. A fresh slice per call so a caller cannot mutate
+// the shared list.
+func liveJobStates() []rivertype.JobState {
+	return []rivertype.JobState{
+		rivertype.JobStateAvailable,
+		rivertype.JobStatePending,
+		rivertype.JobStateRetryable,
+		rivertype.JobStateRunning,
+		rivertype.JobStateScheduled,
+	}
+}
+
 // entityUnique is the shared insert policy: unique on kind + the tagged
-// entity field, so a double enqueue collapses (spec section 3).
+// entity field, so a double enqueue collapses (spec section 3). ByState
+// restricts the dedupe window to live states. Every worker is idempotent
+// on entity state, so a re-run is always safe.
 func entityUnique(queue string) river.InsertOpts {
-	return river.InsertOpts{Queue: queue, UniqueOpts: river.UniqueOpts{ByArgs: true}}
+	return river.InsertOpts{Queue: queue, UniqueOpts: river.UniqueOpts{
+		ByArgs:  true,
+		ByState: liveJobStates(),
+	}}
+}
+
+// ReprocessForceOpts is the force-insert policy for the reprocess enqueue
+// (internal/rfqs): entityUnique's kind+entity dimensions plus ByQueue.
+// The extra queue dimension shifts the computed unique_key, so the insert
+// cannot collide with the about-to-complete `running` job it replaces —
+// while two force-inserts still dedupe against each other in live states.
+// River v0.51.2 offers no uniqueness-off through InsertOpts: an empty
+// UniqueOpts falls back to the args' InsertOpts(), so shifting the key is
+// the only bypass. Queue and MaxAttempts stay inherited from the args.
+func ReprocessForceOpts() *river.InsertOpts {
+	return &river.InsertOpts{UniqueOpts: river.UniqueOpts{
+		ByArgs:  true,
+		ByQueue: true,
+		ByState: liveJobStates(),
+	}}
 }
 
 // IngestArgs is S1 rfq_ingest: promote one inbound_messages receipt to an
@@ -59,8 +96,17 @@ type ExtractArgs struct {
 // Kind returns the River job kind.
 func (ExtractArgs) Kind() string { return "rfq_extract" }
 
+// extractMaxAttempts pins the spec-§3 row: S2 gets three attempts,
+// transient errors only — contract-violating output gives up earlier
+// inside the worker (each attempt costs money).
+const extractMaxAttempts = 3
+
 // InsertOpts routes the job to the extract queue with entity uniqueness.
-func (ExtractArgs) InsertOpts() river.InsertOpts { return entityUnique(QueueExtract) }
+func (ExtractArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueueExtract)
+	opts.MaxAttempts = extractMaxAttempts
+	return opts
+}
 
 // RateArgs is S3a rfq_fetch_rates: the conditional carrier-offer fetch.
 type RateArgs struct {
@@ -72,8 +118,18 @@ type RateArgs struct {
 // Kind returns the River job kind.
 func (RateArgs) Kind() string { return "rfq_fetch_rates" }
 
-// InsertOpts routes the job to the price queue with entity uniqueness.
-func (RateArgs) InsertOpts() river.InsertOpts { return entityUnique(QueuePrice) }
+// rateMaxAttempts pins the spec-§3 row: S3a gets three attempts —
+// FETCH_FAILED releases pricing anyway, so waiting longer only delays
+// the quote.
+const rateMaxAttempts = 3
+
+// InsertOpts routes the job to the price queue with entity uniqueness
+// and the stage's three-attempt budget.
+func (RateArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueuePrice)
+	opts.MaxAttempts = rateMaxAttempts
+	return opts
+}
 
 // PriceArgs is S3b rfq_price: deterministic pricing.
 type PriceArgs struct {
@@ -85,8 +141,17 @@ type PriceArgs struct {
 // Kind returns the River job kind.
 func (PriceArgs) Kind() string { return "rfq_price" }
 
-// InsertOpts routes the job to the price queue with entity uniqueness.
-func (PriceArgs) InsertOpts() river.InsertOpts { return entityUnique(QueuePrice) }
+// priceMaxAttempts pins the spec-§3 row: S3b gets five attempts, transient
+// DB errors only — every deterministic failure cancels long before that.
+const priceMaxAttempts = 5
+
+// InsertOpts routes the job to the price queue with entity uniqueness and
+// the stage's five-attempt budget.
+func (PriceArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueuePrice)
+	opts.MaxAttempts = priceMaxAttempts
+	return opts
+}
 
 // RenderArgs is S4 rfq_render: the draft quote document for one quote version.
 type RenderArgs struct {
@@ -99,8 +164,18 @@ type RenderArgs struct {
 // Kind returns the River job kind.
 func (RenderArgs) Kind() string { return "rfq_render" }
 
-// InsertOpts routes the job to the render queue with entity uniqueness.
-func (RenderArgs) InsertOpts() river.InsertOpts { return entityUnique(QueueRender) }
+// renderMaxAttempts pins the spec-§3 row: S4 gets three attempts,
+// transient errors only — deterministic faults (contract violations,
+// stored-payload drift) cancel inside the worker long before that.
+const renderMaxAttempts = 3
+
+// InsertOpts routes the job to the render queue with entity uniqueness
+// and the stage's three-attempt budget.
+func (RenderArgs) InsertOpts() river.InsertOpts {
+	opts := entityUnique(QueueRender)
+	opts.MaxAttempts = renderMaxAttempts
+	return opts
+}
 
 // SendArgs is S5 quote_send: deliver one approved quote version.
 type SendArgs struct {

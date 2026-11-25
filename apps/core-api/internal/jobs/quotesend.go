@@ -43,12 +43,25 @@ const (
 	refuseProviderPermanent = "provider_permanent"
 )
 
+// errSendInFlight marks the live-rival outcome of acquireClaim — a
+// retryable condition, not a send failure. On the final attempt a rival
+// that is still alive still owns the send's outcome, so Work skips
+// writeSendFailed for it: parking the RFQ FAILED under a live claim
+// would corrupt a send that is about to complete, and the duplicate job
+// dead-letters quietly instead.
+var errSendInFlight = errors.New("jobs: quote_send: send already in flight")
+
 // QuoteSendWorker is S5 quote_send (spec section 4): the last pipeline
-// stage and the only path that can put a quote in a customer's inbox. The
-// first database action is InTenantTx(organization_id); the whole load →
-// send → bookkeeping sequence runs inside it, so a crash between the
-// provider call and the commit rolls back the bookkeeping and the retry
-// collapses on the Resend idempotency key ({quote_id}:{version}).
+// stage and the only path that can put a quote in a customer's inbox.
+// Issue #65 split the single tenant tx into three phases — claim (tx 1),
+// provider call (no tx), record (tx 2) — so no database lock spans the
+// seconds-long Resend call. Mutual exclusion between concurrent
+// quote_send jobs moved to app.quote_send_claims (migration 0015): one
+// row per quote version whose claimed_by names the owning river_job, so
+// liveness is checkable without timers — a live rival is a retryable
+// in-flight error, a dead one is a stale claim the next job steals. A
+// crash between provider accept and the record commit still collapses on
+// the Resend idempotency key ({quote_id}:{version}).
 type QuoteSendWorker struct {
 	river.WorkerDefaults[SendArgs]
 	// Runner is the only DB path a worker may use (ADR-002).
@@ -79,20 +92,22 @@ func NewQuoteSendWorker(runner tenantdb.TenantRunner, sender resend.Sender, stor
 // "exhausted ⇒ FAILED, no automatic resend").
 func (w *QuoteSendWorker) Work(ctx context.Context, job *river.Job[SendArgs]) error {
 	args := job.Args
-	cancelCause, err := w.run(ctx, args)
+	jobID := claimJobID(job)
+	cancelCause, err := w.run(ctx, args, jobID)
 	if err != nil {
 		if resend.IsPermanent(err) {
 			// A deterministic provider rejection cancels — but not
 			// invisibly: the tenant audit row lands in a fresh tx (the
 			// send's own tx rolled back). The audit write failing must
 			// not mask the original error — join, like writeSendFailed.
-			if aerr := w.writeProviderRefusal(ctx, args); aerr != nil {
+			if aerr := w.writeProviderRefusal(ctx, args, jobID); aerr != nil {
 				return errors.Join(err, aerr)
 			}
 			return river.JobCancel(err)
 		}
-		if job.JobRow != nil && job.MaxAttempts > 0 && job.Attempt >= job.MaxAttempts {
-			if ferr := w.writeSendFailed(ctx, args, job.MaxAttempts, err); ferr != nil {
+		if job.JobRow != nil && job.MaxAttempts > 0 && job.Attempt >= job.MaxAttempts &&
+			!errors.Is(err, errSendInFlight) {
+			if ferr := w.writeSendFailed(ctx, args, jobID, job.MaxAttempts, err); ferr != nil {
 				return errors.Join(err, ferr)
 			}
 		}
@@ -104,97 +119,98 @@ func (w *QuoteSendWorker) Work(ctx context.Context, job *river.Job[SendArgs]) er
 	return nil
 }
 
-// run is the InTenantTx boundary: the tenant tx commits whatever send
-// decided — a refusal's audit/RFQ state or the sent bookkeeping — and the
-// returned cancelCause becomes the JobCancel Work wraps afterwards. A real
-// error rolls the whole decision back instead.
-func (w *QuoteSendWorker) run(ctx context.Context, args SendArgs) (cancelCause error, err error) {
-	err = w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
-		cancelCause, err = w.send(ctx, tx, args)
+// deliver is the provider phase, deliberately outside any transaction:
+// Storage.Get and Sender.Send are the network calls the claim row exists
+// to keep lock-free. Every input was already proved inside tx 1 — a
+// render object gone since maps onto the same missing_render refusal,
+// committed by refuseOutside in a fresh tx. Sender/configuration faults
+// are not recipient refusals: they propagate as job errors — loud,
+// retried, then dead-lettered — and the claim rides through the retry.
+func (w *QuoteSendWorker) deliver(ctx context.Context, args SendArgs, d *sendDecision) (messageID string, cancelCause error, err error) {
+	pdf, err := w.Storage.Get(ctx, *d.quote.PdfKey)
+	if errors.Is(err, platform.ErrObjectNotFound) {
+		c, e := w.refuseOutside(ctx, args, refuseMissingRender,
+			fmt.Errorf("jobs: quote_send: render artifact %q is gone", *d.quote.PdfKey))
+		return "", c, e
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("jobs: quote_send: storage get %q: %w", *d.quote.PdfKey, err)
+	}
+	req, err := w.buildSendRequest(d.quote, d.rfq, d.branding, pdf, args.QuoteID, d.to)
+	if err != nil {
+		return "", nil, err
+	}
+	if messageID, err = w.Sender.Send(ctx, *req); err != nil {
+		return "", nil, err // classified by Work: permanent cancels, transient retries
+	}
+	return messageID, nil, nil
+}
+
+// refuseOutside runs the refusal audit + claim release in a fresh tenant
+// tx — the provider phase's only refusal path (render object gone) runs
+// with no transaction open, so its decision needs its own commit
+// boundary, like writeProviderRefusal.
+func (w *QuoteSendWorker) refuseOutside(ctx context.Context, args SendArgs, reason string, cause error) (error, error) {
+	var cancelCause error
+	err := w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		cancelCause, err = w.refuse(ctx, tx, args, reason, cause)
 		return err
 	})
 	return cancelCause, err
 }
 
-// send is the full S5 sequence inside the tenant transaction:
-// lock → refuse → load → deliver → bookkeeping.
-func (w *QuoteSendWorker) send(ctx context.Context, tx pgx.Tx, args SendArgs) (cancelCause error, err error) {
+// record is tx 2's boundary — revalidate, bookkeeping, claim delete, one
+// commit.
+func (w *QuoteSendWorker) record(ctx context.Context, args SendArgs, messageID string) (cancelCause error, err error) {
+	err = w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
+		cancelCause, err = w.recordTx(ctx, tx, args, messageID)
+		return err
+	})
+	return cancelCause, err
+}
+
+// recordTx re-locks the version and confirms the send is still current
+// before booking it: a row already flipped APPROVED_SENT is the
+// idempotent replay — the provider deduped on the idempotency key or a
+// predecessor attempt committed — so the claim is swept and the job
+// succeeds; SUPERSEDED or a vanished row runs the normal refusal. The
+// claim dies in the same commit as recordSent, so a sent quote can never
+// hold a live claim. Lock order is the invariant recordSent documents:
+// quote first, then rfq_requests — never the inverse.
+func (w *QuoteSendWorker) recordTx(ctx context.Context, tx pgx.Tx, args SendArgs, messageID string) (cancelCause error, err error) {
 	q, found, err := lockSendQuote(ctx, tx, args.QuoteID)
 	if err != nil {
-		return nil, fmt.Errorf("jobs: quote_send: lock %s: %w", args.QuoteID, err)
+		return nil, fmt.Errorf("jobs: quote_send: relock %s: %w", args.QuoteID, err)
 	}
 	if !found {
-		// entity_id carries no FK, so the refusal is still auditable —
-		// a send job for a deleted quote is drift, not a silent skip.
 		return w.refuse(ctx, tx, args, refuseQuoteMissing,
 			fmt.Errorf("jobs: quote_send: quote %s does not exist", args.QuoteID))
 	}
 	if q.Status == quoteApprovedSent {
-		return nil, nil // replay: the row already flipped — no second send
+		return nil, dropClaim(ctx, tx, args.QuoteID)
 	}
 	if q.Status == quoteSuperseded {
 		return w.refuse(ctx, tx, args, refuseSuperseded,
 			fmt.Errorf("jobs: quote_send: quote %s is superseded", q.ID))
 	}
-	if q.ApprovedAt == nil {
-		return w.refuse(ctx, tx, args, refuseUnapproved,
-			fmt.Errorf("jobs: quote_send: quote %s was never approved", q.ID))
-	}
-	return w.deliver(ctx, tx, args, q)
-}
-
-// deliver is the second half: the margin re-check, the render lookup, the
-// provider call and the sent bookkeeping.
-func (w *QuoteSendWorker) deliver(ctx context.Context, tx pgx.Tx, args SendArgs, q sendQuote) (cancelCause error, err error) {
-	negative, err := recheckMargin(q.PricingJSON)
-	if err != nil {
-		return nil, fmt.Errorf("jobs: quote_send: pricing_result_json on %s: %w", q.ID, err)
-	}
-	if negative {
-		return w.refuseMargin(ctx, tx, args, q)
-	}
-	if q.PdfKey == nil || *q.PdfKey == "" {
-		return w.refuse(ctx, tx, args, refuseMissingRender,
-			fmt.Errorf("jobs: quote_send: quote %s has no pdf_storage_key", q.ID))
-	}
-	pdf, err := w.Storage.Get(ctx, *q.PdfKey)
-	if errors.Is(err, platform.ErrObjectNotFound) {
-		return w.refuse(ctx, tx, args, refuseMissingRender,
-			fmt.Errorf("jobs: quote_send: render artifact %q is gone", *q.PdfKey))
-	}
-	if err != nil {
-		return nil, fmt.Errorf("jobs: quote_send: storage get %q: %w", *q.PdfKey, err)
-	}
-	rfq, err := loadSendRfq(ctx, tx, q.RfqID)
-	if err != nil {
-		return nil, fmt.Errorf("jobs: quote_send: load rfq %s: %w", q.RfqID, err)
-	}
-	branding, err := loadBranding(ctx, tx)
-	if err != nil {
-		return nil, fmt.Errorf("jobs: quote_send: load org branding: %w", err)
-	}
-	to, err := recipient(rfq.CustomerEmail)
-	if err != nil {
-		return w.refuse(ctx, tx, args, refuseNoRecipient, err)
-	}
-	req, err := w.buildSendRequest(q, rfq, branding, pdf, args.QuoteID, to)
-	if err != nil {
-		// Sender/configuration faults are not recipient refusals: they
-		// propagate as job errors — loud, retried, then dead-lettered.
+	if err := w.recordSent(ctx, tx, args, q, messageID); err != nil {
 		return nil, err
 	}
-	messageID, err := w.Sender.Send(ctx, *req)
-	if err != nil {
-		return nil, err // classified by Work: permanent cancels, transient retries
-	}
-	return nil, w.recordSent(ctx, tx, args, q, messageID)
+	return nil, dropClaim(ctx, tx, args.QuoteID)
 }
 
-// refuse writes the quote.send_refused audit row and returns the cause the
-// tx commits — Work turns it into the JobCancel afterwards.
+// refuse writes the quote.send_refused audit row, releases the claim and
+// returns the cause the tx commits — Work turns it into the JobCancel
+// afterwards. The claim drop is unconditional on purpose: every refusal
+// reason is data-deterministic, so the same answer holds for any claimant
+// — a rival mid-send still self-cleans in its own record tx.
 func (w *QuoteSendWorker) refuse(ctx context.Context, tx pgx.Tx, args SendArgs, reason string, cause error) (error, error) {
 	if err := auditSend(ctx, tx, args.OrganizationID, "quote.send_refused", args.QuoteID,
 		map[string]any{"reason": reason}); err != nil {
+		return nil, err
+	}
+	if err := dropClaim(ctx, tx, args.QuoteID); err != nil {
 		return nil, err
 	}
 	return cause, nil
@@ -218,6 +234,15 @@ func (w *QuoteSendWorker) refuseMargin(ctx context.Context, tx pgx.Tx, args Send
 // APPROVED_SENT, the provider message id lands on
 // sent_outbound_message_id (migration 0008's partial unique index is the
 // final double-send guard) and quote.sent audits the delivery.
+//
+// Lock order is an invariant, not a detail: this tx took the quote row
+// lock BEFORE this rfq_requests update (quote → RFQ). The only inverse
+// acquisitions — paths holding an rfq_requests lock while reaching for
+// app.quotes — are safe by construction: the reprocess gate's probe
+// (draftRenderState) is FOR UPDATE NOWAIT, and commitQuote's draft-
+// supersede UPDATE only locks rows still matching status='DRAFT' at
+// eval, a domain no send can hold — this tx's quote is always APPROVED,
+// and the claim tx never touches rfq_requests at all.
 func (w *QuoteSendWorker) recordSent(ctx context.Context, tx pgx.Tx, args SendArgs, q sendQuote, messageID string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE app.quotes
@@ -237,27 +262,37 @@ func (w *QuoteSendWorker) recordSent(ctx context.Context, tx pgx.Tx, args SendAr
 
 // writeProviderRefusal audits a permanent provider rejection in a fresh
 // tenant transaction — the send's own tx rolled back, so without this row
-// the cancelled delivery would be invisible to the tenant.
-func (w *QuoteSendWorker) writeProviderRefusal(ctx context.Context, args SendArgs) error {
+// the cancelled delivery would be invisible to the tenant. Terminal
+// refusal, so our claim goes with it (ownership-filtered like
+// writeSendFailed's).
+func (w *QuoteSendWorker) writeProviderRefusal(ctx context.Context, args SendArgs, jobID int64) error {
 	return w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
-		return auditSend(ctx, tx, args.OrganizationID, "quote.send_refused", args.QuoteID,
-			map[string]any{"reason": refuseProviderPermanent})
+		if err := auditSend(ctx, tx, args.OrganizationID, "quote.send_refused", args.QuoteID,
+			map[string]any{"reason": refuseProviderPermanent}); err != nil {
+			return err
+		}
+		return dropOwnClaim(ctx, tx, args.QuoteID, jobID)
 	})
 }
 
 // writeSendFailed is the dead-letter half of S5: retries exhausted on a
 // transient error parks the RFQ FAILED with the reason — a fresh tenant tx
 // because the failed one already rolled back (mirrors writeFailedShell).
-func (w *QuoteSendWorker) writeSendFailed(ctx context.Context, args SendArgs, attempts int, cause error) error {
+// The claim release is ownership-filtered: this path is also reachable off
+// the in-flight error, where the row belongs to a live rival and must be
+// left alone.
+func (w *QuoteSendWorker) writeSendFailed(ctx context.Context, args SendArgs, jobID int64, attempts int, cause error) error {
 	return w.Runner.InTenantTx(ctx, args.OrganizationID, func(ctx context.Context, tx pgx.Tx) error {
 		reason := truncate(fmt.Sprintf("quote_send: exhausted %d attempts, last error: %s", attempts, cause), maxFailureReason)
-		_, err := tx.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			UPDATE app.rfq_requests AS r
 			SET status = 'FAILED', failure_reason = $2, updated_at = now()
 			FROM app.quotes AS q
 			WHERE q.id = $1 AND r.id = q.rfq_id`,
-			args.QuoteID, reason)
-		return err
+			args.QuoteID, reason); err != nil {
+			return err
+		}
+		return dropOwnClaim(ctx, tx, args.QuoteID, jobID)
 	})
 }
 
@@ -273,9 +308,11 @@ type sendQuote struct {
 	PricingJSON []byte
 }
 
-// lockSendQuote SELECTs the version FOR UPDATE — the lock is what makes
-// "already APPROVED_SENT ⇒ no second send" airtight against a racing
-// worker attempt.
+// lockSendQuote SELECTs the version FOR UPDATE. The lock is now
+// deliberately short-lived (issue #65): it serializes the claim tx's
+// check-then-insert and the record tx's revalidate-then-book — the
+// quote_send_claims row, not this lock, is the mutual exclusion across
+// the provider call.
 func lockSendQuote(ctx context.Context, tx pgx.Tx, quoteID uuid.UUID) (sendQuote, bool, error) {
 	var q sendQuote
 	err := tx.QueryRow(ctx, `

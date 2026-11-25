@@ -13,10 +13,7 @@ package auth_test
 // records).
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,28 +21,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/argon2"
 
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/testenv"
 )
-
-// encodeTestPHC is the tests' own argon2id encoder — deliberately NOT the
-// production helper: the password path must verify any well-formed PHC, so
-// seeding through an independent encode keeps the round-trip honest (the
-// parameters live inside the string; verifyPassword honors them, so a test
-// hash built with the same RFC 9106 profile is a faithful stored row).
-func encodeTestPHC(t *testing.T, password string) string {
-	t.Helper()
-	salt := make([]byte, 16)
-	_, err := rand.Read(salt)
-	require.NoError(t, err)
-	key := argon2.IDKey([]byte(password), salt, 2, 19*1024, 1, 32)
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, 19*1024, 2, 1,
-		base64.RawStdEncoding.EncodeToString(salt),
-		base64.RawStdEncoding.EncodeToString(key))
-}
 
 // TestLoginPasswordIssuesSession is the password path's happy path: the
 // verify succeeds and the answer is the session endpoint's exact shape —
@@ -56,7 +36,7 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
 	orgID := uuid.New()
-	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
 	r.q.members["ada@test.dev"] = []platform.Membership{
 		{OrgID: orgID, Name: "Acme Freight", Slug: "acme-freight", Role: platform.RoleOwner},
@@ -132,14 +112,14 @@ func TestLoginPasswordIssuesSession(t *testing.T) {
 func TestLoginPasswordStaleCredentialAborts(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
-	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
-	r.q.credsShift["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "n3w-pilot-pass")}
+	r.q.credsShift["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "n3w-pilot-pass")}
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(),
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(),
 		"a mid-flight credential change is indistinguishable from a wrong password")
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Empty(t, r.q.sessions, "the dead credential mints nothing")
@@ -156,7 +136,7 @@ func TestLoginPasswordStaleCredentialAborts(t *testing.T) {
 func TestLoginPasswordUniform401(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
 	userID := uuid.New()
-	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.creds["nopw@test.dev"] = credRec{userID: uuid.New()} // NULL hash
 
 	unknown := r.postLogin(t, `{"email":"stranger@test.dev","password":"x"}`)
@@ -170,7 +150,7 @@ func TestLoginPasswordUniform401(t *testing.T) {
 	} {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, name)
 		assert.Equal(t, "application/json", rec.Header().Get("Content-Type"), name)
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String(), name)
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String(), name)
 		assert.Empty(t, rec.Header().Values("Set-Cookie"), name+" must never write a cookie")
 	}
 	assert.Len(t, r.q.authFinds, 3, "every attempt paid the same credential lookup")
@@ -188,7 +168,7 @@ func TestLoginPasswordUniform401(t *testing.T) {
 func TestLoginPasswordFieldShapes(t *testing.T) {
 	seed := func(t *testing.T, r *rig, userID uuid.UUID) {
 		r.q.users["ada@test.dev"] = userID
-		r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: encodeTestPHC(t, "s3cret-pilot")}
+		r.q.creds["ada@test.dev"] = credRec{userID: userID, hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 		r.q.profiles[userID] = profileRec{email: "ada@test.dev", fullName: "Ada Lovelace"}
 		r.q.members["ada@test.dev"] = []platform.Membership{
 			{OrgID: uuid.New(), Name: "Acme Freight", Slug: "acme-freight", Role: platform.RoleOwner},
@@ -210,7 +190,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":null}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		assert.Empty(t, r.q.outboxCreates, "null must not become a magic link")
 		assert.Empty(t, r.q.authFinds, "null is not a password attempt")
 	})
@@ -220,7 +200,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":""}`)
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
-		assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 		assert.Len(t, r.q.authFinds, 1, "the credential lookup ran")
 		assert.Empty(t, r.q.outboxCreates)
 	})
@@ -243,7 +223,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":123}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		assert.Empty(t, r.q.outboxCreates)
 		assert.Empty(t, r.q.authFinds)
 	})
@@ -253,7 +233,7 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 		seed(t, r, uuid.New())
 		rec := r.postLogin(t, `{"email":"ada@test.dev","password":{}}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Equal(t, `{"error":"bad_request"}`+"\n", rec.Body.String())
+		assert.Equal(t, `{"error":"bad_request","message":"the request is malformed or invalid"}`+"\n", rec.Body.String())
 		assert.Empty(t, r.q.outboxCreates)
 		assert.Empty(t, r.q.authFinds)
 	})
@@ -264,12 +244,12 @@ func TestLoginPasswordFieldShapes(t *testing.T) {
 // magic-link request — so it answers 401 and stages no send.
 func TestLoginPasswordEmptyStringRoutesToPasswordPath(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
-	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":""}`)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, r.q.outboxCreates, "a password attempt never stages a magic-link send")
 	assert.Empty(t, r.enq.ids)
 }
@@ -280,7 +260,7 @@ func TestLoginPasswordEmptyStringRoutesToPasswordPath(t *testing.T) {
 // the same order the magic-link path pays.
 func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 	r := newRig(t, 100, 1)
-	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 
 	require.Equal(t, http.StatusUnauthorized,
 		r.postLogin(t, `{"email":"ada@test.dev","password":"wrong"}`).Code,
@@ -288,14 +268,14 @@ func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.Equal(t, `{"error":"rate_limited"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"rate_limited","message":"too many requests — retry later"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 	assert.Len(t, r.q.authFinds, 1, "a denied attempt never reaches the credential lookup")
 
 	// The IP bucket is spent the same way — at capacity 1 the second caller
 	// from the same address is denied even for a different recipient.
 	r2 := newRig(t, 1, 100)
-	r2.q.creds["grace@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "pw")}
+	r2.q.creds["grace@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "pw")}
 	require.Equal(t, http.StatusUnauthorized,
 		r2.postLogin(t, `{"email":"grace@test.dev","password":"wrong"}`).Code)
 	assert.Equal(t, http.StatusTooManyRequests,
@@ -305,15 +285,15 @@ func TestLoginPasswordAttemptsSpendBothLimiters(t *testing.T) {
 }
 
 // TestLoginPasswordFailuresAreUniform500 pins the credential path's driver
-// failures to the same {"error":"internal"} every other route emits — a
+// failures to the same {"error":"internal","message":…} every other route emits — a
 // server fault is not an enumeration signal, and no cookie may leak.
 func TestLoginPasswordFailuresAreUniform500(t *testing.T) {
 	r := newRig(t, platform.LoginIPCapacity, platform.LoginEmailCapacity)
-	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: encodeTestPHC(t, "s3cret-pilot")}
+	r.q.creds["ada@test.dev"] = credRec{userID: uuid.New(), hash: testenv.PasswordHashPHC(t, "s3cret-pilot")}
 	r.q.fail["get_user_auth_by_email"] = errBoom
 
 	rec := r.postLogin(t, `{"email":"ada@test.dev","password":"s3cret-pilot"}`)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 }

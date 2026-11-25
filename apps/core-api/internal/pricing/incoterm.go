@@ -35,6 +35,17 @@ var importMatrix = map[Incoterm]groups{
 	IncotermDPU: {customs: true},
 }
 
+// OwesImportFreight reports the import matrix's freight column: the
+// requesting customer pays ocean freight only in the EXW/FCA/FAS/FOB
+// family. S3a's fetch decision (spec S3a) reads the same column the
+// engine prices from, so the stage can never drift from the engine's
+// required groups. EXPORT exits requiredGroups before the matrix
+// applies (export matrix open, RFC-001) and DDP carries no row — both
+// report false.
+func OwesImportFreight(i Incoterm) bool {
+	return importMatrix[i].freight
+}
+
 // requiredGroups resolves spec §3: EXPORT and non-MVP modals exit
 // immediately, sea-only Incoterms on air are double-checked (inputs are
 // untrusted), DDP completes with zero lines, and the import matrix

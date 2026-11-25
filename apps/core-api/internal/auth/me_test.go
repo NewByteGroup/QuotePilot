@@ -188,7 +188,7 @@ func TestMeUniform401(t *testing.T) {
 			rec := r.getMe(t, tc.cookie)
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"unauthenticated"}`, rec.Body.String())
+			assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`, rec.Body.String())
 			if reference == nil {
 				reference = rec.Body.Bytes()
 			}
@@ -212,13 +212,13 @@ func TestMeMissingProfileIsInternalError(t *testing.T) {
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	require.Equal(t, []uuid.UUID{userID}, r.q.profileCalls)
 	assert.Empty(t, r.q.listed, "a missing profile stops before the membership read")
 }
 
 // TestMeFailuresAreUniform500 proves a driver fault is the same 500
-// {"error":"internal"} at each store call on the path — the profile read
+// {"error":"internal","message":…} at each store call on the path — the profile read
 // and the membership list alike.
 func TestMeFailuresAreUniform500(t *testing.T) {
 	for _, failAt := range []string{"get_user_profile", "list_memberships_for_email"} {
@@ -232,7 +232,7 @@ func TestMeFailuresAreUniform500(t *testing.T) {
 
 			assert.Equal(t, http.StatusInternalServerError, rec.Code)
 			assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-			assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+			assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 		})
 	}
 }
@@ -253,7 +253,7 @@ func TestMeWithoutAuthenticateDenies(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
-	assert.Equal(t, `{"error":"unauthenticated"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"unauthenticated","message":"missing or invalid credentials"}`+"\n", rec.Body.String())
 	assert.Empty(t, r.q.profileCalls, "a mis-mounted /me must not reach the store")
 	assert.Empty(t, r.q.listed)
 }

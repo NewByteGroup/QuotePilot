@@ -619,12 +619,15 @@ type AppCarrierOffer struct {
 	ID               pgtype.UUID
 	OrganizationID   pgtype.UUID
 	RfqID            pgtype.UUID
-	Carrier          string
+	Carrier          *string
 	OfferReference   *string
 	OfferPayloadJson []byte
 	FetchedAt        pgtype.Timestamptz
 	ExpiresAt        pgtype.Timestamptz
 	CreatedAt        pgtype.Timestamptz
+	Outcome          string
+	RequestHash      string
+	Source           string
 }
 
 type AppConnector struct {
@@ -637,6 +640,16 @@ type AppConnector struct {
 	LastScrapedAt   pgtype.Timestamptz
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
+}
+
+type AppFxRate struct {
+	ID        pgtype.UUID
+	Source    string
+	Currency  string
+	Rate      decimal.Decimal
+	RateDate  pgtype.Date
+	FetchedAt pgtype.Timestamptz
+	SourceRef *string
 }
 
 type AppHealingSession struct {
@@ -664,6 +677,11 @@ type AppInboundMessage struct {
 }
 
 type AppOrgQuoteCounter struct {
+	OrganizationID pgtype.UUID
+	NextSeq        int32
+}
+
+type AppOrgRfqCounter struct {
 	OrganizationID pgtype.UUID
 	NextSeq        int32
 }
@@ -813,6 +831,13 @@ type AppQuoteLineItem struct {
 	CreatedAt        pgtype.Timestamptz
 }
 
+type AppQuoteSendClaim struct {
+	QuoteID        pgtype.UUID
+	OrganizationID pgtype.UUID
+	ClaimedBy      int64
+	ClaimedAt      pgtype.Timestamptz
+}
+
 type AppRfqAttachment struct {
 	ID             pgtype.UUID
 	OrganizationID pgtype.UUID
@@ -846,6 +871,7 @@ type AppRfqRequest struct {
 	UpdatedAt            pgtype.Timestamptz
 	// Why a human must look at this NEEDS_REVIEW RFQ (spec 2026-11-11 S3b). Controlled vocabulary: internal/jobs ReviewReason — never failure_reason, which is reserved for technical failures after retries.
 	ReviewReason *string
+	RfqNumber    int32
 }
 
 type AppSuppressionList struct {

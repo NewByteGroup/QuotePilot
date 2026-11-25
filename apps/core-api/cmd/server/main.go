@@ -10,12 +10,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,13 +27,19 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/aiengine"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/auth/authapi"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/fx"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/rfqs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/tenantdb"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/webapi"
 )
 
 func main() {
@@ -66,7 +74,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg))
+	riverClient, err := startJobs(ctx, db, store, mailer, newReceiver(&cfg), newSender(&cfg), newStorage(), newOutboundFrom(&cfg), newAIEngine(&cfg), newRateFetcher(&cfg))
 	if err != nil {
 		return err
 	}
@@ -77,8 +85,13 @@ func run(ctx context.Context) error {
 	endpoints := buildEndpoints(&cfg, db, store, enqueueAuthMail(riverClient))
 	// The strict surface's approve delegate needs the built River client
 	// for the in-transaction quote_send enqueue (post-build assignment,
-	// like ingest.Inserter above).
+	// like ingest.Inserter above); the web read surface joins it on the
+	// same generated mux.
 	endpoints.Approver = quotes.NewEndpoints(db, riverClient)
+	endpoints.Web = webapi.NewEndpoints(db, store, &cfg, time.Now)
+	// The reprocess delegate joins the same generated mux — the River
+	// client stages the resumed stage's job inside its tenant tx.
+	endpoints.Reprocessor = rfqs.NewEndpoints(db, riverClient, reprocessMinInterval(), time.Now)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -177,6 +190,40 @@ func newReceiver(cfg *platform.Config) resend.Receiver {
 	return resend.UnconfiguredReceiver{}
 }
 
+// newAIEngine picks the ai-engine binding for the rfq_extract worker —
+// the same fail-soft contract as the receiver/sender: without
+// AI_ENGINE_URL the unconfigured client binds and calls fail loudly as
+// contract violations (never retried forever on a credential that cannot
+// appear).
+func newAIEngine(cfg *platform.Config) aiengine.Client {
+	if cfg.AIEngineURL != "" {
+		return aiengine.NewHTTPClient(cfg.AIEngineURL, cfg.AIEngineToken)
+	}
+	slog.Warn("server: AI_ENGINE_URL unset — rfq_extract binds the unconfigured engine (calls fail loudly)")
+	return aiengine.UnconfiguredClient{}
+}
+
+// newRateFetcher picks the S3a carrier-offer binding (spec S3a):
+// MIRROR_PORTAL_ENABLED=true selects the deterministic demo mirror —
+// the APP_ENV guard already refused that flag in production, so the
+// mirror can only ever bind where a simulated offer is safe — otherwise
+// the LIVE ai-engine binding (pilot carrier: CMA CGM, the first approved
+// real connector). The mirror flag keeps its os.Getenv read here where
+// the binding happens — the same shape AUTH_DEV_MAILER keeps inside
+// newMailer. Without AI_ENGINE_URL the fail-soft stub binds and calls
+// fail loudly as contract violations.
+func newRateFetcher(cfg *platform.Config) carrier.Fetcher {
+	if os.Getenv("MIRROR_PORTAL_ENABLED") == "true" {
+		slog.Warn("server: MIRROR_PORTAL_ENABLED on — rfq_fetch_rates binds the deterministic mirror (rows carry source=MIRROR; never production — the config guard refuses it there)")
+		return carrier.MirrorFetcher{}
+	}
+	if cfg.AIEngineURL != "" {
+		return carrier.NewLiveFetcher(aiengine.NewHTTPClient(cfg.AIEngineURL, cfg.AIEngineToken), "CMA_CGM")
+	}
+	slog.Warn("server: AI_ENGINE_URL unset — rfq_fetch_rates binds the unconfigured fetcher (calls fail loudly)")
+	return carrier.NewLiveFetcher(aiengine.UnconfiguredClient{}, "CMA_CGM")
+}
+
 // newSender picks the Resend Sending client for the quote_send worker —
 // the same fail-soft contract as the receiver: without RESEND_API_KEY the
 // unconfigured stub binds and sends fail loudly as permanent errors, so a
@@ -210,6 +257,30 @@ func newOutboundFrom(cfg *platform.Config) string {
 		slog.Warn("server: QP_OUTBOUND_FROM unset — quote_send From falls back to " + devDefaultOutboundFrom + " (dev-safe only; set a verified domain)")
 	}
 	return devDefaultOutboundFrom
+}
+
+// reprocessDefaultInterval is the spec's per-RFQ reprocess floor when
+// REPROCESS_MIN_INTERVAL is unset or unreadable — a missing gate lets a
+// retry loop fan out jobs and carrier calls, so a bad value degrades to
+// the spec default rather than disabling the gate or refusing boot.
+const reprocessDefaultInterval = 60 * time.Second
+
+// reprocessMinInterval reads REPROCESS_MIN_INTERVAL as whole seconds
+// (spec Reprocess; the .env.example name is the contract). Its
+// os.Getenv read lives here with the other feature envs — same shape as
+// MIRROR_PORTAL_ENABLED inside newRateFetcher.
+func reprocessMinInterval() time.Duration {
+	s := strings.TrimSpace(os.Getenv("REPROCESS_MIN_INTERVAL"))
+	if s == "" {
+		return reprocessDefaultInterval
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		slog.Warn("server: REPROCESS_MIN_INTERVAL unreadable — falling back",
+			"value", s, "default", reprocessDefaultInterval)
+		return reprocessDefaultInterval
+	}
+	return time.Duration(n) * time.Second
 }
 
 // newStorage binds the object-storage seam. R2 credentials are a pending
@@ -261,51 +332,125 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	// POST /quotes/{id}/approve — spec section 4 "Approval": the analyst's
 	// central act. RequireRole narrows membership to the approval set; the
 	// strict surface inside authSrv routes the path to the QuoteApprover
-	// delegate. No CheckOrigin: ResolveTenant already demands the custom
-	// X-Organization-Id header a cross-site browser form cannot set.
+	// delegate. CheckOrigin guards the qp_org cookie transport: the
+	// fallback ended "the custom header is the CSRF defense" — a same-site
+	// sibling origin posts cookies freely and a browser POST always
+	// carries Origin or Sec-Fetch-Site for CrossOriginProtection to judge.
 	mux.Handle("POST /quotes/{id}/approve", platform.Correlation(
-		platform.Authenticate(cfg)(
-			platform.ResolveTenant(store)(
-				platform.RequireRole(
-					platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
-					authSrv)))))
+		platform.CheckOrigin(cfg)(
+			platform.Authenticate(cfg)(
+				platform.ResolveTenant(store)(
+					platform.RequireRole(
+						platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+						authSrv))))))
+	// The web v1 read surface (core-api.yaml's web tag). The session pair
+	// mounts Authenticate only — GET /v1/session resolves its own org hint
+	// (OrgHints plants header + qp_org for the handler's fallback chain)
+	// and stamps the resolved org onto qp_org itself; the org switch is
+	// state-changing so CheckOrigin guards it. The two org-scoped reads
+	// run ResolveTenantDefault — header, qp_org cookie, then the
+	// first-membership default for safe methods — so a fresh session
+	// (qp_access only, no qp_org yet) loads the inbox instead of 400ing.
+	mux.Handle("GET /v1/session", platform.Correlation(
+		platform.Authenticate(cfg)(webapi.OrgHints(authSrv))))
+	mux.Handle("POST /v1/session/organization", platform.Correlation(
+		platform.CheckOrigin(cfg)(platform.Authenticate(cfg)(authSrv))))
+	mux.Handle("GET /v1/inbox/quotes", platform.Correlation(
+		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
+	mux.Handle("GET /v1/quotes/{quoteId}", platform.Correlation(
+		platform.Authenticate(cfg)(platform.ResolveTenantDefault(store)(authSrv))))
+	// POST /v1/rfqs/{id}/reprocess — spec section 4 "Reprocess": the
+	// review queue's release action. The same chain approve mounts —
+	// CheckOrigin guards the cookie transport on the state-changing
+	// route, RequireRole narrows membership to the analyst set, and the
+	// strict surface routes the path to the RfqReprocessor delegate.
+	mux.Handle("POST /v1/rfqs/{id}/reprocess", platform.Correlation(
+		platform.CheckOrigin(cfg)(
+			platform.Authenticate(cfg)(
+				platform.ResolveTenant(store)(
+					platform.RequireRole(
+						platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
+						authSrv))))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}
+	// Anything the patterns miss — unknown paths and wrong methods alike —
+	// answers in the contract's {error, message} shape too (issue #61):
+	// the router's plain-text 404/405 would be the only non-contract
+	// payload left on the surface.
+	mux.Handle("/", platform.Correlation(http.HandlerFunc(notFoundJSON)))
 	return mux
+}
+
+// notFoundJSON is the mux's catch-all — route misses and wrong methods
+// land here and answer the contract's {error, message} body instead of
+// the standard library's plain-text default.
+func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	body, err := json.Marshal(authapi.NewError(authapi.ErrorCodeNotFound))
+	if err != nil {
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 // startJobs builds the River client over the qp_app pool — the driver
 // shares the request path's connections — with the worker registry: the
 // spike's echo_tenant plus auth_mail_send, the durable magic-link delivery
-// whose outbox the login transaction stages (migration 0004), and
-// rfq_ingest, stage S1 of the quote pipeline (spec section 4). The reindexer
-// is disabled (its fast schedule was a spike affordance; production never
-// owns it).
-func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string) (*river.Client[pgx.Tx], error) {
+// whose outbox the login transaction stages (migration 0004),
+// auth_mail_sweep, the periodic pass that deletes the outbox rows the
+// per-job path leaves dead (migration 0014), and rfq_ingest, stage S1 of
+// the quote pipeline (spec section 4). The reindexer is disabled (its
+// fast schedule was a spike affordance; production never owns it).
+func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mailer platform.MailSender, recv resend.Receiver, sender resend.Sender, storage platform.ObjectStorage, outboundFrom string, engine aiengine.Client, fetcher carrier.Fetcher) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, jobs.NewEchoTenantWorker(db))
 	river.AddWorker(workers, jobs.NewAuthMailWorker(store, mailer, time.Now))
+	river.AddWorker(workers, jobs.NewAuthMailSweepWorker(store))
 	ingest := jobs.NewRfqIngestWorker(db, recv, storage)
 	river.AddWorker(workers, ingest)
+	extract := jobs.NewRfqExtractWorker(db, engine, storage)
+	river.AddWorker(workers, extract)
+	rates := jobs.NewRfqRatesWorker(db, fetcher, time.Now)
+	river.AddWorker(workers, rates)
+	price := jobs.NewRfqPriceWorker(db, time.Now)
+	// Phase B's PTAX warm-up writes the platform-global fx_rates table,
+	// so it runs on the plain qp_app pool — outside every tenant tx and
+	// decoupled from the job's 5s budget (rfqprice_fx.go).
+	price.FX = fx.NewSyncer(db.Pool(), fx.NewFetcher())
+	river.AddWorker(workers, price)
+	river.AddWorker(workers, jobs.NewRfqRenderWorker(db, engine, storage))
 	river.AddWorker(workers, jobs.NewQuoteSendWorker(db, sender, storage, outboundFrom))
 	client, err := river.NewClient(riverpgxv5.New(db.Pool()), &river.Config{
-		// Only queues with registered workers are declared: rfq_ingest
-		// chains rfq_extract into the `extract` queue, whose worker lands in
-		// a later slice — an undeclared queue simply waits unworked instead
-		// of the job failing with UnknownJobKindError.
+		// Every queue a worker drains is declared: rfq_ingest chains
+		// rfq_extract into `extract`, S2 chains rfq_fetch_rates and S3a
+		// chains rfq_price — both share the `price` queue per spec §3's
+		// stage table — rfq_price chains rfq_render into `render`, and
+		// the approve endpoint chains quote_send into `send`. `extract`
+		// is LLM-bound at ~4 workers.
 		Queues: map[string]river.QueueConfig{
 			river.QueueDefault: {MaxWorkers: 4},
 			jobs.QueueIngest:   {MaxWorkers: 4},
+			jobs.QueueExtract:  {MaxWorkers: 4},
+			jobs.QueuePrice:    {MaxWorkers: 4},
+			jobs.QueueRender:   {MaxWorkers: 4},
 			jobs.QueueSend:     {MaxWorkers: 4},
+		},
+		// The dead-outbox sweeper: platform maintenance, not tenant work,
+		// so it rides the default queue (migration 0014). PeriodicInterval,
+		// not a cron string — NewPeriodicJob takes a PeriodicSchedule, and
+		// pinning the phase with a robfig dependency buys nothing for rows
+		// that are already dead.
+		PeriodicJobs: []*river.PeriodicJob{
+			river.NewPeriodicJob(river.PeriodicInterval(time.Hour), func() (river.JobArgs, *river.InsertOpts) {
+				return jobs.AuthMailSweepArgs{}, nil
+			}, nil),
 		},
 		Workers:           workers,
 		Schema:            "river",
 		Logger:            slog.Default(),
 		ReindexerSchedule: river.NeverSchedule(),
-		// rfq_ingest inserts rfq_extract (unregistered until the P2 worker
-		// ships); without this River rejects the in-transaction enqueue.
-		SkipUnknownJobCheck: true,
 		// Without SoftStopTimeout the worker context inherits the Start ctx —
 		// a signal would hard-cancel running jobs instantly instead of letting
 		// Stop drain them inside the grace window.
@@ -314,9 +459,14 @@ func startJobs(ctx context.Context, db *tenantdb.DB, store *platform.Store, mail
 	if err != nil {
 		return nil, fmt.Errorf("server: river client: %w", err)
 	}
-	// The worker needs the client for InsertTx; the client needs the worker
-	// registry at construction — so the seam is assigned post-build, pre-Start.
+	// The workers need the client for InsertTx; the client needs the worker
+	// registry at construction — so the seams are assigned post-build,
+	// pre-Start. Every enqueued kind is now registered, so River's
+	// unknown-kind insert check stays on.
 	ingest.Inserter = client
+	extract.Inserter = client
+	rates.Inserter = client
+	price.Inserter = client
 	if err := client.Start(ctx); err != nil {
 		return nil, fmt.Errorf("server: start river: %w", err)
 	}

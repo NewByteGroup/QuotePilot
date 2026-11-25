@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
@@ -89,4 +91,39 @@ func TestNewStorage(t *testing.T) {
 	dir, ok = s.(*platform.DirStorage)
 	require.True(t, ok)
 	assert.Equal(t, ".dev-storage", dir.Root())
+}
+
+// TestReprocessMinInterval pins the env contract (spec Reprocess): whole
+// seconds honored, unset/unreadable/non-positive degrades to the spec's
+// 60 s floor — a broken value must not disable the per-RFQ gate.
+func TestReprocessMinInterval(t *testing.T) {
+	t.Setenv("REPROCESS_MIN_INTERVAL", "")
+	require.Equal(t, reprocessDefaultInterval, reprocessMinInterval())
+	t.Setenv("REPROCESS_MIN_INTERVAL", "90")
+	require.Equal(t, 90*time.Second, reprocessMinInterval())
+	t.Setenv("REPROCESS_MIN_INTERVAL", "abc")
+	require.Equal(t, reprocessDefaultInterval, reprocessMinInterval())
+	t.Setenv("REPROCESS_MIN_INTERVAL", "0")
+	require.Equal(t, reprocessDefaultInterval, reprocessMinInterval(),
+		"a zero floor would let retry loops fan out carrier calls")
+}
+
+// TestNewRateFetcher pins the S3a binding decision (spec S3a): the
+// mirror wins only on its explicit opt-in (the production guard lives in
+// config.validate), the LIVE ai-engine binding otherwise — with the
+// fail-soft unconfigured stub when AI_ENGINE_URL is absent.
+func TestNewRateFetcher(t *testing.T) {
+	t.Setenv("MIRROR_PORTAL_ENABLED", "true")
+	require.IsType(t, carrier.MirrorFetcher{}, newRateFetcher(&platform.Config{AIEngineURL: "http://engine"}),
+		"the opt-in mirror wins even with a live URL configured")
+
+	t.Setenv("MIRROR_PORTAL_ENABLED", "")
+	live := newRateFetcher(&platform.Config{AIEngineURL: "http://engine", AIEngineToken: "tok"})
+	require.IsType(t, &carrier.LiveFetcher{}, live)
+	assert.Equal(t, "CMA_CGM", live.Carrier())
+	assert.Equal(t, carrier.SourceLive, live.Source())
+
+	stub := newRateFetcher(&platform.Config{})
+	require.IsType(t, &carrier.LiveFetcher{}, stub,
+		"the unconfigured binding is still the LIVE fetcher shape — its calls fail loudly")
 }

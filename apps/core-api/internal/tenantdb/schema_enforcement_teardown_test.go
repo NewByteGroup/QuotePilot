@@ -56,8 +56,8 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		seedBatchTariff(t, ctx, tx, org)
 		rfq := seedRFQ(t, ctx, tx, org)
 		mustExec(t, ctx, tx, `
-			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, offer_payload_json, fetched_at)
-			VALUES ($1, $2, 'HAPAG', '{}'::jsonb, now())`,
+			INSERT INTO app.carrier_offers (organization_id, rfq_id, carrier, outcome, request_hash, offer_payload_json, fetched_at)
+			VALUES ($1, $2, 'HAPAG', 'OFFER_FOUND', 'test-hash-002', '{}'::jsonb, now())`,
 			org.String(), rfq.String())
 		mustExec(t, ctx, tx, `
 			INSERT INTO app.rfq_attachments (organization_id, rfq_id, storage_key, filename)
@@ -66,6 +66,11 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 		quote := seedQuote(t, ctx, tx, org, rfq)
 		seedQuoteLine(t, ctx, tx, org, quote)
 		approveQuote(t, ctx, tx, quote)
+		// A claim left by an in-flight send must ride the quote cascade —
+		// without ON DELETE CASCADE the teardown deadlocks on this row.
+		mustExec(t, ctx, tx, `
+			INSERT INTO app.quote_send_claims (quote_id, organization_id, claimed_by)
+			VALUES ($1, $2, 1)`, quote.String(), org.String())
 		mustExec(t, ctx, tx,
 			`INSERT INTO app.org_quote_counters (organization_id, next_seq) VALUES ($1, 2)`, org.String())
 		mustExec(t, ctx, tx,
@@ -113,7 +118,7 @@ func TestSchemaEnforcementDeleteOrganization(t *testing.T) {
 	require.NoError(t, err)
 	for _, table := range []string{
 		"private_tariff_batches", "private_tariffs", "rfq_requests", "rfq_attachments",
-		"carrier_offers", "quotes", "quote_line_items", "org_quote_counters",
+		"carrier_offers", "quotes", "quote_line_items", "quote_send_claims", "org_quote_counters",
 		"tenant_audit_logs", "inbound_messages", "pricing_rules", "suppression_list",
 		"organization_connector_preferences", "organization_memberships",
 	} {

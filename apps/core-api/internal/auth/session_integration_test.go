@@ -48,7 +48,7 @@ func TestSessionExchangeRollsBackConsume(t *testing.T) {
 	ghost.ActiveKID = "ghost"
 	rec := postSessionTo(t, sessionHandler(t, ghost, store), `{"token":"`+token+`"}`)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
-	assert.Equal(t, `{"error":"internal"}`+"\n", rec.Body.String())
+	assert.Equal(t, `{"error":"internal","message":"an unexpected server error occurred"}`+"\n", rec.Body.String())
 	assert.Empty(t, rec.Header().Values("Set-Cookie"))
 
 	var consumed bool

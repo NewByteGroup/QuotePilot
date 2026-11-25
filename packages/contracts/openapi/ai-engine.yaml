@@ -1,0 +1,364 @@
+openapi: 3.0.3
+info:
+  title: QuotePilot ai-engine API (provisional)
+  version: "0.1.0"
+  description: |
+    PROVISIONAL transport contract between core-api and ai-engine for the
+    S2 rfq_extract stage (spec 2026-11-11-staged-quote-pipeline). Confirmed
+    with the engine owner; core-api isolates it behind
+    internal/aiengine.Client so only the adapter changes if shapes move.
+
+    Security rules (AGENTS.md): ai-engine never receives organization_id —
+    requests carry correlation_id + tenant content only, and every response
+    is untrusted (core-api validates before persisting).
+
+    Error semantics core-api relies on:
+    - transient (retry): 408, 425, 429, 5xx, transport errors
+    - contract violation (never persisted, one retry max): other 4xx,
+      schema-invalid bodies
+
+    Bodies: raw HTML never crosses the wire. core-api reduces HTML-only
+    emails to text before truncating, so both endpoints see a single
+    body_text (16 KB cap for classify, 64 KB for extract — engine-side
+    body/attachment limits are finalized by the engine owner).
+servers:
+  - url: http://localhost:8000
+paths:
+  /v1/classify:
+    post:
+      summary: Stage 2 routing — RFQ / TARIFF_UPDATE / OTHER (Jev, ADR-006)
+      operationId: classify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, subject, sender, body_text, attachment_metas]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                subject: { type: string }
+                sender: { type: string, description: "Customer From: address" }
+                body_text:
+                  type: string
+                  description: "First 16 KB of the textual body (ADR-006 classify input bound — core-api truncates rune-safe; HTML-only emails arrive already reduced to text)"
+                attachment_metas:
+                  type: array
+                  items:
+                    type: object
+                    required: [filename, content_type]
+                    additionalProperties: false
+                    properties:
+                      filename: { type: string }
+                      content_type: { type: string }
+      responses:
+        "200":
+          description: Routing decision with calibrated probabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Classification"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/extract:
+    post:
+      summary: Stage 3 structured extraction (RFC-004)
+      description: Returns an ExtractionResult — see
+        ../schemas/extraction_result.schema.json (the authoritative shape;
+        core-api validates it and the sanity bounds before persisting). The
+        result echoes the request's classification; core-api rejects a
+        label mismatch as a contract violation.
+      operationId: extract
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, subject, sender, body_text, parsed_markdown, classification]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                subject: { type: string }
+                sender: { type: string }
+                body_text:
+                  type: string
+                  description: "Textual body at the wider 64 KB extract cap (HTML-only emails arrive already reduced to text)"
+                parsed_markdown:
+                  type: array
+                  description: Attachments whose parse succeeded — the real filename rides along so evidence can cite ATTACHMENT:<filename>
+                  items:
+                    type: object
+                    required: [filename, markdown]
+                    additionalProperties: false
+                    properties:
+                      filename: { type: string }
+                      markdown: { type: string }
+                classification:
+                  $ref: "#/components/schemas/Classification"
+      responses:
+        "200":
+          description: |
+            ExtractionResult. The authoritative shape is the JSON Schema
+            (draft 2020-12) at ../schemas/extraction_result.schema.json —
+            it is NOT inlined here because 2020-12 features are not
+            expressible in OpenAPI 3.0.3 schemas (ADR-002 pins 3.0.3).
+            core-api re-validates every response against it before
+            persisting.
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/attachments/parse:
+    post:
+      summary: Attachment → markdown conversion for extraction input
+      operationId: parseAttachment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, filename, content_type, bytes_b64]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                filename: { type: string }
+                content_type: { type: string }
+                bytes_b64: { type: string, format: byte, description: "base64-encoded attachment bytes" }
+      responses:
+        "200":
+          description: Parsed markdown text
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [parsed_markdown]
+                additionalProperties: false
+                properties:
+                  parsed_markdown: { type: string }
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/carrier-offers/search:
+    post:
+      summary: Stage 3a carrier offer search (S3a rfq_fetch_rates)
+      description: PROVISIONAL route — pending engine-owner alignment, the
+        same process classify/extract/parse went through. Core calls it
+        only for FCL imports whose Incoterm puts ocean freight on the
+        requesting customer; a null offer is the no-offer answer (never a
+        404). The response is untrusted — core re-validates the payload
+        against the sanity bounds before persisting it as the S3a
+        checkpoint.
+      operationId: searchCarrierOffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, origin_locode, dest_locode, equipment_or_unit, quantity, ready_date]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                origin_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                dest_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                equipment_or_unit: { type: string, minLength: 1, description: "Equipment or unit code as extracted ('40HC', ...)" }
+                quantity: { type: integer, minimum: 1 }
+                ready_date: { type: string, format: date, description: "Cargo ready date (IsoDate) — the effective quote date" }
+      responses:
+        "200":
+          description: "Carrier offer or the no-offer answer: offer is null when the carrier has nothing usable for the request."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [offer, offer_reference]
+                additionalProperties: false
+                properties:
+                  offer:
+                    description: "The offer payload — pricing.CarrierOffer minus id; null means NO_OFFER"
+                    type: object
+                    nullable: true
+                    allOf:
+                      - $ref: "#/components/schemas/CarrierOffer"
+                  offer_reference:
+                    type: string
+                    nullable: true
+                    description: "Carrier-side offer id when one was issued"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+  /v1/render/quote:
+    post:
+      summary: Stage 4 quote document render (S4 rfq_render)
+      description: |
+        PROVISIONAL route — pending engine-owner alignment, the
+        same process classify/extract/parse went through. Renders one
+        quote version (Jinja2 + WeasyPrint) to PDF plus the optional email
+        HTML. The request carries tenant content and the org's
+        branding_json verbatim — never organization_id (rule 2). The
+        response is untrusted: core-api re-validates (pdf_b64 decodes to
+        %PDF bytes under the size bound) before persisting anything.
+      operationId: renderQuote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id, quote, branding, org]
+              additionalProperties: false
+              properties:
+                correlation_id: { type: string, format: uuid }
+                quote:
+                  type: object
+                  required: [quote_number, version, modal, direction, incoterm,
+                             origin_locode, dest_locode, lines, total_brl,
+                             overall_confidence, warnings, assumptions]
+                  additionalProperties: false
+                  properties:
+                    quote_number: { type: string, minLength: 1 }
+                    version: { type: integer, minimum: 1 }
+                    quote_date:
+                      type: string
+                      format: date
+                      description: "IsoDate; omitted when the quote row carries none"
+                    valid_until:
+                      type: string
+                      format: date
+                      description: "Reserved — core-api has no quote-validity column yet"
+                    modal: { type: string, enum: [FCL, LCL, AIR] }
+                    direction: { type: string, enum: [IMPORT, EXPORT] }
+                    incoterm:
+                      type: string
+                      enum: [EXW, FCA, FAS, FOB, CFR, CIF, CPT, CIP, DAP, DPU, DDP]
+                    origin_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                    dest_locode: { type: string, pattern: "^[A-Z]{2}[A-Z0-9]{3}$" }
+                    equipment_or_unit: { type: string, description: "Omitted for modal without equipment (e.g. LCL)" }
+                    lines:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: object
+                        required: [category, description, original_currency, original_amount,
+                                   fx_rate_used, sell_amount_brl, flags]
+                        additionalProperties: false
+                        properties:
+                          category:
+                            type: string
+                            enum: [INTL_FREIGHT, ORIGIN_CHARGES, TERMINAL_STORAGE_THC, CUSTOMS_DISPATCH, SURCHARGE]
+                          description: { type: string }
+                          original_currency: { type: string, pattern: "^[A-Z]{3}$" }
+                          original_amount: { type: number, description: "Decimal amount in the original currency" }
+                          fx_rate_used: { type: number, description: "Decimal rate applied to BRL" }
+                          sell_amount_brl: { type: number, description: "Decimal sell amount, BRL" }
+                          flags:
+                            type: array
+                            items: { type: string }
+                    total_brl: { type: number, description: "Decimal final_price_brl — the internal BRL total" }
+                    overall_confidence: { type: number, minimum: 0, maximum: 1 }
+                    warnings:
+                      type: array
+                      items: { type: string }
+                    assumptions:
+                      type: array
+                      items: { type: string }
+                branding:
+                  type: object
+                  description: "organizations.branding_json verbatim — arbitrary tenant-supplied JSON"
+                org:
+                  type: object
+                  required: [name, from_name, reply_to]
+                  additionalProperties: false
+                  properties:
+                    name: { type: string }
+                    from_name: { type: string, description: "organizations.outbound_from_name — display name" }
+                    reply_to: { type: string, description: "organizations.outbound_reply_to" }
+      responses:
+        "200":
+          description: The rendered artifacts — PDF as base64, email HTML as text.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pdf_b64]
+                additionalProperties: false
+                properties:
+                  pdf_b64:
+                    type: string
+                    format: byte
+                    description: "base64-encoded PDF — core-api requires %PDF magic and ≤ 16 MiB decoded"
+                  email_html:
+                    type: string
+                    description: "Optional; may be empty — the send worker owns the mail body for now, but a rendered body is stored beside the PDF when present"
+        "4XX":
+          $ref: "#/components/responses/Error"
+        default:
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    serviceKey:
+      type: apiKey
+      in: header
+      name: X-Internal-Service-Key
+      description: AI_ENGINE_SERVICE_TOKEN shared service key (ADR-005 §10)
+  schemas:
+    Classification:
+      type: object
+      required: [label, probabilities]
+      additionalProperties: false
+      description: The classify response; echoed inside the extract request so the engine can return it in the ExtractionResult without re-classifying.
+      properties:
+        label: { type: string, enum: [RFQ, TARIFF_UPDATE, OTHER] }
+        probabilities:
+          type: object
+          required: [RFQ, TARIFF_UPDATE, OTHER]
+          additionalProperties: false
+          properties:
+            RFQ: { type: number, minimum: 0, maximum: 1 }
+            TARIFF_UPDATE: { type: number, minimum: 0, maximum: 1 }
+            OTHER: { type: number, minimum: 0, maximum: 1 }
+        model: { type: string, description: "Pinned classifier model id" }
+    CarrierOffer:
+      type: object
+      description: "The offer payload persisted as the S3a checkpoint — pricing.CarrierOffer minus id (the row id is supplied at read time)."
+      required: [carrier, charges, expires_at]
+      additionalProperties: false
+      properties:
+        carrier: { type: string, minLength: 1, description: "Source carrier name (e.g. CMA_CGM)" }
+        charges:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: "#/components/schemas/OfferCharge" }
+        expires_at:
+          type: string
+          format: date-time
+          description: "Offer validity end — required; the engine treats a missing expiry as expired"
+    OfferCharge:
+      type: object
+      required: [category, code, amount, currency, equipment_or_unit]
+      additionalProperties: false
+      properties:
+        category:
+          type: string
+          enum: [OCEAN_FREIGHT, AIR_FREIGHT, SURCHARGE, ORIGIN_CHARGE, DESTINATION_CHARGE, TERMINAL, CUSTOMS, OTHER]
+        code: { type: string, minLength: 1, maxLength: 64 }
+        amount: { type: number, exclusiveMinimum: true, minimum: 0, description: "Decimal amount > 0" }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        equipment_or_unit: { type: string, minLength: 1, description: "Equipment/unit the charge applies to — matched verbatim to the request" }
+  responses:
+    Error:
+      description: Failure — core-api classifies by status code
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+security:
+  - serviceKey: []

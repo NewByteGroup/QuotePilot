@@ -18,19 +18,21 @@ import (
 // Secret-adjacent fields (JWTKeys, ResendAPIKey, the DSNs) must never be
 // logged or echoed into errors.
 type Config struct {
-	AppEnv       string            // deployment environment: local | test | demo | production
-	AppDSN       string            // qp_app DSN — the only credential on request paths
-	AdminDSN     string            // qp_admin DSN — platform_* path only
-	WebURL       string            // base URL magic links are built from
-	JWTKeys      map[string]string // kid -> HS256 secret; any entry verifies
-	ActiveKID    string            // kid that signs new access tokens
-	AccessTTL    time.Duration     // access JWT lifetime (default 15m, spec section 4)
-	RefreshTTL   time.Duration     // refresh cookie lifetime (default 30d)
-	LoginTTL     time.Duration     // magic-link token lifetime (default 15m)
-	ResendAPIKey string            // magic-link + quote sender credential
-	MagicFrom    string            // From: address of magic-link mail
-	OutboundFrom string            // verified From: mailbox for quote_send (spec S5)
-	CookieSecure bool              // Secure flag on auth cookies; false only for local http
+	AppEnv        string            // deployment environment: local | test | demo | production
+	AppDSN        string            // qp_app DSN — the only credential on request paths
+	AdminDSN      string            // qp_admin DSN — platform_* path only
+	WebURL        string            // base URL magic links are built from
+	JWTKeys       map[string]string // kid -> HS256 secret; any entry verifies
+	ActiveKID     string            // kid that signs new access tokens
+	AccessTTL     time.Duration     // access JWT lifetime (default 15m, spec section 4)
+	RefreshTTL    time.Duration     // refresh cookie lifetime (default 30d)
+	LoginTTL      time.Duration     // magic-link token lifetime (default 15m)
+	ResendAPIKey  string            // magic-link + quote sender credential
+	MagicFrom     string            // From: address of magic-link mail
+	OutboundFrom  string            // verified From: mailbox for quote_send (spec S5)
+	AIEngineURL   string            // ai-engine base URL for the rfq_extract worker (spec S2)
+	AIEngineToken string            // Bearer token core uses to call ai-engine
+	CookieSecure  bool              // Secure flag on auth cookies; false only for local http
 }
 
 // Defaults from spec section 4. Env overrides are Go duration strings —
@@ -70,17 +72,19 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 // defaults before the optional overrides land.
 func defaultConfig(getenv func(string) string) Config {
 	return Config{
-		AppEnv:       getenv("APP_ENV"),
-		AppDSN:       getenv("POSTGRES_DSN"),
-		AdminDSN:     getenv("QP_ADMIN_DSN"),
-		WebURL:       getenv("WEB_URL"),
-		ResendAPIKey: getenv("RESEND_API_KEY"),
-		MagicFrom:    getenv("AUTH_MAGIC_FROM"),
-		OutboundFrom: getenv("QP_OUTBOUND_FROM"),
-		AccessTTL:    defaultAccessTTL,
-		RefreshTTL:   defaultRefreshTTL,
-		LoginTTL:     defaultLoginTTL,
-		CookieSecure: true,
+		AppEnv:        getenv("APP_ENV"),
+		AppDSN:        getenv("POSTGRES_DSN"),
+		AdminDSN:      getenv("QP_ADMIN_DSN"),
+		WebURL:        getenv("WEB_URL"),
+		ResendAPIKey:  getenv("RESEND_API_KEY"),
+		MagicFrom:     getenv("AUTH_MAGIC_FROM"),
+		OutboundFrom:  getenv("QP_OUTBOUND_FROM"),
+		AIEngineURL:   getenv("AI_ENGINE_URL"),
+		AIEngineToken: getenv("AI_ENGINE_SERVICE_TOKEN"),
+		AccessTTL:     defaultAccessTTL,
+		RefreshTTL:    defaultRefreshTTL,
+		LoginTTL:      defaultLoginTTL,
+		CookieSecure:  true,
 	}
 }
 
