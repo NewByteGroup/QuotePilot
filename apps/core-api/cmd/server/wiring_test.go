@@ -75,10 +75,19 @@ func TestNewReceiver(t *testing.T) {
 	require.IsType(t, resend.UnconfiguredReceiver{}, newReceiver(&platform.Config{}))
 }
 
-// TestNewStorage pins the dev-storage binding: DirStorage at QP_STORAGE_DIR
-// when set, the repo-local .dev-storage default otherwise — bytes survive a
-// restart, which the in-memory fake could not promise.
+// TestNewStorage pins the dev-storage binding: with no S3 envs at all,
+// DirStorage at QP_STORAGE_DIR when set, the repo-local .dev-storage
+// default otherwise — bytes survive a restart, which the in-memory fake
+// could not promise.
 func TestNewStorage(t *testing.T) {
+	for _, name := range []string{
+		"QP_STORAGE_S3_ENDPOINT", "QP_STORAGE_BUCKET",
+		"QP_STORAGE_ACCESS_KEY_ID", "QP_STORAGE_SECRET_ACCESS_KEY",
+		"QP_STORAGE_S3_REGION",
+	} {
+		t.Setenv(name, "")
+	}
+
 	want := t.TempDir() + "/nested"
 	t.Setenv("QP_STORAGE_DIR", want)
 	s := newStorage()
@@ -91,6 +100,33 @@ func TestNewStorage(t *testing.T) {
 	dir, ok = s.(*platform.DirStorage)
 	require.True(t, ok)
 	assert.Equal(t, ".dev-storage", dir.Root())
+}
+
+// TestNewStorageS3 pins the R2 selection: all four credential envs bind
+// S3Storage with the env-supplied endpoint/bucket and R2's "auto" region
+// default; a partial set is a misconfiguration — the store falls back to
+// DirStorage instead of dying on the first signed request.
+func TestNewStorageS3(t *testing.T) {
+	t.Setenv("QP_STORAGE_S3_ENDPOINT", "https://acct.r2.cloudflarestorage.com")
+	t.Setenv("QP_STORAGE_BUCKET", "quotepilot-dev")
+	t.Setenv("QP_STORAGE_ACCESS_KEY_ID", "key")
+	t.Setenv("QP_STORAGE_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("QP_STORAGE_S3_REGION", "")
+
+	s := newStorage()
+	s3, ok := s.(*platform.S3Storage)
+	require.True(t, ok, "full S3 envs must bind S3Storage, got %T", s)
+	assert.Equal(t, "https://acct.r2.cloudflarestorage.com", s3.Endpoint())
+	assert.Equal(t, "quotepilot-dev", s3.Bucket())
+	assert.Equal(t, "auto", s3.Region(), "R2 signs region 'auto'")
+
+	t.Setenv("QP_STORAGE_S3_REGION", "weur")
+	assert.Equal(t, "weur", newStorage().(*platform.S3Storage).Region())
+
+	t.Setenv("QP_STORAGE_SECRET_ACCESS_KEY", "")
+	s = newStorage()
+	_, ok = s.(*platform.DirStorage)
+	require.True(t, ok, "a partial S3 env set must fall back to DirStorage, got %T", s)
 }
 
 // TestReprocessMinInterval pins the env contract (spec Reprocess): whole

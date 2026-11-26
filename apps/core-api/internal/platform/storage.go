@@ -20,9 +20,9 @@ var ErrObjectNotFound = errors.New("platform: object not found")
 // Cloudflare R2 bucket quotepilot-dev). Only core-api ever holds storage
 // credentials; ai-engine receives content, never keys. The interface is
 // deliberately minimal: P1's rfq_ingest writes attachments, P5's quote_send
-// reads the rendered PDF back. The real S3-compatible client lands with the
-// R2 credentials (spec open item); until then main binds DirStorage so dev
-// runs end-to-end without losing attachment bytes on restart.
+// reads the rendered PDF back. main binds S3Storage when the R2 envs are
+// complete and DirStorage otherwise, so dev runs end-to-end without losing
+// attachment bytes on restart.
 type ObjectStorage interface {
 	// Put stores body under key (e.g. "tenants/{org}/rfqs/{rfq}/{file}").
 	// The caller builds tenant-safe keys; implementations must treat the key
@@ -37,9 +37,9 @@ type ObjectStorage interface {
 // DirStorage is the dev binding for ObjectStorage: Put writes the object to
 // root/key on local disk, creating parent directories. Bytes survive a
 // restart — unlike FakeStorage — so the rfq_attachments rows they back stay
-// resolvable until the real R2 client lands (spec open item). Keys are
-// worker-generated, so the only guard is refusing ".." — a segment that
-// would let a malformed key climb out of the root.
+// resolvable whenever the R2 envs are absent. Keys are worker-generated, so
+// the only guard is refusing ".." — a segment that would let a malformed
+// key climb out of the root.
 type DirStorage struct {
 	root string
 }
