@@ -95,7 +95,7 @@ func (s *S3Storage) Put(ctx context.Context, key string, body []byte) error {
 	if err != nil {
 		return fmt.Errorf("platform: s3 put %q: %w", key, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("platform: s3 put %q: status %d: %s", key, resp.StatusCode, errorSnippet(resp))
 	}
@@ -121,7 +121,7 @@ func (s *S3Storage) Get(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: s3 get %q: %w", key, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, ErrObjectNotFound
