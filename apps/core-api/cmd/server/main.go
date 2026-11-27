@@ -283,17 +283,55 @@ func reprocessMinInterval() time.Duration {
 	return time.Duration(n) * time.Second
 }
 
-// newStorage binds the object-storage seam. R2 credentials are a pending
-// spec open item, so every environment gets the directory-backed dev store
-// for now — bytes land under QP_STORAGE_DIR (default .dev-storage) and
-// survive restarts, which keeps the rfq_attachments rows resolvable. The
-// real S3-compatible client swaps in later without touching the worker.
+// newStorage binds the object-storage seam. All four R2 envs set → the
+// SigV4 S3 client (path-style against QP_STORAGE_S3_ENDPOINT, region
+// QP_STORAGE_S3_REGION defaulting to R2's "auto"). A partial set is a
+// misconfiguration: the boot warns and names the missing vars, but stays
+// on the dev directory store — a half-configured deploy must not fail at
+// first upload. No envs → DirStorage at QP_STORAGE_DIR (default
+// .dev-storage), bytes surviving restarts so rfq_attachments stay
+// resolvable until R2 creds are filled in.
 func newStorage() platform.ObjectStorage {
+	required := []string{
+		"QP_STORAGE_S3_ENDPOINT",
+		"QP_STORAGE_BUCKET",
+		"QP_STORAGE_ACCESS_KEY_ID",
+		"QP_STORAGE_SECRET_ACCESS_KEY",
+	}
+	var missing []string
+	for _, name := range required {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) == 0 {
+		region := os.Getenv("QP_STORAGE_S3_REGION")
+		if region == "" {
+			region = "auto"
+		}
+		slog.Info("server: binding S3-compatible object storage",
+			"endpoint", os.Getenv("QP_STORAGE_S3_ENDPOINT"),
+			"bucket", os.Getenv("QP_STORAGE_BUCKET"),
+			"region", region)
+		return platform.NewS3Storage(
+			os.Getenv("QP_STORAGE_S3_ENDPOINT"),
+			os.Getenv("QP_STORAGE_BUCKET"),
+			region,
+			os.Getenv("QP_STORAGE_ACCESS_KEY_ID"),
+			os.Getenv("QP_STORAGE_SECRET_ACCESS_KEY"),
+			nil,
+		)
+	}
 	dir := os.Getenv("QP_STORAGE_DIR")
 	if dir == "" {
 		dir = ".dev-storage"
 	}
-	slog.Warn("server: object storage not configured (R2 creds pending) — dev directory storage", "dir", dir)
+	if len(missing) < len(required) {
+		slog.Warn("server: partial S3 storage config — falling back to dev directory storage",
+			"missing", strings.Join(missing, ","), "dir", dir)
+	} else {
+		slog.Warn("server: object storage not configured — dev directory storage", "dir", dir)
+	}
 	return platform.NewDirStorage(dir)
 }
 
