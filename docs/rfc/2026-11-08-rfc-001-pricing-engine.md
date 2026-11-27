@@ -60,6 +60,28 @@ Notes:
 - Under the CIF family the freight is paid by the seller but still belongs in the customs value, so it enters the calculation as a number from the documents and never as a charge line.
 - Insurance for the CIF value is an input (declared, or zero). **[business] confirm whether to add an insurance line.**
 
+### Export matrix — validated 2026-11-26 with a pilot forwarder operator
+
+Every export quote decomposes into four cost blocks. The Incoterm acts as a switch selecting which blocks the **seller** owes; the requester is quoted exactly the blocks on their side of the switch:
+
+| Block | Contents |
+|---|---|
+| **A — Origin** | Factory pickup (road freight), export customs dispatch (DU-E), local port/airport fees (THC, BL fee, ISPS) |
+| **B — International freight** | Ocean or air linehaul |
+| **C — International insurance** | Cargo insurance |
+| **D — Destination** | Foreign terminal fees, import clearance and duties, final delivery |
+
+| Incoterm | Seller (exporter) owes | Buyer (importer) owes |
+|---|---|---|
+| EXW | nothing — goods at the factory door; an exporter requester has no freight quote to make | A + B + C + D |
+| FOB, FAS (sea) / FCA (air, multimodal) | A | B + C + D |
+| CFR (sea) / CPT (air, multimodal) | A + B | C + D |
+| CIF (sea) / CIP (air, multimodal) | A + B + C | D |
+| DAP, DPU | A + B + C + D − destination import clearance and duties | clearance + duties |
+| DDP | A + B + C + D including destination import duties | nothing |
+
+The pilot companies' export requesters are the Brazilian exporters, so the seller column drives export quotes; the buyer column mirrors the import side for a foreign requester. A DAP/DDP destination block still needs a partner/agent rate source — open residual under question 14.
+
 ## 5. Calculation order
 
 **Currency (decided 2026-11-16).** The customer-facing quote is grouped and
@@ -77,8 +99,8 @@ bands (BRL public tables), the negative-margin check and the audit view.
 3. **Select tariffs.** Filter by direction, route, modal and equipment for charges payable by the requesting customer. Before this pure package runs, Stage 4A (accepted in ADR-004 on 2026-11-16: its own job and checkpoint, separate from pricing; the offer wire contract and the `carrier_offers` migration still need Pedro's approval) obtains a Hapag FCL offer through the `ai-engine` connector only when the customer owes ocean freight under the Incoterm; the worker passes that offer as pricing input. The package selects an AIR freight tariff only when the customer owes air freight. If freight is not payable by the customer, do not create a sell line for it. Direction and export tariff coverage still need validation. For each tariff natural key (carrier, route, modal, equipment, charge_category, charge_code), consider the rows whose own validity covers the quote date (`valid_from <= date <= valid_until`) and whose batch was activated at or before the pricing time (`activated_at <= priced_at`); take the row from the batch with the latest `activated_at`. If that row is a tombstone (`is_removed`), that natural key is dropped from the candidates (for example one carrier's rate); whether the result is then `INCOMPLETE` follows the offer rule in open question 12. See RFC-002 step 3 (tariff versioning). Filtering is deterministic on codes; embeddings only help rank service descriptions among already-valid rows (spec section 5.4 warning applies). If several carriers qualify, the default is: price the lowest net cost, list the others as alternatives in the audit view. **[business] one price or several options?** Missing tariff for a required group makes the result `INCOMPLETE`; the engine never invents a number.
 4. **Freight and pass-through lines.** When the customer owes FCL Hapag ocean freight, apply cost-based markup only to `OCEAN_FREIGHT`, with floor `min_markup_usd × container_count`. When the customer owes air freight, calculate base net freight as `max(min_amount, chargeable_kg × net_amount)` and apply cost-based markup only to that base. Local charges, air FSC/SSC and fixed fees are separate pass-through lines sold at cost only when payable by the requesting customer under the Incoterm. Lines keep their original currency in the output; BRL conversion applies only where step 5 or the internal audit requires it (section 7).
 5. **Import CIF base in BRL, when applicable.** For import fee bands only, use `(goods value + freight + insurance)`, with freight from the tariff when payable by the customer or declared in the documents when paid by the other party. Convert at the still-open customs rate (section 7). Do not assume this CIF-based fee basis applies to exports.
-6. **Terminal lines by direction.** For the import proposal, look up the destination public fee band for the CIF base, weight and volume; first-period storage remains a business assumption. Which export origin/destination terminal charges are payable by the requesting customer, and their calculation basis and source, remain open **[business]**.
-7. **Organization fixed fees.** Include fees from `fixed_fees_json` only when payable by the requesting customer under the Incoterm; convert if not in BRL. The export allocation is open in question 13.
+6. **Terminal lines by direction.** For the import proposal, look up the destination public fee band for the CIF base, weight and volume; first-period storage remains a business assumption. For export origin terminal fees (block A) the basis is settled (2026-11-26): THC per container for FCL (20' vs 40' differ), W/M with a minimum for LCL; BL and dispatch per process. Export destination terminal fees (block D, DAP/DDP only) still lack a confirmed source — question 14 residual.
+7. **Organization fixed fees.** Include fees from `fixed_fees_json` only when payable by the requesting customer under the Incoterm (the section 4 block switch now covers export); convert if not in BRL.
 8. **Cost total** is the sum of the rounded line costs per currency group (section 6) — plus a BRL-normalized internal total for the margin check — so what the analyst audits adds up.
 9. **Markup and price** (sections 6 and 8): add the markup to the eligible FCL ocean or base air freight only, then add all other lines at cost.
 
@@ -121,15 +143,23 @@ The earlier alternatives of margin on the whole price or separate pass-through m
 | 10 | Add an insurance line | Marcelo | No; insurance is an input only |
 | 11 | Half-up rounding | Marcelo | Half up |
 | 12 | What makes a tariff offer complete: must one carrier cover every required freight and origin group, or may groups from different parties combine (for example EXW origin charges from an origin agent plus ocean freight)? | Marcelo, pilot companies | Per carrier: an offer is usable only if that carrier covers every required freight and origin group; public terminal fees are carrier-independent; `INCOMPLETE` if no offer is usable. Never combine across carriers silently. |
-| 13 | Export Incoterm matrix: which freight, origin/export customs, terminal, destination and fixed charges are payable by the requesting exporter or importer for each supported Incoterm? | To confirm with pilot companies | Open; current section 4 matrix applies to imports only |
-| 14 | Export terminal and handling charges: which source, location and calculation basis apply instead of import CIF-band destination storage? | To confirm with pilot companies | Open; do not reuse import CIF formula automatically |
-| 15 | Export tariff coverage and direction routing: can Hapag return FCL export offers for the pilot routes, and which AIR export tariffs are available; how are ambiguous or reverse routes handled? | To confirm with pilot companies | Open; no unverified reverse-route rate |
+| 13 | Export Incoterm matrix: which freight, origin/export customs, terminal, destination and fixed charges are payable by the requesting exporter or importer for each supported Incoterm? | To confirm with pilot companies | Resolved 2026-11-26 (pilot operator): the four-block switch in section 4 — EXW: buyer owes all; FOB/FAS/FCA: seller owes A; CFR/CPT: A+B; CIF/CIP: A+B+C; DAP/DPU/DDP: A+B+C+D (DDP includes destination duties) |
+| 14 | Export terminal and handling charges: which source, location and calculation basis apply instead of import CIF-band destination storage? | To confirm with pilot companies | Origin basis resolved 2026-11-26: THC per container (FCL) or W/M with minimum (LCL); BL fee per BL; ISPS per container (FCL), consolidator-dependent (LCL); customs dispatch per process (per extra container on large shipments). **Residual**: DAP/DDP destination-block rate source (partner/agent?) still unconfirmed |
+| 15 | Export tariff coverage and direction routing: can Hapag return FCL export offers for the pilot routes, and which AIR export tariffs are available; how are ambiguous or reverse routes handled? | To confirm with pilot companies | Sourcing resolved 2026-11-26: all rates are private — FAK tables (weekly/biweekly), NAC volume contracts, spot portals. AIR rates come from airlines or master loaders via private Excel/PDF or WebCargo/Cargo.one. **Residual**: Hapag API export coverage still unverified (ops smoke test once credentials arrive); manual spot entry for off-table routes stays required |
 | 16 | Export quote currency, FX source/timing and any export-specific customs or tax treatment? | Pilot meeting | Resolved 2026-11-16: all lines in original currency, no conversion, no PTAX shown; service-only taxes as a separate group |
 
 **Business rules decided in the 2026-11-16 pilot meeting** (recorded here; the pipeline spec carries the pipeline-side consequences):
 
 - **Negative margin is a hard block** — a proposal priced below cost is never sent; the block fires at approval/send (systemic, not a warning).
 - **Quote validity**: the carrier sets the expiry (weeks, days, or a specific vessel for spot rates). A quote with under ~30 minutes left is not viable; ~5 business days is the preferred window.
+
+**Pilot-operator input received 2026-11-26** (export matrix, fee bases, air formula, FX, sourcing — recorded here pending data-model follow-up):
+
+- **Charge basis per fee** — every tariff/fee needs a calculation unit of `PER_PROCESS` (per BL/AWB), `PER_CONTAINER`, `PER_WM` (ton or m³, whichever is greater) or `PER_KG`, plus an optional minimum. Current `private_tariffs` carries `min_amount` but no formal basis enum — a `charge_basis` column is a v1.3 data-model follow-up item, pending Pedro's approval.
+- **Origin fee bases (block A)** — THC: per container for FCL (different for 20'/40'), W/M with a minimum for LCL; BL fee: fixed per BL; ISPS: per container for FCL, consolidator-dependent for LCL; customs dispatch: fixed per process (some brokers add per-extra-container on large shipments).
+- **Air export formula** — `chargeable_kg = max(gross_kg, volume_m3 × 166.67)` as already fixed in step 2; rate falls across weight breaks MIN, -45, +45, +100, +300, +500, +1000 kg. **Break-even rule**: always compare adjacent breaks — if 92 kg at the +45 rate costs more than 100 kg at the +100 rate, the market charges as 100 kg (lowest final wins). Many carriers now quote **all-in** rates (freight+FSC+SSC in one per-kg number) — the tariff row needs an `all_in` flag so surcharges are not double-charged; FSC/SSC basis (chargeable vs gross) varies by carrier.
+- **Currency display** — confirms the 2026-11-16 rule: totals per original currency, freight/armador fees in USD (or EUR), local fees in BRL. An optional "estimated total in BRL" may be shown only with a footnote that billing uses the PTAX of the shipment date plus the carrier/agent spread (typically +3–5%).
+- **Tariff sourcing** — 100% private and negotiated: FAK tables (weekly/biweekly validity — `valid_until` is mandatory), NAC confidential per-client contracts, and spot portals. A manual spot/override path stays required for off-table routes (`line_source_type` already has `MANUAL_OVERRIDE`).
 - **`free_time`** (container free time) is part of the commercial proposal payload.
 - **Payload grouping**: international freight, local fees and service taxes are separate groups in the quote payload; the front-end adapts to the payload shape.
 - **Import tariff sourcing**: for imports the Brazilian forwarder negotiates with the **overseas correspondent** (the selling agent), not directly with the carrier — the contract with the correspondent is what enables bookings.
