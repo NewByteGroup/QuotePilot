@@ -55,3 +55,58 @@ func (s *Store) RecordInboundQuarantine(ctx context.Context, d InboundQuarantine
 	}
 	return recorded, nil
 }
+
+// InboundQuarantineRow is one page row as app.list_inbound_quarantine
+// returns it (migration 0018): the auditable columns verbatim plus the
+// page-window total the function computes over the whole table. Recipients
+// is the decoded `to` array (jsonb); MatchedOrgIDs is empty for no_match.
+type InboundQuarantineRow struct {
+	ID              uuid.UUID
+	ResendMessageID string
+	Reason          string
+	Recipients      []string
+	MatchedOrgIDs   []uuid.UUID
+	Subject         string
+	FromAddr        string
+	ReceivedAt      time.Time
+	QuarantinedAt   time.Time
+}
+
+// ListInboundQuarantine reads one page through app.list_inbound_quarantine
+// — the only SELECT into app.inbound_quarantine qp_app holds, behind the
+// RequirePlatformAdmin gate (the function is the table's whole read
+// surface; migration 0018 explains the accepted residual). Page bounds are
+// clamped in the function; the handler bounds the wire parameter too.
+// total is the full quarantine size — it rides every row's window count,
+// so an empty page reports 0 rows AND total 0.
+//
+//	rows, total, err := store.ListInboundQuarantine(ctx, 50, 0)
+func (s *Store) ListInboundQuarantine(ctx context.Context, limit, offset int) ([]InboundQuarantineRow, int64, error) {
+	rows, err := s.q.Query(ctx, `
+		SELECT id, resend_message_id, reason, recipients, matched_org_ids,
+		       subject, from_addr, received_at, quarantined_at, total
+		FROM app.list_inbound_quarantine($1, $2)`, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("platform: list_inbound_quarantine: %w", err)
+	}
+	defer rows.Close()
+	out := []InboundQuarantineRow{}
+	var total int64
+	for rows.Next() {
+		var r InboundQuarantineRow
+		var raw []byte
+		if err := rows.Scan(&r.ID, &r.ResendMessageID, &r.Reason, &raw,
+			&r.MatchedOrgIDs, &r.Subject, &r.FromAddr,
+			&r.ReceivedAt, &r.QuarantinedAt, &total); err != nil {
+			return nil, 0, fmt.Errorf("platform: list_inbound_quarantine scan: %w", err)
+		}
+		if err := json.Unmarshal(raw, &r.Recipients); err != nil {
+			return nil, 0, fmt.Errorf("platform: list_inbound_quarantine recipients: %w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("platform: list_inbound_quarantine rows: %w", err)
+	}
+	return out, total, nil
+}

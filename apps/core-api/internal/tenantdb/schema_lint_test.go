@@ -94,6 +94,8 @@ var tenantFunctions = []string{
 	"app.revoke_user_sessions(uuid)",
 	"app.revoke_user_pending_tokens(uuid)",
 	"app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)",
+	"app.is_platform_admin(uuid)",
+	"app.list_inbound_quarantine(integer, integer)",
 }
 
 // platformFunctions are the platform path's SECURITY DEFINER surface;

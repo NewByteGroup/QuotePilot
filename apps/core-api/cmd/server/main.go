@@ -33,7 +33,9 @@ import (
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/carrier"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/fx"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/inbox/inboxdb"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/jobs"
+	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/ops"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/platform"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/quotes"
 	"github.com/NewByteGroup/QuotePilot/apps/core-api/internal/resend"
@@ -92,6 +94,10 @@ func run(ctx context.Context) error {
 	// The reprocess delegate joins the same generated mux — the River
 	// client stages the resumed stage's job inside its tenant tx.
 	endpoints.Reprocessor = rfqs.NewEndpoints(db, riverClient, reprocessMinInterval(), time.Now)
+	// The ops delegate reads the Layer C registry through sqlc and
+	// quarantine through the same Store — no tenant runner: the platform
+	// path never enters InTenantTx (ADR-005).
+	endpoints.Ops = ops.NewEndpoints(inboxdb.New(db.Pool()), store)
 	srv := newServer(&cfg, store, auth.NewServer(endpoints), inboxServer)
 	return serve(ctx, srv, riverClient)
 }
@@ -409,6 +415,19 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 					platform.RequireRole(
 						platform.RoleOwner, platform.RoleAdmin, platform.RolePricingAnalyst)(
 						authSrv))))))
+	// The ops read surface (core-api.yaml's ops tag, ADR-005 platform
+	// path): Authenticate + RequirePlatformAdmin, no ResolveTenant — these
+	// reads are platform-scoped, so no tenant context exists to resolve,
+	// and CheckOrigin is unnecessary on safe methods like every other
+	// GET here. RequirePlatformAdmin re-reads users.is_platform_admin on
+	// every request through app.is_platform_admin — the flag is never a
+	// JWT claim.
+	mux.Handle("GET /ops/quarantine", platform.Correlation(
+		platform.Authenticate(cfg)(ops.RequirePlatformAdmin(store)(authSrv))))
+	mux.Handle("GET /ops/connectors", platform.Correlation(
+		platform.Authenticate(cfg)(ops.RequirePlatformAdmin(store)(authSrv))))
+	mux.Handle("GET /ops/healing", platform.Correlation(
+		platform.Authenticate(cfg)(ops.RequirePlatformAdmin(store)(authSrv))))
 	if inboxSrv != nil {
 		mux.Handle("/webhooks/", platform.Correlation(platform.CheckOrigin(cfg)(inboxSrv)))
 	}

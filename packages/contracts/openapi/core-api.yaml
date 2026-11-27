@@ -68,6 +68,14 @@ tags:
       comment): session bootstrap, org switching and the inbox/quote-audit
       reads apps/web swaps its MSW mock for. Field names and wire shapes
       are the mock contract's verbatim — Amanda's client changes nothing.
+  - name: ops
+    description: |
+      The ops console read surface (ADR-005 platform path): platform path —
+      requires `users.is_platform_admin`, not tenant membership; runs as
+      qp_app, no tenant RLS context. `RequirePlatformAdmin` re-reads the
+      flag on every request (never a JWT claim), so losing the flag closes
+      the surface on the next call. Read-only v1: quarantined inbound mail,
+      the connector registry and its healing sessions.
 
 paths:
   /auth/login:
@@ -713,6 +721,115 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ops/quarantine:
+    get:
+      operationId: listOpsQuarantine
+      tags: [ops]
+      summary: Quarantined inbound mail — the unmatched-recipient audit trail.
+      description: |
+        Platform path — requires `users.is_platform_admin`, not tenant
+        membership; runs as qp_app, no tenant RLS context. `Authenticate`
+        verifies `qp_access`, then `RequirePlatformAdmin` re-reads the flag
+        through `app.is_platform_admin(sub)` on every request (ADR-005
+        section 5 — the flag is never a JWT claim).
+
+        Lists `app.inbound_quarantine`, the 0016 drop table a Resend
+        webhook writes through `record_inbound_quarantine` when no unique
+        organization resolves (reason `no_match` or `multi_match`). qp_app
+        holds no table privilege on it — the read goes through the
+        SECURITY DEFINER `app.list_inbound_quarantine`, which is why this
+        surface exists at all: the function is the table's only SELECT
+        path. Newest `received_at` first; `total` is the full quarantine
+        size so the console can page.
+      security:
+        - qpAccess: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size — server clamps to 1..200 (default 50).
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip — server clamps at 0 (default 0).
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: One page of quarantine rows plus the full count.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsQuarantinePage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ops/connectors:
+    get:
+      operationId: listOpsConnectors
+      tags: [ops]
+      summary: The connector registry — every public-source parser's health.
+      description: |
+        Platform path — requires `users.is_platform_admin`, not tenant
+        membership; runs as qp_app, no tenant RLS context (same chain as
+        `/ops/quarantine`). Reads `app.connectors` directly — Layer C is
+        SELECT-only for qp_app by design (migration 0002), so no function
+        is needed and no write path exists on this surface. Ordered by
+        slug; the table is small by definition (one row per connector).
+      security:
+        - qpAccess: []
+      responses:
+        '200':
+          description: Every registered connector.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsConnectorPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ops/healing:
+    get:
+      operationId: listOpsHealingSessions
+      tags: [ops]
+      summary: Connector healing sessions — the self-repair audit trail.
+      description: |
+        Platform path — requires `users.is_platform_admin`, not tenant
+        membership; runs as qp_app, no tenant RLS context (same chain as
+        `/ops/quarantine`). Reads `app.healing_sessions` directly — Layer
+        C, SELECT-only for qp_app like `app.connectors`. Newest
+        `created_at` first so the live session leads the list.
+      security:
+        - qpAccess: []
+      responses:
+        '200':
+          description: Every healing session, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpsHealingSessionPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1593,6 +1710,202 @@ components:
         referenceRate:
           type: string
           pattern: "^\\d+(\\.\\d+)?$"
+
+    # --- ops read surface (ADR-005 platform path) -------------------------
+    # Column names are the migration-0002/0016 names camelCased — the ops
+    # console is an internal surface, so the wire shape is the schema's
+    # verbatim, no product renaming. Nullable columns are `nullable: true`
+    # like the web surface's convention.
+    OpsQuarantineReason:
+      type: string
+      description: |
+        Mirrors `app.inbound_quarantine.reason`'s CHECK (migration 0016):
+        `no_match` — no recipient resolved; `multi_match` — several did.
+      enum: [no_match, multi_match]
+    OpsQuarantineItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - resendMessageId
+        - reason
+        - recipients
+        - matchedOrgIds
+        - subject
+        - fromAddr
+        - receivedAt
+        - quarantinedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        resendMessageId:
+          type: string
+          description: Resend's message id — the dedupe key (UNIQUE).
+        reason:
+          $ref: '#/components/schemas/OpsQuarantineReason'
+        recipients:
+          type: array
+          items:
+            type: string
+          description: The `to` address array exactly as received (jsonb).
+        matchedOrgIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Candidate organizations for a `multi_match` (`[]` for
+            `no_match`) — the resolution output, not live references.
+        subject:
+          type: string
+        fromAddr:
+          type: string
+          description: "`app.inbound_quarantine.from_addr` — the sender address."
+        receivedAt:
+          type: string
+          format: date-time
+          description: Resend's receipt time (envelope `data.created_at`).
+        quarantinedAt:
+          type: string
+          format: date-time
+          description: When the drop was recorded — the row's creation stamp.
+    OpsQuarantinePage:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpsQuarantineItem'
+        total:
+          type: integer
+          minimum: 0
+          description: Full quarantine size (ignores limit/offset).
+    OpsConnectorStatus:
+      type: string
+      description: Mirrors the `app.connector_status` enum (migration 0002).
+      enum: [HEALTHY, DEGRADED, HEALING]
+    OpsConnector:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - slug
+        - displayName
+        - targetUrl
+        - status
+        - confidenceScore
+        - lastScrapedAt
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        displayName:
+          type: string
+        targetUrl:
+          type: string
+        status:
+          $ref: '#/components/schemas/OpsConnectorStatus'
+        confidenceScore:
+          description: Parser confidence 0..1 as a decimal string (no floats); null until scored.
+          type: string
+          nullable: true
+          pattern: "^\\d+(\\.\\d+)?$"
+        lastScrapedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    OpsConnectorPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpsConnector'
+    OpsHealingStatus:
+      type: string
+      description: Mirrors the `app.healing_status` enum (migration 0002).
+      enum: [OPEN, PR_READY, MERGED, FAILED]
+    OpsHealingSession:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - connectorId
+        - status
+        - failingSnapshotId
+        - failingPayloadHash
+        - failingPayloadStorageKey
+        - devinSessionId
+        - devinSessionUrl
+        - githubPrUrl
+        - pytestPassed
+        - createdAt
+        - resolvedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        connectorId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/OpsHealingStatus'
+        failingSnapshotId:
+          type: string
+          format: uuid
+          nullable: true
+        failingPayloadHash:
+          type: string
+          nullable: true
+          description: SHA-256 of the payload that broke the parser.
+        failingPayloadStorageKey:
+          type: string
+          nullable: true
+          description: Object-storage key of the failing payload (big payloads live in storage).
+        devinSessionId:
+          type: string
+          nullable: true
+        devinSessionUrl:
+          type: string
+          nullable: true
+        githubPrUrl:
+          type: string
+          nullable: true
+        pytestPassed:
+          type: boolean
+          nullable: true
+          description: Gate result of the session's fix; null while unresolved.
+        createdAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+          nullable: true
+    OpsHealingSessionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpsHealingSession'
 
   responses:
     BadRequest:

@@ -168,6 +168,69 @@ func (e MembershipRole) Valid() bool {
 	}
 }
 
+// Defines values for OpsConnectorStatus.
+const (
+	DEGRADED OpsConnectorStatus = "DEGRADED"
+	HEALING  OpsConnectorStatus = "HEALING"
+	HEALTHY  OpsConnectorStatus = "HEALTHY"
+)
+
+// Valid indicates whether the value is a known member of the OpsConnectorStatus enum.
+func (e OpsConnectorStatus) Valid() bool {
+	switch e {
+	case DEGRADED:
+		return true
+	case HEALING:
+		return true
+	case HEALTHY:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OpsHealingStatus.
+const (
+	FAILED  OpsHealingStatus = "FAILED"
+	MERGED  OpsHealingStatus = "MERGED"
+	OPEN    OpsHealingStatus = "OPEN"
+	PRREADY OpsHealingStatus = "PR_READY"
+)
+
+// Valid indicates whether the value is a known member of the OpsHealingStatus enum.
+func (e OpsHealingStatus) Valid() bool {
+	switch e {
+	case FAILED:
+		return true
+	case MERGED:
+		return true
+	case OPEN:
+		return true
+	case PRREADY:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OpsQuarantineReason.
+const (
+	MultiMatch OpsQuarantineReason = "multi_match"
+	NoMatch    OpsQuarantineReason = "no_match"
+)
+
+// Valid indicates whether the value is a known member of the OpsQuarantineReason enum.
+func (e OpsQuarantineReason) Valid() bool {
+	switch e {
+	case MultiMatch:
+		return true
+	case NoMatch:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for PriceSourceKind.
 const (
 	PrivateRate    PriceSourceKind = "private_rate"
@@ -530,6 +593,102 @@ type Money struct {
 	// Currency Example: BRL
 	Currency string `json:"currency"`
 }
+
+// OpsConnector defines model for OpsConnector.
+type OpsConnector struct {
+	// ConfidenceScore Parser confidence 0..1 as a decimal string (no floats); null until scored.
+	ConfidenceScore *string            `json:"confidenceScore"`
+	CreatedAt       time.Time          `json:"createdAt"`
+	DisplayName     string             `json:"displayName"`
+	ID              openapi_types.UUID `json:"id"`
+	LastScrapedAt   *time.Time         `json:"lastScrapedAt"`
+	Slug            string             `json:"slug"`
+
+	// Status Mirrors the `app.connector_status` enum (migration 0002).
+	Status    OpsConnectorStatus `json:"status"`
+	TargetURL string             `json:"targetUrl"`
+	UpdatedAt time.Time          `json:"updatedAt"`
+}
+
+// OpsConnectorPage defines model for OpsConnectorPage.
+type OpsConnectorPage struct {
+	Items []OpsConnector `json:"items"`
+}
+
+// OpsConnectorStatus Mirrors the `app.connector_status` enum (migration 0002).
+type OpsConnectorStatus string
+
+// OpsHealingSession defines model for OpsHealingSession.
+type OpsHealingSession struct {
+	ConnectorID     openapi_types.UUID `json:"connectorId"`
+	CreatedAt       time.Time          `json:"createdAt"`
+	DevinSessionID  *string            `json:"devinSessionId"`
+	DevinSessionURL *string            `json:"devinSessionUrl"`
+
+	// FailingPayloadHash SHA-256 of the payload that broke the parser.
+	FailingPayloadHash *string `json:"failingPayloadHash"`
+
+	// FailingPayloadStorageKey Object-storage key of the failing payload (big payloads live in storage).
+	FailingPayloadStorageKey *string             `json:"failingPayloadStorageKey"`
+	FailingSnapshotID        *openapi_types.UUID `json:"failingSnapshotId"`
+	GithubPrURL              *string             `json:"githubPrUrl"`
+	ID                       openapi_types.UUID  `json:"id"`
+
+	// PytestPassed Gate result of the session's fix; null while unresolved.
+	PytestPassed *bool      `json:"pytestPassed"`
+	ResolvedAt   *time.Time `json:"resolvedAt"`
+
+	// Status Mirrors the `app.healing_status` enum (migration 0002).
+	Status OpsHealingStatus `json:"status"`
+}
+
+// OpsHealingSessionPage defines model for OpsHealingSessionPage.
+type OpsHealingSessionPage struct {
+	Items []OpsHealingSession `json:"items"`
+}
+
+// OpsHealingStatus Mirrors the `app.healing_status` enum (migration 0002).
+type OpsHealingStatus string
+
+// OpsQuarantineItem defines model for OpsQuarantineItem.
+type OpsQuarantineItem struct {
+	// FromAddr `app.inbound_quarantine.from_addr` — the sender address.
+	FromAddr string             `json:"fromAddr"`
+	ID       openapi_types.UUID `json:"id"`
+
+	// MatchedOrgIds Candidate organizations for a `multi_match` (`[]` for
+	// `no_match`) — the resolution output, not live references.
+	MatchedOrgIds []openapi_types.UUID `json:"matchedOrgIds"`
+
+	// QuarantinedAt When the drop was recorded — the row's creation stamp.
+	QuarantinedAt time.Time `json:"quarantinedAt"`
+
+	// Reason Mirrors `app.inbound_quarantine.reason`'s CHECK (migration 0016):
+	// `no_match` — no recipient resolved; `multi_match` — several did.
+	Reason OpsQuarantineReason `json:"reason"`
+
+	// ReceivedAt Resend's receipt time (envelope `data.created_at`).
+	ReceivedAt time.Time `json:"receivedAt"`
+
+	// Recipients The `to` address array exactly as received (jsonb).
+	Recipients []string `json:"recipients"`
+
+	// ResendMessageID Resend's message id — the dedupe key (UNIQUE).
+	ResendMessageID string `json:"resendMessageId"`
+	Subject         string `json:"subject"`
+}
+
+// OpsQuarantinePage defines model for OpsQuarantinePage.
+type OpsQuarantinePage struct {
+	Items []OpsQuarantineItem `json:"items"`
+
+	// Total Full quarantine size (ignores limit/offset).
+	Total int `json:"total"`
+}
+
+// OpsQuarantineReason Mirrors `app.inbound_quarantine.reason`'s CHECK (migration 0016):
+// `no_match` — no recipient resolved; `multi_match` — several did.
+type OpsQuarantineReason string
 
 // OrganizationResponse defines model for OrganizationResponse.
 type OrganizationResponse struct {
@@ -908,6 +1067,15 @@ type GetMeOrganizationParams struct {
 	XOrganizationID *OrganizationIDHeader `json:"X-Organization-Id,omitempty"`
 }
 
+// ListOpsQuarantineParams defines parameters for ListOpsQuarantine.
+type ListOpsQuarantineParams struct {
+	// Limit Page size — server clamps to 1..200 (default 50).
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Offset Rows to skip — server clamps at 0 (default 0).
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
 // ApproveQuoteParams defines parameters for ApproveQuote.
 type ApproveQuoteParams struct {
 	// XOrganizationID Organization the request scopes to — required by the middleware, not
@@ -1057,6 +1225,15 @@ type ServerInterface interface {
 	// GetMeOrganization Resolve the requested organization — the end-to-end tenant proof.
 	// (GET /me/organization)
 	GetMeOrganization(w http.ResponseWriter, r *http.Request, params GetMeOrganizationParams)
+	// ListOpsConnectors The connector registry — every public-source parser's health.
+	// (GET /ops/connectors)
+	ListOpsConnectors(w http.ResponseWriter, r *http.Request)
+	// ListOpsHealingSessions Connector healing sessions — the self-repair audit trail.
+	// (GET /ops/healing)
+	ListOpsHealingSessions(w http.ResponseWriter, r *http.Request)
+	// ListOpsQuarantine Quarantined inbound mail — the unmatched-recipient audit trail.
+	// (GET /ops/quarantine)
+	ListOpsQuarantine(w http.ResponseWriter, r *http.Request, params ListOpsQuarantineParams)
 	// ApproveQuote Approve a quote version — releases the send job.
 	// (POST /quotes/{id}/approve)
 	ApproveQuote(w http.ResponseWriter, r *http.Request, id openapi_types.UUID, params ApproveQuoteParams)
@@ -1216,6 +1393,80 @@ func (siw *ServerInterfaceWrapper) GetMeOrganization(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetMeOrganization(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListOpsConnectors operation middleware
+func (siw *ServerInterfaceWrapper) ListOpsConnectors(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListOpsConnectors(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListOpsHealingSessions operation middleware
+func (siw *ServerInterfaceWrapper) ListOpsHealingSessions(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListOpsHealingSessions(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListOpsQuarantine operation middleware
+func (siw *ServerInterfaceWrapper) ListOpsQuarantine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListOpsQuarantineParams
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "offset" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "offset", r.URL.Query(), &params.Offset, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "offset"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "offset", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListOpsQuarantine(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1604,6 +1855,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/inbox/quotes", wrapper.ListInboxQuotes)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/quotes/{quoteId}", wrapper.GetQuoteDetail)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/rfqs/{id}/reprocess", wrapper.ReprocessRfq)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/ops/quarantine", wrapper.ListOpsQuarantine)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/ops/connectors", wrapper.ListOpsConnectors)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/ops/healing", wrapper.ListOpsHealingSessions)
 
 	return m
 }
@@ -2094,6 +2348,196 @@ func (response GetMeOrganization404JSONResponse) VisitGetMeOrganizationResponse(
 type GetMeOrganization500JSONResponse struct{ InternalErrorJSONResponse }
 
 func (response GetMeOrganization500JSONResponse) VisitGetMeOrganizationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsConnectorsRequestObject struct {
+}
+
+type ListOpsConnectorsResponseObject interface {
+	VisitListOpsConnectorsResponse(w http.ResponseWriter) error
+}
+
+type ListOpsConnectors200JSONResponse OpsConnectorPage
+
+func (response ListOpsConnectors200JSONResponse) VisitListOpsConnectorsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsConnectors401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ListOpsConnectors401JSONResponse) VisitListOpsConnectorsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsConnectors403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ListOpsConnectors403JSONResponse) VisitListOpsConnectorsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsConnectors500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ListOpsConnectors500JSONResponse) VisitListOpsConnectorsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsHealingSessionsRequestObject struct {
+}
+
+type ListOpsHealingSessionsResponseObject interface {
+	VisitListOpsHealingSessionsResponse(w http.ResponseWriter) error
+}
+
+type ListOpsHealingSessions200JSONResponse OpsHealingSessionPage
+
+func (response ListOpsHealingSessions200JSONResponse) VisitListOpsHealingSessionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsHealingSessions401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ListOpsHealingSessions401JSONResponse) VisitListOpsHealingSessionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsHealingSessions403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ListOpsHealingSessions403JSONResponse) VisitListOpsHealingSessionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsHealingSessions500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ListOpsHealingSessions500JSONResponse) VisitListOpsHealingSessionsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsQuarantineRequestObject struct {
+	Params ListOpsQuarantineParams
+}
+
+type ListOpsQuarantineResponseObject interface {
+	VisitListOpsQuarantineResponse(w http.ResponseWriter) error
+}
+
+type ListOpsQuarantine200JSONResponse OpsQuarantinePage
+
+func (response ListOpsQuarantine200JSONResponse) VisitListOpsQuarantineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsQuarantine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ListOpsQuarantine401JSONResponse) VisitListOpsQuarantineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsQuarantine403JSONResponse struct{ ForbiddenJSONResponse }
+
+func (response ListOpsQuarantine403JSONResponse) VisitListOpsQuarantineResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(403)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListOpsQuarantine500JSONResponse struct{ InternalErrorJSONResponse }
+
+func (response ListOpsQuarantine500JSONResponse) VisitListOpsQuarantineResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -2667,6 +3111,15 @@ type StrictServerInterface interface {
 	// GetMeOrganization Resolve the requested organization — the end-to-end tenant proof.
 	// (GET /me/organization)
 	GetMeOrganization(ctx context.Context, request GetMeOrganizationRequestObject) (GetMeOrganizationResponseObject, error)
+	// ListOpsConnectors The connector registry — every public-source parser's health.
+	// (GET /ops/connectors)
+	ListOpsConnectors(ctx context.Context, request ListOpsConnectorsRequestObject) (ListOpsConnectorsResponseObject, error)
+	// ListOpsHealingSessions Connector healing sessions — the self-repair audit trail.
+	// (GET /ops/healing)
+	ListOpsHealingSessions(ctx context.Context, request ListOpsHealingSessionsRequestObject) (ListOpsHealingSessionsResponseObject, error)
+	// ListOpsQuarantine Quarantined inbound mail — the unmatched-recipient audit trail.
+	// (GET /ops/quarantine)
+	ListOpsQuarantine(ctx context.Context, request ListOpsQuarantineRequestObject) (ListOpsQuarantineResponseObject, error)
 	// ApproveQuote Approve a quote version — releases the send job.
 	// (POST /quotes/{id}/approve)
 	ApproveQuote(ctx context.Context, request ApproveQuoteRequestObject) (ApproveQuoteResponseObject, error)
@@ -2941,6 +3394,80 @@ func (sh *strictHandler) GetMeOrganization(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetMeOrganizationResponseObject); ok {
 		if err := validResponse.VisitGetMeOrganizationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListOpsConnectors operation middleware
+func (sh *strictHandler) ListOpsConnectors(w http.ResponseWriter, r *http.Request) {
+	var request ListOpsConnectorsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListOpsConnectors(ctx, request.(ListOpsConnectorsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListOpsConnectors")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListOpsConnectorsResponseObject); ok {
+		if err := validResponse.VisitListOpsConnectorsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListOpsHealingSessions operation middleware
+func (sh *strictHandler) ListOpsHealingSessions(w http.ResponseWriter, r *http.Request) {
+	var request ListOpsHealingSessionsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListOpsHealingSessions(ctx, request.(ListOpsHealingSessionsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListOpsHealingSessions")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListOpsHealingSessionsResponseObject); ok {
+		if err := validResponse.VisitListOpsHealingSessionsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListOpsQuarantine operation middleware
+func (sh *strictHandler) ListOpsQuarantine(w http.ResponseWriter, r *http.Request, params ListOpsQuarantineParams) {
+	var request ListOpsQuarantineRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListOpsQuarantine(ctx, request.(ListOpsQuarantineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListOpsQuarantine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListOpsQuarantineResponseObject); ok {
+		if err := validResponse.VisitListOpsQuarantineResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
