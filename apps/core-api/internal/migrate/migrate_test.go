@@ -79,10 +79,10 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands (0016 adds
-	// app.inbound_quarantine + app.platform_counters, the RFC-002
-	// unmatched-mail audit trail).
-	assert.Equal(t, int64(16), version)
+	// Head version: bump when a migration lands (0017 adds the
+	// inbound_email_alias shape CHECKs — unmatchable aliases are
+	// refused at write time instead of sitting dead).
+	assert.Equal(t, int64(17), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
 }
 
@@ -103,7 +103,7 @@ func TestBrandingJsonObjectCheck(t *testing.T) {
 	orgID := seedOrganization(t, ctx, migDB)
 
 	write := `UPDATE app.organizations SET branding_json = '[]'::jsonb WHERE id = $1`
-	assertCheckViolation(t, ctx, migDB, write, orgID)
+	assertCheckViolation(t, ctx, migDB, write, orgID, "organizations_branding_json_object")
 
 	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 12))
 	_, err := migDB.ExecContext(ctx, write, orgID)
@@ -119,17 +119,50 @@ func TestBrandingJsonObjectCheck(t *testing.T) {
 		`UPDATE app.organizations SET branding_json = '{}'::jsonb WHERE id = '`+orgID+`'`)
 
 	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 13))
-	assertCheckViolation(t, ctx, migDB, write, orgID)
+	assertCheckViolation(t, ctx, migDB, write, orgID, "organizations_branding_json_object")
 }
 
-// assertCheckViolation requires stmt to fail under the 0013 CHECK —
+// TestInboundEmailAliasChecks proves 0017 both ways on a seeded org: an
+// alias on the canonical inbound domain or one carrying a plus-tag is
+// refused under 17, allowed again after Down to 16, and a violating row
+// left in place blocks re-Up until reconciled — the 0002 posture.
+func TestInboundEmailAliasChecks(t *testing.T) {
+	superDSN, migratorDSN, _ := requireUpgradeEnv(t)
+	ctx := context.Background()
+
+	dbName := scratchDB(t, ctx, superDSN, "qp_alias_")
+	setupGoose(t)
+
+	migDB := openDB(t, dsnFor(t, migratorDSN, dbName))
+	defer func() { _ = migDB.Close() }()
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 17))
+	orgID := seedOrganization(t, ctx, migDB)
+
+	badDomain := `UPDATE app.organizations SET inbound_email_alias = 'x@in.quotepilot.app' WHERE id = $1`
+	badPlus := `UPDATE app.organizations SET inbound_email_alias = 'a+b@x.test' WHERE id = $1`
+	assertCheckViolation(t, ctx, migDB, badDomain, orgID, "organizations_alias_not_inbound_domain")
+	assertCheckViolation(t, ctx, migDB, badPlus, orgID, "organizations_alias_no_plus_tag")
+
+	require.NoError(t, goose.DownToContext(ctx, migDB, ".", 16))
+	_, err := migDB.ExecContext(ctx, badDomain, orgID)
+	require.NoError(t, err, "the Down must restore the unconstrained column")
+
+	err = goose.UpToContext(ctx, migDB, ".", 17)
+	require.Error(t, err, "re-Up over a violating row must refuse")
+	assert.Contains(t, err.Error(), "organizations_alias_not_inbound_domain")
+	execDB(t, ctx, migDB,
+		`UPDATE app.organizations SET inbound_email_alias = 'ok@x.test' WHERE id = '`+orgID+`'`)
+	require.NoError(t, goose.UpToContext(ctx, migDB, ".", 17))
+}
+
+// assertCheckViolation requires stmt to fail under the named CHECK —
 // pgx surfaces the constraint name in the error, so the assertion names
 // it rather than matching on SQLSTATE alone.
-func assertCheckViolation(t *testing.T, ctx context.Context, db *sql.DB, stmt string, orgID string) {
+func assertCheckViolation(t *testing.T, ctx context.Context, db *sql.DB, stmt string, orgID string, constraint string) {
 	t.Helper()
 	_, err := db.ExecContext(ctx, stmt, orgID)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "organizations_branding_json_object")
+	assert.Contains(t, err.Error(), constraint)
 }
 
 // seedOrganization inserts the minimal organization row the check test
