@@ -445,6 +445,88 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ops/quarantine": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Quarantined inbound mail — the unmatched-recipient audit trail.
+         * @description Platform path — requires `users.is_platform_admin`, not tenant
+         *     membership; runs as qp_app, no tenant RLS context. `Authenticate`
+         *     verifies `qp_access`, then `RequirePlatformAdmin` re-reads the flag
+         *     through `app.is_platform_admin(sub)` on every request (ADR-005
+         *     section 5 — the flag is never a JWT claim).
+         *
+         *     Lists `app.inbound_quarantine`, the 0016 drop table a Resend
+         *     webhook writes through `record_inbound_quarantine` when no unique
+         *     organization resolves (reason `no_match` or `multi_match`). qp_app
+         *     holds no table privilege on it — the read goes through the
+         *     SECURITY DEFINER `app.list_inbound_quarantine`, which is why this
+         *     surface exists at all: the function is the table's only SELECT
+         *     path. Newest `received_at` first; `total` is the full quarantine
+         *     size so the console can page.
+         */
+        get: operations["listOpsQuarantine"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ops/connectors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The connector registry — every public-source parser's health.
+         * @description Platform path — requires `users.is_platform_admin`, not tenant
+         *     membership; runs as qp_app, no tenant RLS context (same chain as
+         *     `/ops/quarantine`). Reads `app.connectors` directly — Layer C is
+         *     SELECT-only for qp_app by design (migration 0002), so no function
+         *     is needed and no write path exists on this surface. Ordered by
+         *     slug; the table is small by definition (one row per connector).
+         */
+        get: operations["listOpsConnectors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ops/healing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Connector healing sessions — the self-repair audit trail.
+         * @description Platform path — requires `users.is_platform_admin`, not tenant
+         *     membership; runs as qp_app, no tenant RLS context (same chain as
+         *     `/ops/quarantine`). Reads `app.healing_sessions` directly — Layer
+         *     C, SELECT-only for qp_app like `app.connectors`. Newest
+         *     `created_at` first so the live session leads the list.
+         */
+        get: operations["listOpsHealingSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -920,6 +1002,98 @@ export interface components {
             /** @description Reference rate shown for comparison, e.g. "PTAX". */
             referenceLabel: string;
             referenceRate: string;
+        };
+        /**
+         * @description Mirrors `app.inbound_quarantine.reason`'s CHECK (migration 0016):
+         *     `no_match` — no recipient resolved; `multi_match` — several did.
+         * @enum {string}
+         */
+        OpsQuarantineReason: "no_match" | "multi_match";
+        OpsQuarantineItem: {
+            /** Format: uuid */
+            id: string;
+            /** @description Resend's message id — the dedupe key (UNIQUE). */
+            resendMessageId: string;
+            reason: components["schemas"]["OpsQuarantineReason"];
+            /** @description The `to` address array exactly as received (jsonb). */
+            recipients: string[];
+            /**
+             * @description Candidate organizations for a `multi_match` (`[]` for
+             *     `no_match`) — the resolution output, not live references.
+             */
+            matchedOrgIds: string[];
+            subject: string;
+            /** @description `app.inbound_quarantine.from_addr` — the sender address. */
+            fromAddr: string;
+            /**
+             * Format: date-time
+             * @description Resend's receipt time (envelope `data.created_at`).
+             */
+            receivedAt: string;
+            /**
+             * Format: date-time
+             * @description When the drop was recorded — the row's creation stamp.
+             */
+            quarantinedAt: string;
+        };
+        OpsQuarantinePage: {
+            items: components["schemas"]["OpsQuarantineItem"][];
+            /** @description Full quarantine size (ignores limit/offset). */
+            total: number;
+        };
+        /**
+         * @description Mirrors the `app.connector_status` enum (migration 0002).
+         * @enum {string}
+         */
+        OpsConnectorStatus: "HEALTHY" | "DEGRADED" | "HEALING";
+        OpsConnector: {
+            /** Format: uuid */
+            id: string;
+            slug: string;
+            displayName: string;
+            targetUrl: string;
+            status: components["schemas"]["OpsConnectorStatus"];
+            /** @description Parser confidence 0..1 as a decimal string (no floats); null until scored. */
+            confidenceScore: string | null;
+            /** Format: date-time */
+            lastScrapedAt: string | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        OpsConnectorPage: {
+            items: components["schemas"]["OpsConnector"][];
+        };
+        /**
+         * @description Mirrors the `app.healing_status` enum (migration 0002).
+         * @enum {string}
+         */
+        OpsHealingStatus: "OPEN" | "PR_READY" | "MERGED" | "FAILED";
+        OpsHealingSession: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            connectorId: string;
+            status: components["schemas"]["OpsHealingStatus"];
+            /** Format: uuid */
+            failingSnapshotId: string | null;
+            /** @description SHA-256 of the payload that broke the parser. */
+            failingPayloadHash: string | null;
+            /** @description Object-storage key of the failing payload (big payloads live in storage). */
+            failingPayloadStorageKey: string | null;
+            devinSessionId: string | null;
+            devinSessionUrl: string | null;
+            githubPrUrl: string | null;
+            /** @description Gate result of the session's fix; null while unresolved. */
+            pytestPassed: boolean | null;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            resolvedAt: string | null;
+        };
+        OpsHealingSessionPage: {
+            items: components["schemas"]["OpsHealingSession"][];
         };
     };
     responses: {
@@ -1523,6 +1697,80 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listOpsQuarantine: {
+        parameters: {
+            query?: {
+                /** @description Page size — server clamps to 1..200 (default 50). */
+                limit?: number;
+                /** @description Rows to skip — server clamps at 0 (default 0). */
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of quarantine rows plus the full count. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsQuarantinePage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listOpsConnectors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every registered connector. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsConnectorPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listOpsHealingSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every healing session, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsHealingSessionPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };
