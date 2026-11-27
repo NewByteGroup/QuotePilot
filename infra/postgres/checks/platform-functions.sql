@@ -140,7 +140,9 @@ BEGIN
     ('app.set_user_password(uuid, text)'),
     ('app.revoke_user_sessions(uuid)'),
     ('app.revoke_user_pending_tokens(uuid)'),
-    ('app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)')
+    ('app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)'),
+    ('app.is_platform_admin(uuid)'),
+    ('app.list_inbound_quarantine(integer, integer)')
   ) AS f(fn)
   WHERE to_regprocedure(f.fn) IS NOT NULL
     AND NOT has_function_privilege('qp_app', to_regprocedure(f.fn), 'EXECUTE');
@@ -179,7 +181,9 @@ BEGIN
         ('app.set_user_password(uuid, text)'),
         ('app.revoke_user_sessions(uuid)'),
         ('app.revoke_user_pending_tokens(uuid)'),
-        ('app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)')
+        ('app.record_inbound_quarantine(text, text, jsonb, uuid[], text, text, timestamptz)'),
+        ('app.is_platform_admin(uuid)'),
+        ('app.list_inbound_quarantine(integer, integer)')
       ) AS f(fn) WHERE to_regprocedure(f.fn) IS NOT NULL));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION '[N] qp_app EXECUTE surface in app must equal the tenant-function allowlist; extra: %', bad;

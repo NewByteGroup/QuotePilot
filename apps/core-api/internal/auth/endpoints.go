@@ -66,6 +66,11 @@ type Endpoints struct {
 	// needs the River client for the in-transaction resume enqueue). Nil
 	// fails the call loudly.
 	Reprocessor RfqReprocessor
+	// Ops serves the three /ops/* read routes on this same strict surface;
+	// assigned post-build in cmd/server alongside Web (the delegate reads
+	// the Layer C catalog through inboxdb and quarantine through the
+	// function family). Nil fails the call loudly.
+	Ops OpsAPI
 }
 
 var _ authapi.StrictServerInterface = (*Endpoints)(nil)

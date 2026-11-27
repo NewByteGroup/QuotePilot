@@ -79,10 +79,10 @@ func TestUpgradeV1OrphanReceiptsRefused(t *testing.T) {
 	require.NoError(t, goose.UpContext(ctx, migDB, "."), "a reconciled v1 database must upgrade")
 	version, err = goose.GetDBVersionContext(ctx, migDB)
 	require.NoError(t, err)
-	// Head version: bump when a migration lands (0017 adds the
-	// inbound_email_alias shape CHECKs — unmatchable aliases are
-	// refused at write time instead of sitting dead).
-	assert.Equal(t, int64(17), version)
+	// Head version: bump when a migration lands (0018 adds the ops read
+	// functions — list_inbound_quarantine + is_platform_admin, the
+	// platform path's read surface for the ops console).
+	assert.Equal(t, int64(18), version)
 	assert.True(t, relationExists(t, ctx, migDB, "app.organizations"))
 }
 

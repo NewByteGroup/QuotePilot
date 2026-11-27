@@ -368,6 +368,23 @@ func (s *Store) GetUserProfile(ctx context.Context, userID uuid.UUID) (id uuid.U
 	return id, email, *name, true, nil
 }
 
+// IsPlatformAdmin is the RequirePlatformAdmin gate's per-request flag read
+// (migration 0018, ADR-005 platform path). app.users is Layer A — qp_app
+// holds no table privilege — so the flag reaches the request path only
+// through this function, and it rides no JWT claim: the check re-reads on
+// every call, so de-adminning takes effect on the next request. Unknown
+// user ids are the function's coalesce — false, not an error.
+//
+//	admin, err := store.IsPlatformAdmin(ctx, userID)
+func (s *Store) IsPlatformAdmin(ctx context.Context, userID uuid.UUID) (bool, error) {
+	var admin bool
+	err := s.q.QueryRow(ctx, `SELECT app.is_platform_admin($1)`, userID).Scan(&admin)
+	if err != nil {
+		return false, fmt.Errorf("platform: is_platform_admin: %w", err)
+	}
+	return admin, nil
+}
+
 // ListMembershipsForEmail returns the org-switcher rows (spec section 3.3):
 // organization id, display name, slug and role. An unknown email — or a
 // user with no memberships — is an empty slice, never an error.
