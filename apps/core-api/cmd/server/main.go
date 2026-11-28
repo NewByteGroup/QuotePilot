@@ -358,8 +358,14 @@ func buildInbox(db *tenantdb.DB, store *platform.Store, enqueue inbox.EnqueueIng
 	return inbox.NewServer(db, store, store, verifier, enqueue, slog.Default()), nil
 }
 
-// buildMux composes the surfaces with per-route middleware. Correlation is
-// outermost on every mount so each request's logs share one id; CheckOrigin
+// buildMux composes the surfaces with per-route middleware and returns the
+// whole mux wrapped in CORS, the one layer outermost of all: a browser
+// preflight declares no route and carries no cookie, so it must be answered
+// before it can reach CheckOrigin or Authenticate — anywhere deeper it
+// would die as a 403 or the catch-all 404 instead of the allow answer the
+// deployed web app needs (ADR-005 section 4 keeps CORS additive to the CSRF
+// check, never a replacement). Correlation is outermost on every mount so
+// each request's logs share one id; CheckOrigin
 // guards the state-changing mounts (/auth cookie flows, the webhook) —
 // same-origin callers, the WEB_URL-trusted web app and non-browser clients
 // pass, cross-site browser posts die before reaching a handler. /me wraps
@@ -367,7 +373,7 @@ func buildInbox(db *tenantdb.DB, store *platform.Store, enqueue inbox.EnqueueIng
 // /me/organization adds ResolveTenant — the tenant-scoped read path. The
 // /auth/* routes run without auth middleware: they are the credential
 // exchange itself.
-func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv http.Handler) *http.ServeMux {
+func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/", platform.Correlation(platform.CheckOrigin(cfg)(authSrv)))
 	mux.Handle("GET /me", platform.Correlation(platform.Authenticate(cfg)(authSrv)))
@@ -436,7 +442,9 @@ func buildMux(cfg *platform.Config, store *platform.Store, authSrv, inboxSrv htt
 	// the router's plain-text 404/405 would be the only non-contract
 	// payload left on the surface.
 	mux.Handle("/", platform.Correlation(http.HandlerFunc(notFoundJSON)))
-	return mux
+	// CORS wraps the finished mux — outermost of every layer — so an OPTIONS
+	// preflight is answered here and never reaches a per-route CheckOrigin.
+	return platform.CORS(cfg)(mux)
 }
 
 // notFoundJSON is the mux's catch-all — route misses and wrong methods
