@@ -5,7 +5,7 @@ React + TypeScript + Vite frontend for QuotePilot (Tailwind CSS 4 + shadcn/ui).
 ## What belongs here
 
 - UI code under `src/`: components, pages, hooks, and their component tests.
-- `src/api/`: the typed HTTP client built from `@quotepilot/contracts` (`openapi-fetch`).
+- `src/api/`: the single typed HTTP client composed from `@quotepilot/contracts` (`openapi-fetch`).
 - `src/mocks/`: the contract mock (MSW + `openapi-msw`), so the UI runs without `core-api`.
 
 ## What must never go here

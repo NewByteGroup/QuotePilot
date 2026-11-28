@@ -31,9 +31,9 @@ describe('coreClient access-rotation middleware', () => {
     expect(bodies[1]).toContain('3f9a5b6e')
   })
 
-  it('shares one refresh across concurrent 401s', async () => {
+  it('shares one refresh across concurrent 401s on core and mock-contract paths', async () => {
     let refreshCalls = 0
-    const hits = { me: 0, session: 0 }
+    const hits = { session: 0, pricingRules: 0 }
     const once401 = (key: keyof typeof hits, ok: object) => () => {
       hits[key] += 1
       return hits[key] === 1 ? unauthenticated() : HttpResponse.json(ok)
@@ -46,15 +46,18 @@ describe('coreClient access-rotation middleware', () => {
         await new Promise((resolve) => setTimeout(resolve, 50))
         return new HttpResponse(null, { status: 204 })
       }),
-      http.get(`${API}/me`, once401('me', {})),
       http.get(`${API}/v1/session`, once401('session', {})),
+      http.get(`${API}/v1/pricing-rules`, once401('pricingRules', {})),
     )
 
-    const [me, session] = await Promise.all([coreClient.GET('/me'), coreClient.GET('/v1/session')])
+    const [session, pricingRules] = await Promise.all([
+      coreClient.GET('/v1/session'),
+      coreClient.GET('/v1/pricing-rules'),
+    ])
 
-    expect(me.response.status).toBe(200)
     expect(session.response.status).toBe(200)
-    expect(hits).toEqual({ me: 2, session: 2 })
+    expect(pricingRules.response.status).toBe(200)
+    expect(hits).toEqual({ session: 2, pricingRules: 2 })
     expect(refreshCalls).toBe(1)
   })
 })

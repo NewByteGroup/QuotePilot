@@ -2,11 +2,17 @@ import type {
   components as coreComponents,
   paths as corePaths,
 } from '@quotepilot/contracts/core-api'
-import type { components, paths } from '@quotepilot/contracts/web-api'
+import type { components as webComponents, paths as webPaths } from '@quotepilot/contracts/web-api'
 import createClient from 'openapi-fetch'
 
-export type Schemas = components['schemas']
+export type Schemas = webComponents['schemas']
 export type CoreSchemas = coreComponents['schemas']
+
+// One runtime client for the whole request edge. core-api.yaml wins where a
+// path exists in both contracts; web-api.yaml contributes only the paths the
+// backend has not folded in yet, so it remains the contract-mock source
+// without becoming a second HTTP client.
+type AppPaths = corePaths & Omit<webPaths, keyof corePaths>
 
 export const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? '/api'
 
@@ -14,15 +20,10 @@ export const API_BASE_URL: string = import.meta.env.VITE_API_BASE_URL ?? '/api'
 const fetchPerRequest = (request: Request) => globalThis.fetch(request)
 
 // The only way web talks to core-api (ADR-001: generated client from packages/contracts).
-export const apiClient = createClient<paths>({
-  baseUrl: API_BASE_URL,
-  fetch: fetchPerRequest,
-})
-
-// core-api request edge (auth, /me). Sessions travel in the HttpOnly qp_access/qp_refresh
-// cookies (ADR-005), so every call sends credentials; web and API share one origin through
-// the /api proxy, which keeps the SameSite cookies first-party.
-export const coreClient = createClient<corePaths>({
+// Sessions travel in the HttpOnly qp_access/qp_refresh cookies (ADR-005), so every call
+// sends credentials; web and API share one origin through the /api proxy, which keeps
+// the SameSite cookies first-party.
+export const coreClient = createClient<AppPaths>({
   baseUrl: API_BASE_URL,
   credentials: 'include',
   fetch: fetchPerRequest,

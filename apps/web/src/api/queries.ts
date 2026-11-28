@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { apiClient, type Schemas } from './client'
+import { coreClient, type Schemas } from './client'
 
 export type InboxFilters = {
   status?: Schemas['QuoteStatus']
@@ -18,11 +18,12 @@ function unwrap<T>(operation: string, { data, error }: ApiResult<T>): T {
 
 const PRICING_RULES_KEY = ['pricing-rules']
 const COMPANY_IDENTITY_KEY = ['company-identity']
+export const OPS_QUARANTINE_PAGE_SIZE = 10
 
 export function useSession() {
   return useQuery({
     queryKey: ['session'],
-    queryFn: async () => unwrap('GET /v1/session', await apiClient.GET('/v1/session')),
+    queryFn: async () => unwrap('GET /v1/session', await coreClient.GET('/v1/session')),
   })
 }
 
@@ -32,7 +33,7 @@ export function useSwitchOrganization(options: { onSwitched?: () => void } = {})
     mutationFn: async (body: Schemas['SwitchOrganizationRequest']) =>
       unwrap(
         'POST /v1/session/organization',
-        await apiClient.POST('/v1/session/organization', { body }),
+        await coreClient.POST('/v1/session/organization', { body }),
       ),
     onSuccess: async (session) => {
       queryClient.setQueryData(['session'], session)
@@ -49,7 +50,7 @@ export function useUpdateUserPreferences() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: async (body: Schemas['UpdateUserPreferencesRequest']) =>
-      unwrap('PATCH /v1/me/preferences', await apiClient.PATCH('/v1/me/preferences', { body })),
+      unwrap('PATCH /v1/me/preferences', await coreClient.PATCH('/v1/me/preferences', { body })),
     onSuccess: (session) => queryClient.setQueryData(['session'], session),
   })
 }
@@ -60,7 +61,7 @@ export function useInboxQuotes(filters: InboxFilters = {}) {
     queryFn: async () =>
       unwrap(
         'GET /v1/inbox/quotes',
-        await apiClient.GET('/v1/inbox/quotes', {
+        await coreClient.GET('/v1/inbox/quotes', {
           params: { query: { status: filters.status, q: filters.q || undefined } },
         }),
       ),
@@ -73,7 +74,7 @@ export function useQuoteDetail(quoteId: string) {
     queryFn: async () =>
       unwrap(
         `GET /v1/quotes/${quoteId}`,
-        await apiClient.GET('/v1/quotes/{quoteId}', { params: { path: { quoteId } } }),
+        await coreClient.GET('/v1/quotes/{quoteId}', { params: { path: { quoteId } } }),
       ),
   })
 }
@@ -82,14 +83,14 @@ export function useNetRateTables() {
   return useQuery({
     queryKey: ['net-rate-tables'],
     queryFn: async () =>
-      unwrap('GET /v1/rates/net-rate-tables', await apiClient.GET('/v1/rates/net-rate-tables')),
+      unwrap('GET /v1/rates/net-rate-tables', await coreClient.GET('/v1/rates/net-rate-tables')),
   })
 }
 
 export function usePricingRules() {
   return useQuery({
     queryKey: PRICING_RULES_KEY,
-    queryFn: async () => unwrap('GET /v1/pricing-rules', await apiClient.GET('/v1/pricing-rules')),
+    queryFn: async () => unwrap('GET /v1/pricing-rules', await coreClient.GET('/v1/pricing-rules')),
   })
 }
 
@@ -99,7 +100,7 @@ export function useAddRouteMargins() {
     mutationFn: async (routes: Schemas['NewRouteMargin'][]) =>
       unwrap(
         'POST /v1/pricing-rules/route-margins',
-        await apiClient.POST('/v1/pricing-rules/route-margins', { body: { routes } }),
+        await coreClient.POST('/v1/pricing-rules/route-margins', { body: { routes } }),
       ),
     onSuccess: (rules) => queryClient.setQueryData(PRICING_RULES_KEY, rules),
   })
@@ -111,7 +112,7 @@ export function useUpdatePricingAutomation() {
     mutationFn: async ({ key, enabled }: { key: string; enabled: boolean }) =>
       unwrap(
         `PATCH /v1/pricing-rules/automations/${key}`,
-        await apiClient.PATCH('/v1/pricing-rules/automations/{automationKey}', {
+        await coreClient.PATCH('/v1/pricing-rules/automations/{automationKey}', {
           params: { path: { automationKey: key } },
           body: { enabled },
         }),
@@ -134,7 +135,7 @@ export function useCompanyIdentity() {
   return useQuery({
     queryKey: COMPANY_IDENTITY_KEY,
     queryFn: async () =>
-      unwrap('GET /v1/organization/identity', await apiClient.GET('/v1/organization/identity')),
+      unwrap('GET /v1/organization/identity', await coreClient.GET('/v1/organization/identity')),
   })
 }
 
@@ -142,7 +143,7 @@ export function useConnectorOverview() {
   return useQuery({
     queryKey: ['connector-overview'],
     queryFn: async () =>
-      unwrap('GET /v1/connectors/overview', await apiClient.GET('/v1/connectors/overview')),
+      unwrap('GET /v1/connectors/overview', await coreClient.GET('/v1/connectors/overview')),
   })
 }
 
@@ -150,7 +151,39 @@ export function useRepairOverview() {
   return useQuery({
     queryKey: ['repair-overview'],
     queryFn: async () =>
-      unwrap('GET /v1/repairs/overview', await apiClient.GET('/v1/repairs/overview')),
+      unwrap('GET /v1/repairs/overview', await coreClient.GET('/v1/repairs/overview')),
+  })
+}
+
+export function useOpsQuarantine(page: number) {
+  return useQuery({
+    queryKey: ['ops-quarantine', page],
+    queryFn: async () =>
+      unwrap(
+        'GET /ops/quarantine',
+        await coreClient.GET('/ops/quarantine', {
+          params: {
+            query: {
+              limit: OPS_QUARANTINE_PAGE_SIZE,
+              offset: page * OPS_QUARANTINE_PAGE_SIZE,
+            },
+          },
+        }),
+      ),
+  })
+}
+
+export function useOpsConnectors() {
+  return useQuery({
+    queryKey: ['ops-connectors'],
+    queryFn: async () => unwrap('GET /ops/connectors', await coreClient.GET('/ops/connectors')),
+  })
+}
+
+export function useOpsHealingSessions() {
+  return useQuery({
+    queryKey: ['ops-healing'],
+    queryFn: async () => unwrap('GET /ops/healing', await coreClient.GET('/ops/healing')),
   })
 }
 
@@ -160,7 +193,7 @@ export function useUpdateCompanyIdentity() {
     mutationFn: async (patch: Schemas['UpdateCompanyIdentityRequest']) =>
       unwrap(
         'PATCH /v1/organization/identity',
-        await apiClient.PATCH('/v1/organization/identity', { body: patch }),
+        await coreClient.PATCH('/v1/organization/identity', { body: patch }),
       ),
     onSuccess: (identity) => queryClient.setQueryData(COMPANY_IDENTITY_KEY, identity),
   })
@@ -172,7 +205,7 @@ export function useUploadLetterheadLogo() {
     mutationFn: async (file: File) =>
       unwrap(
         'PUT /v1/organization/identity/letterhead-logo',
-        await apiClient.PUT('/v1/organization/identity/letterhead-logo', {
+        await coreClient.PUT('/v1/organization/identity/letterhead-logo', {
           // The generated type models `format: binary` as string; the serializer sends the File.
           body: { file: file as unknown as string },
           bodySerializer: (body) => {
@@ -192,7 +225,7 @@ export function useRemoveLetterheadLogo() {
     mutationFn: async () =>
       unwrap(
         'DELETE /v1/organization/identity/letterhead-logo',
-        await apiClient.DELETE('/v1/organization/identity/letterhead-logo'),
+        await coreClient.DELETE('/v1/organization/identity/letterhead-logo'),
       ),
     onSuccess: (identity) => queryClient.setQueryData(COMPANY_IDENTITY_KEY, identity),
   })
