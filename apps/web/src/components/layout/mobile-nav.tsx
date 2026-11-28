@@ -5,7 +5,8 @@ import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '@/components/
 
 import { SidebarContent, type AppSidebarProps } from './app-sidebar'
 
-export function MobileNav({ session, identity, inboxPendingCount }: AppSidebarProps) {
+export function MobileNav(props: AppSidebarProps) {
+  const { session } = props
   const [open, setOpen] = useState(false)
   const organizationId = session?.organization.id
   const previousOrganizationId = useRef(organizationId)
@@ -41,12 +42,7 @@ export function MobileNav({ session, identity, inboxPendingCount }: AppSidebarPr
         >
           <DialogTitle className="sr-only">Menu</DialogTitle>
           <div className="flex min-h-0 flex-1 flex-col px-3 py-5">
-            <SidebarContent
-              session={session}
-              identity={identity}
-              inboxPendingCount={inboxPendingCount}
-              onNavigate={() => setOpen(false)}
-            />
+            <SidebarContent {...props} onNavigate={() => setOpen(false)} />
           </div>
         </DialogContent>
       </Dialog>

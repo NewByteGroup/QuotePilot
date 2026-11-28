@@ -16,6 +16,7 @@ export type AppSidebarProps = {
   session?: Schemas['Session']
   identity?: Schemas['CompanyIdentity']
   inboxPendingCount?: number
+  showOpsConsole?: boolean
 }
 
 export type SidebarContentProps = AppSidebarProps & {
@@ -59,6 +60,7 @@ export function SidebarContent({
   session,
   identity,
   inboxPendingCount,
+  showOpsConsole,
   onNavigate,
 }: SidebarContentProps) {
   const { pathname } = useLocation()
@@ -68,6 +70,21 @@ export function SidebarContent({
   const user = session?.user
   const companyName = identity?.legalName ?? organization?.name
   const canSwitchOrganization = (session?.organizations.length ?? 0) > 1
+  const platformItems: NavItem[] = [
+    {
+      label: 'Conectores',
+      to: '/conectores',
+      active: pathname.startsWith('/conectores'),
+    },
+    {
+      label: 'Auto-reparo',
+      to: '/auto-reparo',
+      active: pathname.startsWith('/auto-reparo'),
+    },
+  ]
+  if (showOpsConsole) {
+    platformItems.push({ label: 'Ops Console', to: '/ops', active: pathname.startsWith('/ops') })
+  }
 
   const organizationCard = (
     <button
@@ -127,22 +144,7 @@ export function SidebarContent({
             { label: 'Tarifas & regras', to: '/tarifas', active: pathname.startsWith('/tarifas') },
           ]}
         />
-        <NavSection
-          title="Plataforma"
-          onNavigate={onNavigate}
-          items={[
-            {
-              label: 'Conectores',
-              to: '/conectores',
-              active: pathname.startsWith('/conectores'),
-            },
-            {
-              label: 'Auto-reparo',
-              to: '/auto-reparo',
-              active: pathname.startsWith('/auto-reparo'),
-            },
-          ]}
-        />
+        <NavSection title="Plataforma" onNavigate={onNavigate} items={platformItems} />
       </nav>
 
       {user ? (

@@ -7,6 +7,7 @@ import { LoginPage } from '@/features/auth/login-page'
 import { RequireAuth } from '@/features/auth/require-auth'
 import { SetPasswordPage } from '@/features/auth/set-password-page'
 import { InboxPage } from '@/features/inbox/inbox-page'
+import { OpsConsolePage } from '@/features/ops/ops-console-page'
 import { ConnectorsPage } from '@/features/platform/connectors-page'
 import { RepairsPage } from '@/features/platform/repairs-page'
 import { ApprovalEmailPage } from '@/features/quote-audit/approval-email-page'
@@ -34,6 +35,7 @@ export function AppRoutes() {
             <Route path="identidade" element={<IdentityTab />} />
           </Route>
           <Route path="conectores" element={<ConnectorsPage />} />
+          <Route path="ops" element={<OpsConsolePage />} />
           <Route path="auto-reparo" element={<RepairsPage />} />
         </Route>
       </Route>

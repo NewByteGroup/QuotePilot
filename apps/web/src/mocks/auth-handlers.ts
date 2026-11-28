@@ -7,6 +7,7 @@ import { API_BASE_URL } from '@/api/client'
 
 import { ORGANIZATIONS, sessionFixture } from './fixtures'
 import { MOCK_LOGIN_TOKEN, MOCK_PASSWORD, MOCK_RESET_TOKEN } from './demo-credentials'
+import { opsConnectorFixtures, opsHealingFixtures, opsQuarantineFixtures } from './ops-fixtures'
 
 const http = createOpenApiHttp<paths>({ baseUrl: API_BASE_URL })
 
@@ -100,6 +101,27 @@ export const authHandlers = [
   http.get('/me', ({ response }) =>
     isSignedIn()
       ? response(200).json({ ...mockProfile, memberships: mockMemberships })
+      : response(401).json(UNAUTHENTICATED),
+  ),
+  // Ops is platform-admin-only in core-api. The mock user represents the
+  // developer/admin case so the console stays usable in local development.
+  http.get('/ops/quarantine', ({ query, response }) => {
+    if (!isSignedIn()) return response(401).json(UNAUTHENTICATED)
+    const limit = Math.min(Math.max(Number(query.get('limit') ?? 50), 1), 200)
+    const offset = Math.max(Number(query.get('offset') ?? 0), 0)
+    return response(200).json({
+      items: opsQuarantineFixtures.slice(offset, offset + limit),
+      total: opsQuarantineFixtures.length,
+    })
+  }),
+  http.get('/ops/connectors', ({ response }) =>
+    isSignedIn()
+      ? response(200).json({ items: opsConnectorFixtures })
+      : response(401).json(UNAUTHENTICATED),
+  ),
+  http.get('/ops/healing', ({ response }) =>
+    isSignedIn()
+      ? response(200).json({ items: opsHealingFixtures })
       : response(401).json(UNAUTHENTICATED),
   ),
 ]
